@@ -20,6 +20,7 @@ use crate::{
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
+    stats::BackupStats,
     storage::Storage,
 };
 
@@ -50,7 +51,8 @@ use crate::{
 /// let opts = BackupOptions::all();
 ///
 /// let engine = BackupEngine::new(client, storage, git, out, opts);
-/// engine.run("octocat").await?;
+/// let stats = engine.run("octocat").await?;
+/// println!("{stats}");
 /// # Ok(())
 /// # }
 /// ```
@@ -92,12 +94,13 @@ where
     /// - For org targets, fetches repositories via the org repos API.
     ///
     /// Per-repository errors are logged as warnings but do not abort the run.
-    /// Returns the first fatal error (e.g. an auth failure on the repo list).
+    /// Returns [`BackupStats`] with counters for everything that was processed.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError`] on fatal errors (auth, network, filesystem).
-    pub async fn run(&self, owner: &str) -> Result<(), CoreError> {
+    pub async fn run(&self, owner: &str) -> Result<BackupStats, CoreError> {
+        let stats = BackupStats::new();
         info!(owner, dry_run = self.opts.dry_run, "starting backup");
 
         if self.opts.dry_run {
@@ -117,7 +120,7 @@ where
 
         // ── Gists ──────────────────────────────────────────────────────────
         let clone_opts = self.make_clone_opts();
-        backup_gists(
+        let gist_count = backup_gists(
             &self.client,
             owner,
             &self.opts,
@@ -128,15 +131,19 @@ where
             &clone_opts,
         )
         .await?;
+        for _ in 0..gist_count {
+            stats.inc_gists();
+        }
 
         // ── Repositories ───────────────────────────────────────────────────
         let repos = self.fetch_repos(owner).await?;
         info!(owner, count = repos.len(), "fetched repository list");
+        stats.add_discovered(repos.len() as u64);
 
-        self.backup_repos_concurrent(owner, repos).await;
+        self.backup_repos_concurrent(owner, repos, &stats).await;
 
-        info!(owner, "backup complete");
-        Ok(())
+        info!(owner, %stats, "backup complete");
+        Ok(stats)
     }
 
     /// Fetches the repository list using the user or org API as appropriate.
@@ -148,7 +155,12 @@ where
     }
 
     /// Backs up repositories concurrently, honouring `opts.concurrency`.
-    async fn backup_repos_concurrent(&self, owner: &str, repos: Vec<Repository>) {
+    async fn backup_repos_concurrent(
+        &self,
+        owner: &str,
+        repos: Vec<Repository>,
+        stats: &BackupStats,
+    ) {
         let concurrency = self.opts.concurrency.max(1);
         let sem = Arc::new(Semaphore::new(concurrency));
 
@@ -168,6 +180,7 @@ where
             let opts = self.opts.clone();
             let owner = owner.to_string();
             let clone_opts = self.make_clone_opts();
+            let task_stats = stats.handle();
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
@@ -182,12 +195,22 @@ where
                     &clone_opts,
                 )
                 .await;
-                if let Err(e) = result {
-                    error!(
-                        repo = %repo.full_name,
-                        error = %e,
-                        "repository backup failed, continuing"
-                    );
+                match result {
+                    Ok(backed_up) => {
+                        if backed_up {
+                            task_stats.inc_backed_up();
+                        } else {
+                            task_stats.inc_skipped();
+                        }
+                    }
+                    Err(e) => {
+                        task_stats.inc_errored();
+                        error!(
+                            repo = %repo.full_name,
+                            error = %e,
+                            "repository backup failed, continuing"
+                        );
+                    }
                 }
             });
             handles.push(handle);
@@ -221,6 +244,9 @@ where
 
 /// Backs up a single repository: metadata JSON + git mirror + sub-categories.
 ///
+/// Returns `true` if the repository was backed up, `false` if it was skipped
+/// (filtered out by fork/private settings or dry-run mode).
+///
 /// Extracted as a free function so it can be spawned as an independent task.
 async fn backup_one_repo<S, G>(
     client: &GitHubClient,
@@ -231,7 +257,7 @@ async fn backup_one_repo<S, G>(
     owner: &str,
     repo: &Repository,
     clone_opts: &CloneOptions,
-) -> Result<(), CoreError>
+) -> Result<bool, CoreError>
 where
     S: Storage,
     G: GitRunner,
@@ -239,12 +265,12 @@ where
     use crate::backup::repository::should_include;
 
     if !should_include(repo, opts) {
-        return Ok(());
+        return Ok(false);
     }
 
     if opts.dry_run {
         info!(repo = %repo.full_name, "dry-run: would back up repository");
-        return Ok(());
+        return Ok(false);
     }
 
     let repos_dir = output.repos_dir(owner);
@@ -255,7 +281,7 @@ where
     backup_wiki(repo, opts, &wikis_dir, git, clone_opts).await?;
     backup_repo_metadata(client, storage, opts, owner, repo, &meta_dir).await?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// Backs up all enabled JSON metadata for a repository.

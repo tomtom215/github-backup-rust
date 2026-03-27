@@ -18,7 +18,7 @@
 //! | Authentication | Personal access token (classic & fine-grained) |
 //! | Pagination | Automatic via `Link` response header |
 //! | Rate limiting | Automatic back-off when `X-RateLimit-Remaining == 0` |
-//! | Retries | Configurable retry on transient 5xx responses |
+//! | Retries | Up to 3 retries on transient 5xx responses (exponential back-off) |
 //! | TLS | rustls with platform CA bundle |
 //!
 //! # Example
@@ -40,11 +40,13 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+mod api_client;
 mod client;
 mod error;
 mod pagination;
 mod rate_limit;
 
+pub use api_client::{BackupClient, BoxFuture};
 pub use client::GitHubClient;
 pub use error::ClientError;
 pub use pagination::parse_next_link;

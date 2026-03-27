@@ -18,11 +18,15 @@
 //! |-------|---------|
 //! [`Storage`] | Read/write JSON artefacts and binary asset files |
 //! [`GitRunner`] | Execute git clone/fetch as a subprocess |
+//! [`BackupClient`] | Abstract over the GitHub API (production: [`GitHubClient`]) |
 //! [`BackupEngine`] | Orchestrate a full backup of an owner |
 //!
-//! The production implementations ([`FsStorage`], [`ProcessGitRunner`]) use
-//! the real filesystem and real `git` binary. Tests substitute lightweight
-//! in-memory or no-op replacements.
+//! The production implementations ([`FsStorage`], [`ProcessGitRunner`],
+//! [`GitHubClient`]) use the real filesystem, the real `git` binary, and live
+//! HTTPS connections. Tests substitute lightweight in-memory stubs.
+//!
+//! [`BackupClient`]: github_backup_client::BackupClient
+//! [`GitHubClient`]: github_backup_client::GitHubClient
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -32,9 +36,11 @@ pub mod backup;
 pub mod engine;
 pub mod error;
 pub mod git;
+pub mod stats;
 pub mod storage;
 
 pub use engine::BackupEngine;
 pub use error::CoreError;
 pub use git::{GitRunner, ProcessGitRunner};
+pub use stats::BackupStats;
 pub use storage::{FsStorage, Storage};
