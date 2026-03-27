@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
-use tracing::error;
+use tracing::{error, info};
 
 use github_backup_client::GitHubClient;
 use github_backup_core::{BackupEngine, FsStorage, ProcessGitRunner};
@@ -63,7 +63,16 @@ async fn main() -> ExitCode {
     );
 
     match engine.run(&owner).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(stats) => {
+            info!(
+                repos_backed_up = stats.repos_backed_up(),
+                repos_skipped = stats.repos_skipped(),
+                repos_errored = stats.repos_errored(),
+                gists_backed_up = stats.gists_backed_up(),
+                "backup complete"
+            );
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             error!("backup failed: {e}");
             ExitCode::FAILURE

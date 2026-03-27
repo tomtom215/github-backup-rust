@@ -28,9 +28,11 @@ followers, following, starred repositories, and watched repositories.
 - **No reqwest**: uses [hyper](https://crates.io/crates/hyper) directly
 - **Minimal dependencies**: 12 direct runtime dependencies
 - **Async throughout**: built on [tokio](https://crates.io/crates/tokio)
-- **Trait-based**: `Storage` and `GitRunner` traits enable full unit-test coverage without network or filesystem access
+- **Trait-based**: `BackupClient`, `Storage`, and `GitRunner` traits enable full unit-test coverage without network or filesystem access
 - **Zero unsafe code**: `#![deny(unsafe_op_in_unsafe_fn)]` workspace-wide
 - **Zero clippy warnings**: enforced with `-D warnings`
+- **Transient resilience**: up to 3 retries with exponential back-off on 5xx responses
+- **RAII cleanup**: `GIT_ASKPASS` helper scripts are removed by Drop even on panic
 
 ## Installation
 
@@ -104,6 +106,7 @@ github-backup octocat --output /var/backup/github --all
         ├── repos/
         │   └── <repo-name>/
         │       ├── info.json
+        │       ├── topics.json
         │       ├── issues.json
         │       ├── issue_comments/<number>.json
         │       ├── issue_events/<number>.json
@@ -127,14 +130,62 @@ github-backup octocat --output /var/backup/github --all
         └── following.json
 ```
 
+### Run summary
+
+After a successful backup run the tool logs a structured summary:
+
+```
+INFO backup complete repos=42 backed_up=40 skipped=1 errored=1 gists=5
+```
+
+The same counters are also emitted as a human-readable `Display` line at
+`INFO` level:
+
+```
+repos: 40 backed up, 1 skipped, 1 errored; gists: 5 backed up
+```
+
 ## Workspace crates
 
 | Crate | Purpose |
 |-------|---------|
 | `github-backup-types` | GitHub API response types + backup configuration |
-| `github-backup-client` | Async HTTP client (hyper + rustls), pagination, rate limiting |
-| `github-backup-core` | Backup engine: orchestration, `Storage` and `GitRunner` traits |
+| `github-backup-client` | Async HTTP client (hyper + rustls), pagination, rate-limit handling, 5xx retry; exposes the `BackupClient` trait |
+| `github-backup-core` | Backup engine: orchestration, `Storage` and `GitRunner` traits, `BackupStats` |
 | `github-backup` | CLI binary (clap) |
+
+### `BackupClient` trait
+
+All HTTP operations are hidden behind an object-safe `BackupClient` trait
+defined in `github-backup-client`:
+
+```rust
+pub trait BackupClient: Send + Sync {
+    fn list_user_repos<'a>(
+        &'a self,
+        username: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Repository>, ClientError>>;
+    // … 20 more methods
+}
+```
+
+`BoxFuture<'a, T>` is `Pin<Box<dyn Future<Output = T> + Send + 'a>>`.
+`GitHubClient` in `github-backup-client` implements the trait; unit tests
+in `github-backup-core` use an in-process `MockBackupClient` that returns
+pre-loaded fixture data without touching the network.
+
+### `BackupStats`
+
+`BackupStats` uses lock-free `AtomicU64` counters wrapped in an `Arc` so
+each concurrently spawned tokio task can increment counters without
+contention:
+
+```rust
+let stats = BackupStats::default();
+let handle = stats.handle(); // cheap Arc clone
+tokio::spawn(async move { handle.inc_repos_backed_up(); });
+println!("{stats}"); // "repos: 1 backed up, 0 skipped, 0 errored; gists: 0 backed up"
+```
 
 ## Development
 
@@ -143,7 +194,20 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo doc --no-deps --workspace
 ```
+
+### Architecture notes
+
+- `github-backup-client/src/client/` is split into `mod.rs` (HTTP machinery,
+  pagination, rate-limit retry, 5xx exponential back-off) and `endpoints.rs`
+  (one method per API endpoint), keeping each file well under 500 lines.
+- `github-backup-core/src/backup/` has one file per backup domain
+  (`issue.rs`, `pull_request.rs`, `release.rs`, `gist.rs`, `user_data.rs`)
+  each with its own `#[cfg(test)]` suite driven by `MockBackupClient`.
+- `GIT_ASKPASS` scripts are managed by the `AskpassScript` RAII guard in
+  `github-backup-core/src/git.rs`; the temp file is removed by `Drop` even
+  if the git command panics.
 
 ## License
 

@@ -14,3 +14,6 @@ pub mod release;
 pub mod repository;
 pub mod user_data;
 pub mod wiki;
+
+#[cfg(test)]
+pub(crate) mod mock_client;

@@ -142,16 +142,26 @@ fn run_git(args: &[&str], cwd: &Path, in_cwd: bool, token: Option<&str>) -> Resu
 
     // Inject token via GIT_ASKPASS to avoid embedding it in the URL or
     // having it appear in process listings.
+    // If a token is provided, write a temporary GIT_ASKPASS script and keep
+    // the guard alive until after `cmd.output()` so the file exists when git
+    // tries to execute it.  The guard deletes the file on drop.
+    let _askpass_guard;
     if let Some(tok) = token {
-        // git calls the ASKPASS program with a prompt on stdin; we ignore the
-        // prompt and always return the token as the password.
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
-        cmd.env("GIT_ASKPASS", build_askpass_script(tok));
-        // Username is always "x-access-token" for GitHub token auth.
-        cmd.env("GIT_USERNAME", "x-access-token");
+        _askpass_guard = AskpassScript::create(tok);
+        if let Some(ref script) = _askpass_guard {
+            // git calls the ASKPASS program with a prompt; we ignore the prompt
+            // and always return the token as the password.
+            cmd.env("GIT_TERMINAL_PROMPT", "0");
+            cmd.env("GIT_ASKPASS", script.path());
+            // Username is always "x-access-token" for GitHub token auth.
+            cmd.env("GIT_USERNAME", "x-access-token");
+        }
+    } else {
+        _askpass_guard = None;
     }
 
     let output = cmd.output().map_err(CoreError::GitSpawn)?;
+    // _askpass_guard is dropped here, cleaning up the temp file.
 
     if output.status.success() {
         return Ok(());
@@ -166,44 +176,61 @@ fn run_git(args: &[&str], cwd: &Path, in_cwd: bool, token: Option<&str>) -> Resu
     })
 }
 
-/// Returns the path to a temporary `GIT_ASKPASS` script that echoes `token`.
+/// RAII guard for a temporary `GIT_ASKPASS` shell script.
 ///
-/// On Unix we write a tiny shell script. The file is created in `/tmp` and
-/// made executable. Git executes it when it needs a password; the script
-/// simply prints the token.
-///
-/// # Panics
-///
-/// Does not panic; returns a static fallback string on I/O failure, causing
-/// git to use no credential (which will fail with an auth error rather than
-/// silently).
-fn build_askpass_script(token: &str) -> String {
-    let script = format!("#!/bin/sh\necho '{}'", token.replace('\'', "'\\''"));
-
-    // Write to a temp file and make it executable.
-    let tmp = match tempfile_path() {
-        Some(p) => p,
-        None => return String::new(),
-    };
-
-    if std::fs::write(&tmp, script.as_bytes()).is_err() {
-        return String::new();
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700));
-    }
-
-    tmp.to_string_lossy().into_owned()
+/// The script is written to a uniquely-named file in the system temp
+/// directory. When the guard is dropped the file is deleted, ensuring no
+/// credentials are left on disk after the git subprocess exits.
+struct AskpassScript {
+    path: std::path::PathBuf,
 }
 
-/// Returns a path for a temporary askpass script.
-fn tempfile_path() -> Option<std::path::PathBuf> {
-    let mut p = std::env::temp_dir();
-    p.push(format!("gh-backup-askpass-{}.sh", std::process::id()));
-    Some(p)
+impl AskpassScript {
+    /// Creates the script file and returns a guard, or `None` on I/O failure.
+    ///
+    /// On failure git will receive an empty `GIT_ASKPASS` and authentication
+    /// will fail with an auth error rather than hanging.
+    fn create(token: &str) -> Option<Self> {
+        let script = format!("#!/bin/sh\necho '{}'", token.replace('\'', "'\\''"));
+
+        let mut path = std::env::temp_dir();
+        // Use both PID and a random-ish component to avoid collisions when
+        // the same process runs concurrent git operations.
+        path.push(format!(
+            "gh-backup-askpass-{}-{}.sh",
+            std::process::id(),
+            // Mix in the thread id for uniqueness within the same process.
+            format!("{:?}", std::thread::current().id())
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>(),
+        ));
+
+        if std::fs::write(&path, script.as_bytes()).is_err() {
+            return None;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        }
+
+        Some(Self { path })
+    }
+
+    /// Returns the path to the askpass script file.
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for AskpassScript {
+    fn drop(&mut self) {
+        // Best-effort removal; ignore errors (e.g. if the file was already
+        // cleaned up by a signal handler or the OS on process exit).
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(test)]

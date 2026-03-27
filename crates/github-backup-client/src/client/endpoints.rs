@@ -1,90 +1,28 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! [`GitHubClient`] — the primary entry point for GitHub API interactions.
-
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+//! GitHub REST API endpoint methods.
+//!
+//! All public methods on [`GitHubClient`] that hit a specific API endpoint
+//! are grouped here by resource category. The underlying HTTP machinery
+//! lives in the parent module.
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::{Method, Request, StatusCode};
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
-use tracing::{debug, warn};
+use http_body_util::Full;
+use hyper::Method;
+use tracing::info;
 
-use github_backup_types::config::Credential;
 use github_backup_types::{
     Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest, PullRequestComment,
     PullRequestCommit, PullRequestReview, Release, Repository, SecurityAdvisory, User,
 };
 
 use crate::error::ClientError;
-use crate::pagination::parse_next_link;
-use crate::rate_limit::RateLimitInfo;
 
-const GITHUB_API_BASE: &str = "https://api.github.com";
-const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
-const PER_PAGE: u32 = 100;
-/// Maximum number of times to retry a rate-limited request.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
-/// Default request timeout. GitHub's API can be slow for large repos.
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
-
-type HyperClient = Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
->;
-
-/// Async GitHub REST API v3 client.
-///
-/// Construct via [`GitHubClient::new`]. The client is cheaply cloneable
-/// (the underlying hyper connection pool is `Arc`-wrapped).
-#[derive(Clone)]
-pub struct GitHubClient {
-    http: HyperClient,
-    credential: Credential,
-}
-
-impl std::fmt::Debug for GitHubClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GitHubClient")
-            .field("credential", &"[redacted]")
-            .finish()
-    }
-}
+use super::{collect_body, GitHubClient, DEFAULT_TIMEOUT_SECS, GITHUB_API_BASE, PER_PAGE};
 
 impl GitHubClient {
-    /// Creates a new [`GitHubClient`] using the system CA certificate bundle.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
-    pub fn new(credential: Credential) -> Result<Self, ClientError> {
-        let tls_config = build_tls_config()?;
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_only()
-            .enable_http1()
-            .build();
-
-        let http = Client::builder(TokioExecutor::new()).build(https);
-
-        Ok(Self { http, credential })
-    }
-
-    /// Returns the raw token string if the credential is a [`Credential::Token`],
-    /// or `None` for other credential types.
-    ///
-    /// Used by the backup engine to inject the token into git clone commands
-    /// for HTTPS authentication on private repositories.
-    #[must_use]
-    pub fn token(&self) -> Option<String> {
-        match &self.credential {
-            Credential::Token(t) => Some(t.clone()),
-        }
-    }
-
-    // ── User & org endpoints ──────────────────────────────────────────────
+    // ── User & org repos ──────────────────────────────────────────────────
 
     /// Lists repositories owned by a user.
     ///
@@ -108,6 +46,8 @@ impl GitHubClient {
         let url = format!("{GITHUB_API_BASE}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
+
+    // ── User social data ──────────────────────────────────────────────────
 
     /// Returns the followers of a user.
     ///
@@ -356,9 +296,12 @@ impl GitHubClient {
         self.get_all_pages(&url).await
     }
 
+    // ── Assets ────────────────────────────────────────────────────────────
+
     /// Downloads a release asset and returns the raw bytes.
     ///
     /// Uses the `application/octet-stream` accept header required by GitHub.
+    /// Follows HTTP redirects (GitHub redirects asset downloads to S3).
     ///
     /// # Errors
     ///
@@ -378,7 +321,7 @@ impl GitHubClient {
                 .map_err(ClientError::Http)?;
 
             let response = tokio::time::timeout(
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
                 self.http.request(req),
             )
             .await
@@ -419,171 +362,50 @@ impl GitHubClient {
         }
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────
-
-    /// Fetches all pages of a paginated endpoint, collecting results into
-    /// a single `Vec<T>`.
-    async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Vec<T>, ClientError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let mut results = Vec::new();
-        let mut next_url: Option<String> = Some(initial_url.to_string());
-
-        while let Some(url) = next_url.take() {
-            debug!(url = %url, "GET");
-            let (page, link_header) = self.get_json_with_link::<Vec<T>>(&url).await?;
-            results.extend(page);
-            next_url = link_header.as_deref().and_then(parse_next_link);
-        }
-
-        Ok(results)
-    }
-
-    /// Performs a single GET request and returns the deserialised body along
-    /// with the raw `Link` header value (if present).
-    async fn get_json_with_link<T>(&self, url: &str) -> Result<(T, Option<String>), ClientError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let mut retries = 0u32;
-
-        loop {
-            let req = self
-                .build_request(Method::GET, url)?
-                .header("Accept", "application/vnd.github.v3+json")
-                .body(Full::new(Bytes::new()))
-                .map_err(ClientError::Http)?;
-
-            let response = tokio::time::timeout(
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                self.http.request(req),
-            )
-            .await
-            .map_err(|_| ClientError::Timeout {
-                url: url.to_string(),
-            })??;
-            let status = response.status();
-            let headers = response.headers().clone();
-
-            let rate_info = RateLimitInfo::from_headers(&headers);
-
-            // Handle rate limiting (403 or 429 with Retry-After / RateLimit headers)
-            if (status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS)
-                && rate_info.map(|r| r.is_exhausted()).unwrap_or(false)
-            {
-                if retries >= MAX_RATE_LIMIT_RETRIES {
-                    let wait = rate_info
-                        .map(|r| r.seconds_until_reset(unix_now()))
-                        .unwrap_or(60);
-                    return Err(ClientError::RateLimitExceeded {
-                        retry_after_secs: wait,
-                    });
-                }
-
-                let wait = rate_info
-                    .map(|r| r.seconds_until_reset(unix_now()).max(1))
-                    .unwrap_or(60);
-
-                warn!(wait_secs = wait, "rate limit hit, sleeping");
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                retries += 1;
-                continue;
-            }
-
-            if !status.is_success() {
-                let body = collect_body(response.into_body()).await?;
-                return Err(ClientError::ApiError {
-                    status: status.as_u16(),
-                    body: String::from_utf8_lossy(&body).into_owned(),
-                });
-            }
-
-            let link_header = headers
-                .get("link")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-
-            let body = collect_body(response.into_body()).await?;
-            let parsed: T = serde_json::from_slice(&body)?;
-
-            return Ok((parsed, link_header));
-        }
-    }
-
-    /// Builds a [`hyper::http::request::Builder`] pre-populated with auth
-    /// and user-agent headers.
-    fn build_request(
+    /// Returns the topics configured on a repository.
+    ///
+    /// Requires the `application/vnd.github.mercy-preview+json` accept header;
+    /// this is now GA but the method still exists for completeness.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_repo_topics(
         &self,
-        method: Method,
-        url: &str,
-    ) -> Result<hyper::http::request::Builder, ClientError> {
-        Ok(Request::builder()
-            .method(method)
-            .uri(url)
-            .header("Authorization", self.credential.authorization_header())
-            .header("User-Agent", USER_AGENT))
-    }
-}
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<String>, ClientError> {
+        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/topics");
 
-/// Returns the current time as a Unix timestamp in seconds.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+        let req = self
+            .build_request(Method::GET, &url)?
+            .header("Accept", "application/vnd.github.v3+json")
+            .body(Full::new(Bytes::new()))
+            .map_err(ClientError::Http)?;
 
-/// Collects a hyper body into a [`Bytes`] buffer.
-async fn collect_body(
-    body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
-) -> Result<Bytes, ClientError> {
-    Ok(body.collect().await?.to_bytes())
-}
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout { url: url.clone() })??;
 
-/// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
-fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
-    let mut root_store = rustls::RootCertStore::empty();
-    // rustls-native-certs 0.8 returns CertificateResult (not a Result<>).
-    // Errors loading individual certs are non-fatal; we surface them only if
-    // the store ends up empty.
-    let cert_result = rustls_native_certs::load_native_certs();
-    if cert_result.certs.is_empty() {
-        let msg = cert_result
-            .errors
-            .first()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "no CA certificates found".to_string());
-        return Err(ClientError::Tls(msg));
-    }
-    root_store.add_parsable_certificates(cert_result.certs);
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    Ok(config)
-}
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = collect_body(response.into_body()).await?;
+            return Err(ClientError::ApiError {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use github_backup_types::config::Credential;
-
-    #[test]
-    fn github_client_new_succeeds_with_token() {
-        let cred = Credential::Token("ghp_test".to_string());
-        let result = GitHubClient::new(cred);
-        assert!(result.is_ok(), "client construction should succeed");
-    }
-
-    #[test]
-    fn github_client_debug_redacts_credential() {
-        let cred = Credential::Token("secret_token".to_string());
-        let client = GitHubClient::new(cred).expect("construct client");
-        let debug_str = format!("{client:?}");
-        assert!(
-            !debug_str.contains("secret_token"),
-            "credential must be redacted in Debug output"
-        );
-        assert!(debug_str.contains("[redacted]"));
+        let body = collect_body(response.into_body()).await?;
+        #[derive(serde::Deserialize)]
+        struct TopicsResponse {
+            names: Vec<String>,
+        }
+        let parsed: TopicsResponse = serde_json::from_slice(&body)?;
+        info!(owner, repo, count = parsed.names.len(), "fetched topics");
+        Ok(parsed.names)
     }
 }
