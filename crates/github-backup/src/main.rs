@@ -3,9 +3,11 @@
 
 //! `github-backup` binary entry point.
 
+use std::io;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Shell};
 use tracing::error;
 
 use github_backup_client::GitHubClient;
@@ -18,6 +20,18 @@ use cli::Args;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Check for --completions <shell> before full arg parsing so it works
+    // even when required args (token, owner) are absent.
+    if let Some(shell) = detect_completions_request() {
+        generate(
+            shell,
+            &mut Args::command(),
+            "github-backup",
+            &mut io::stdout(),
+        );
+        return ExitCode::SUCCESS;
+    }
+
     let args = Args::parse();
 
     // Initialise structured logging.
@@ -55,6 +69,18 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Checks raw args for `--completions <shell>` before clap parses them,
+/// returning the requested [`Shell`] if found.
+fn detect_completions_request() -> Option<Shell> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--completions" {
+            return args.next().and_then(|s| s.parse().ok());
+        }
+    }
+    None
 }
 
 /// Initialises the `tracing` subscriber.

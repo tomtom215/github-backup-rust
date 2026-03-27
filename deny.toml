@@ -1,0 +1,55 @@
+# cargo-deny configuration
+# Run: cargo deny check
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = []
+
+# ── Licenses ──────────────────────────────────────────────────────────────────
+
+[licenses]
+# Only allow OSI-approved permissive licences.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",        # rustls, webpki
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ── Banned crates ─────────────────────────────────────────────────────────────
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+# These crates pull in OpenSSL or are superseded by our chosen stack.
+deny = [
+    { crate = "openssl-sys", reason = "use rustls instead" },
+    { crate = "openssl",     reason = "use rustls instead" },
+    { crate = "reqwest",     reason = "use hyper + hyper-rustls directly" },
+    { crate = "native-tls",  reason = "use rustls instead" },
+]
+
+# ── Security advisories ───────────────────────────────────────────────────────
+
+[advisories]
+# Fetch the OSV advisory database.
+version = 2
+ignore = []
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

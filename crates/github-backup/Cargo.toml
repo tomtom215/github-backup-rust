@@ -18,6 +18,7 @@ github-backup-client = { workspace = true }
 github-backup-core = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }

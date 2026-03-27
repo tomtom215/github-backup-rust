@@ -9,20 +9,14 @@ use tracing::info;
 
 use github_backup_types::{config::BackupOptions, Repository};
 
-use crate::{error::CoreError, git::GitRunner, storage::Storage};
+use crate::{
+    error::CoreError,
+    git::{CloneOptions, GitRunner},
+    storage::Storage,
+};
 
 /// Backs up a single repository by writing its metadata JSON and performing a
 /// bare mirror clone (or update if already cloned).
-///
-/// # Arguments
-///
-/// - `client`  – authenticated GitHub API client
-/// - `repo`    – repository metadata already fetched from the API
-/// - `opts`    – which backup categories are enabled
-/// - `repos_dir` – parent directory for bare git clones
-/// - `meta_dir`  – parent directory for per-repository JSON metadata
-/// - `storage` – storage backend
-/// - `git`     – git runner for subprocess operations
 ///
 /// # Errors
 ///
@@ -34,6 +28,7 @@ pub async fn backup_repository(
     meta_dir: &Path,
     storage: &impl Storage,
     git: &impl GitRunner,
+    clone_opts: &CloneOptions,
 ) -> Result<(), CoreError> {
     // Skip forks if not requested.
     if repo.fork && !opts.forks {
@@ -61,9 +56,9 @@ pub async fn backup_repository(
         };
 
         if opts.lfs {
-            git.lfs_clone(clone_url, &dest)?;
+            git.lfs_clone(clone_url, &dest, clone_opts)?;
         } else {
-            git.mirror_clone(clone_url, &dest)?;
+            git.mirror_clone(clone_url, &dest, clone_opts)?;
         }
     }
 
@@ -87,7 +82,7 @@ pub fn should_include(repo: &Repository, opts: &BackupOptions) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::test_support::SpyGitRunner;
+    use crate::git::{test_support::SpyGitRunner, CloneOptions};
     use crate::storage::test_support::MemStorage;
     use github_backup_types::{config::BackupOptions, user::User, Repository};
     use std::path::PathBuf;
@@ -139,6 +134,7 @@ mod tests {
             &PathBuf::from("/backup/json/repos/Hello-World"),
             &storage,
             &git,
+            &CloneOptions::unauthenticated(),
         )
         .await
         .expect("backup");
@@ -167,6 +163,7 @@ mod tests {
             &PathBuf::from("/backup/json/repos/Hello-World"),
             &storage,
             &git,
+            &CloneOptions::unauthenticated(),
         )
         .await
         .expect("backup");
@@ -194,6 +191,7 @@ mod tests {
             &PathBuf::from("/backup/json/repos/forked-repo"),
             &storage,
             &git,
+            &CloneOptions::unauthenticated(),
         )
         .await
         .expect("backup");
@@ -221,6 +219,7 @@ mod tests {
             &PathBuf::from("/backup/json/repos/secret"),
             &storage,
             &git,
+            &CloneOptions::unauthenticated(),
         )
         .await
         .expect("backup");

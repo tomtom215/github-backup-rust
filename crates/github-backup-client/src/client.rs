@@ -3,7 +3,7 @@
 
 //! [`GitHubClient`] — the primary entry point for GitHub API interactions.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -27,6 +27,8 @@ const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"
 const PER_PAGE: u32 = 100;
 /// Maximum number of times to retry a rate-limited request.
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+/// Default request timeout. GitHub's API can be slow for large repos.
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 type HyperClient = Client<
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
@@ -68,6 +70,18 @@ impl GitHubClient {
         let http = Client::builder(TokioExecutor::new()).build(https);
 
         Ok(Self { http, credential })
+    }
+
+    /// Returns the raw token string if the credential is a [`Credential::Token`],
+    /// or `None` for other credential types.
+    ///
+    /// Used by the backup engine to inject the token into git clone commands
+    /// for HTTPS authentication on private repositories.
+    #[must_use]
+    pub fn token(&self) -> Option<String> {
+        match &self.credential {
+            Credential::Token(t) => Some(t.clone()),
+        }
     }
 
     // ── User & org endpoints ──────────────────────────────────────────────
@@ -350,24 +364,59 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn download_release_asset(&self, asset_url: &str) -> Result<Bytes, ClientError> {
-        let req = self
-            .build_request(Method::GET, asset_url)?
-            .header("Accept", "application/octet-stream")
-            .body(Full::new(Bytes::new()))
-            .map_err(ClientError::Http)?;
+        // GitHub's asset download endpoint returns an HTTP 302 redirect to S3.
+        // We follow up to 3 redirects manually because hyper's legacy client
+        // does not follow redirects by default.
+        let mut url = asset_url.to_string();
+        let mut remaining_redirects: u8 = 3;
 
-        let response = self.http.request(req).await?;
-        let status = response.status();
+        loop {
+            let req = self
+                .build_request(Method::GET, &url)?
+                .header("Accept", "application/octet-stream")
+                .body(Full::new(Bytes::new()))
+                .map_err(ClientError::Http)?;
 
-        if !status.is_success() {
-            let body = collect_body(response.into_body()).await?;
-            return Err(ClientError::ApiError {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            let response = tokio::time::timeout(
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                self.http.request(req),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout { url: url.clone() })??;
+
+            let status = response.status();
+
+            if status.is_redirection() {
+                if remaining_redirects == 0 {
+                    return Err(ClientError::ApiError {
+                        status: status.as_u16(),
+                        body: "too many redirects".to_string(),
+                    });
+                }
+                remaining_redirects -= 1;
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| ClientError::ApiError {
+                        status: status.as_u16(),
+                        body: "redirect with no Location header".to_string(),
+                    })?
+                    .to_string();
+                url = location;
+                continue;
+            }
+
+            if !status.is_success() {
+                let body = collect_body(response.into_body()).await?;
+                return Err(ClientError::ApiError {
+                    status: status.as_u16(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+            }
+
+            return collect_body(response.into_body()).await;
         }
-
-        collect_body(response.into_body()).await
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -406,7 +455,14 @@ impl GitHubClient {
                 .body(Full::new(Bytes::new()))
                 .map_err(ClientError::Http)?;
 
-            let response = self.http.request(req).await?;
+            let response = tokio::time::timeout(
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                self.http.request(req),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout {
+                url: url.to_string(),
+            })??;
             let status = response.status();
             let headers = response.headers().clone();
 

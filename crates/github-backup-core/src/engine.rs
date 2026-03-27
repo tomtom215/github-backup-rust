@@ -3,10 +3,14 @@
 
 //! The top-level [`BackupEngine`] that orchestrates all backup categories.
 
-use tracing::{error, info};
+use std::sync::Arc;
+
+use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 
 use github_backup_client::GitHubClient;
-use github_backup_types::config::{BackupOptions, OutputConfig};
+use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
+use github_backup_types::Repository;
 
 use crate::{
     backup::{
@@ -15,15 +19,20 @@ use crate::{
         wiki::backup_wiki,
     },
     error::CoreError,
-    git::GitRunner,
+    git::{CloneOptions, GitRunner},
     storage::Storage,
 };
 
 /// Orchestrates a complete backup of a single GitHub owner (user or org).
 ///
-/// The engine is intentionally not object-safe; it is generic over
-/// [`Storage`] and [`GitRunner`] to enable zero-cost, compile-time dispatch
-/// in the common path while remaining fully testable with stub implementations.
+/// The engine is generic over [`Storage`] and [`GitRunner`] for zero-cost,
+/// compile-time dispatch and full testability via stub implementations.
+///
+/// # Concurrency
+///
+/// Repository backups run in parallel up to `opts.concurrency`. Set it to `1`
+/// for fully sequential operation. The API client, storage, and git runner must
+/// all be `Send + Sync` (the production implementations satisfy this).
 ///
 /// # Example
 ///
@@ -56,8 +65,8 @@ pub struct BackupEngine<S, G> {
 
 impl<S, G> BackupEngine<S, G>
 where
-    S: Storage,
-    G: GitRunner,
+    S: Storage + Clone + 'static,
+    G: GitRunner + Clone + 'static,
 {
     /// Creates a new [`BackupEngine`].
     #[must_use]
@@ -79,29 +88,35 @@ where
 
     /// Runs the full backup for `owner`.
     ///
-    /// Fetches repositories from the API, then for each qualifying repository
-    /// runs the enabled backup categories in sequence. Per-repository errors
-    /// are logged but do not abort the entire run.
+    /// - For user targets, fetches repositories via the user repos API.
+    /// - For org targets, fetches repositories via the org repos API.
+    ///
+    /// Per-repository errors are logged as warnings but do not abort the run.
+    /// Returns the first fatal error (e.g. an auth failure on the repo list).
     ///
     /// # Errors
     ///
-    /// Returns the first fatal error (e.g. authentication failure on the
-    /// repository list call). Per-repository failures are treated as warnings.
+    /// Returns [`CoreError`] on fatal errors (auth, network, filesystem).
     pub async fn run(&self, owner: &str) -> Result<(), CoreError> {
-        info!(owner, "starting backup");
+        info!(owner, dry_run = self.opts.dry_run, "starting backup");
+
+        if self.opts.dry_run {
+            warn!("dry-run mode: no files will be written and no git commands will be run");
+        }
 
         // ── User-level data ────────────────────────────────────────────────
-        let owner_json_dir = self.output.owner_json(owner, "");
+        let owner_json_dir = self.output.owner_json_dir(owner);
         backup_user_data(
             &self.client,
             owner,
             &self.opts,
-            std::path::Path::new(owner_json_dir.to_str().unwrap_or("")),
+            &owner_json_dir,
             &self.storage,
         )
         .await?;
 
         // ── Gists ──────────────────────────────────────────────────────────
+        let clone_opts = self.make_clone_opts();
         backup_gists(
             &self.client,
             owner,
@@ -110,163 +125,196 @@ where
             &self.output.gists_meta_dir(owner),
             &self.storage,
             &self.git,
+            &clone_opts,
         )
         .await?;
 
         // ── Repositories ───────────────────────────────────────────────────
-        let repos = self.client.list_user_repos(owner).await?;
+        let repos = self.fetch_repos(owner).await?;
         info!(owner, count = repos.len(), "fetched repository list");
 
-        for repo in &repos {
-            if let Err(e) = self.backup_one_repo(owner, repo).await {
-                error!(
-                    repo = %repo.full_name,
-                    error = %e,
-                    "repository backup failed, continuing"
-                );
-            }
-        }
+        self.backup_repos_concurrent(owner, repos).await;
 
         info!(owner, "backup complete");
         Ok(())
     }
 
-    /// Backs up a single repository: git clone + all enabled metadata.
-    async fn backup_one_repo(
-        &self,
-        owner: &str,
-        repo: &github_backup_types::Repository,
-    ) -> Result<(), CoreError> {
-        use crate::backup::repository::should_include;
-
-        if !should_include(repo, &self.opts) {
-            return Ok(());
+    /// Fetches the repository list using the user or org API as appropriate.
+    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Repository>, CoreError> {
+        match self.opts.target {
+            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?),
+            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?),
         }
-
-        let repos_dir = self.output.repos_dir(owner);
-        let wikis_dir = self.output.wikis_dir(owner);
-        let meta_dir = self.output.repo_meta_dir(owner, &repo.name);
-
-        // Repository git mirror.
-        backup_repository(
-            repo,
-            &self.opts,
-            &repos_dir,
-            &meta_dir,
-            &self.storage,
-            &self.git,
-        )
-        .await?;
-
-        // Wiki git mirror.
-        backup_wiki(repo, &self.opts, &wikis_dir, &self.git).await?;
-
-        // Repository metadata.
-        self.backup_repo_metadata(owner, repo, &meta_dir).await?;
-
-        Ok(())
     }
 
-    /// Backs up all enabled JSON metadata for a repository.
-    async fn backup_repo_metadata(
-        &self,
-        owner: &str,
-        repo: &github_backup_types::Repository,
-        meta_dir: &std::path::Path,
-    ) -> Result<(), CoreError> {
-        // Issues (+ comments + events)
-        backup_issues(
-            &self.client,
-            owner,
-            &repo.name,
-            &self.opts,
-            meta_dir,
-            &self.storage,
-        )
-        .await?;
+    /// Backs up repositories concurrently, honouring `opts.concurrency`.
+    async fn backup_repos_concurrent(&self, owner: &str, repos: Vec<Repository>) {
+        let concurrency = self.opts.concurrency.max(1);
+        let sem = Arc::new(Semaphore::new(concurrency));
 
-        // Pull requests (+ comments + commits + reviews)
-        backup_pull_requests(
-            &self.client,
-            owner,
-            &repo.name,
-            &self.opts,
-            meta_dir,
-            &self.storage,
-        )
-        .await?;
+        let mut handles = Vec::with_capacity(repos.len());
 
-        // Releases (+ asset downloads)
-        backup_releases(
-            &self.client,
-            owner,
-            &repo.name,
-            &self.opts,
-            meta_dir,
-            &self.storage,
-        )
-        .await?;
-
-        // Labels
-        if self.opts.labels {
-            let labels = self.client.list_labels(owner, &repo.name).await?;
-            self.storage
-                .write_json(&meta_dir.join("labels.json"), &labels)?;
-        }
-
-        // Milestones
-        if self.opts.milestones {
-            let milestones = self.client.list_milestones(owner, &repo.name).await?;
-            self.storage
-                .write_json(&meta_dir.join("milestones.json"), &milestones)?;
-        }
-
-        // Hooks
-        if self.opts.hooks {
-            match self.client.list_hooks(owner, &repo.name).await {
-                Ok(hooks) => {
-                    self.storage
-                        .write_json(&meta_dir.join("hooks.json"), &hooks)?;
-                }
-                Err(github_backup_client::ClientError::ApiError { status: 404, .. }) => {
-                    // Hooks require admin access; skip silently if insufficient.
-                    info!(repo = %repo.full_name, "skipping hooks (no admin access)");
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        // Security advisories
-        if self.opts.security_advisories {
-            match self
-                .client
-                .list_security_advisories(owner, &repo.name)
+        for repo in repos {
+            let permit = Arc::clone(&sem)
+                .acquire_owned()
                 .await
-            {
-                Ok(advisories) => {
-                    self.storage
-                        .write_json(&meta_dir.join("security_advisories.json"), &advisories)?;
+                .expect("semaphore closed");
+
+            // Clone fields needed by the spawned task.
+            let client = self.client.clone();
+            let storage = self.storage.clone();
+            let git = self.git.clone();
+            let output = self.output.clone();
+            let opts = self.opts.clone();
+            let owner = owner.to_string();
+            let clone_opts = self.make_clone_opts();
+
+            let handle = tokio::spawn(async move {
+                let _permit = permit; // released when task completes
+                let result = backup_one_repo(
+                    &client,
+                    &storage,
+                    &git,
+                    &output,
+                    &opts,
+                    &owner,
+                    &repo,
+                    &clone_opts,
+                )
+                .await;
+                if let Err(e) = result {
+                    error!(
+                        repo = %repo.full_name,
+                        error = %e,
+                        "repository backup failed, continuing"
+                    );
                 }
-                Err(github_backup_client::ClientError::ApiError {
-                    status: 404 | 403, ..
-                }) => {
-                    info!(repo = %repo.full_name, "skipping security advisories (not available)");
-                }
-                Err(e) => return Err(e.into()),
-            }
+            });
+            handles.push(handle);
         }
 
-        Ok(())
+        for handle in handles {
+            // Individual repo panics should not abort the whole backup.
+            if let Err(e) = handle.await {
+                error!(error = %e, "repository backup task panicked");
+            }
+        }
     }
+
+    /// Builds [`CloneOptions`] from the current `BackupOptions`.
+    fn make_clone_opts(&self) -> CloneOptions {
+        let token = match self.opts.prefer_ssh {
+            // SSH uses key-based auth; no token needed in clone opts.
+            true => None,
+            false => {
+                // Extract token from the client's credential for injection.
+                // We expose a helper on GitHubClient for this purpose.
+                self.client.token()
+            }
+        };
+        CloneOptions {
+            token,
+            no_prune: self.opts.no_prune,
+        }
+    }
+}
+
+/// Backs up a single repository: metadata JSON + git mirror + sub-categories.
+///
+/// Extracted as a free function so it can be spawned as an independent task.
+async fn backup_one_repo<S, G>(
+    client: &GitHubClient,
+    storage: &S,
+    git: &G,
+    output: &OutputConfig,
+    opts: &BackupOptions,
+    owner: &str,
+    repo: &Repository,
+    clone_opts: &CloneOptions,
+) -> Result<(), CoreError>
+where
+    S: Storage,
+    G: GitRunner,
+{
+    use crate::backup::repository::should_include;
+
+    if !should_include(repo, opts) {
+        return Ok(());
+    }
+
+    if opts.dry_run {
+        info!(repo = %repo.full_name, "dry-run: would back up repository");
+        return Ok(());
+    }
+
+    let repos_dir = output.repos_dir(owner);
+    let wikis_dir = output.wikis_dir(owner);
+    let meta_dir = output.repo_meta_dir(owner, &repo.name);
+
+    backup_repository(repo, opts, &repos_dir, &meta_dir, storage, git, clone_opts).await?;
+    backup_wiki(repo, opts, &wikis_dir, git, clone_opts).await?;
+    backup_repo_metadata(client, storage, opts, owner, repo, &meta_dir).await?;
+
+    Ok(())
+}
+
+/// Backs up all enabled JSON metadata for a repository.
+async fn backup_repo_metadata<S>(
+    client: &GitHubClient,
+    storage: &S,
+    opts: &BackupOptions,
+    owner: &str,
+    repo: &Repository,
+    meta_dir: &std::path::Path,
+) -> Result<(), CoreError>
+where
+    S: Storage,
+{
+    backup_issues(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_pull_requests(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_releases(client, owner, &repo.name, opts, meta_dir, storage).await?;
+
+    if opts.labels {
+        let labels = client.list_labels(owner, &repo.name).await?;
+        storage.write_json(&meta_dir.join("labels.json"), &labels)?;
+    }
+
+    if opts.milestones {
+        let milestones = client.list_milestones(owner, &repo.name).await?;
+        storage.write_json(&meta_dir.join("milestones.json"), &milestones)?;
+    }
+
+    if opts.hooks {
+        match client.list_hooks(owner, &repo.name).await {
+            Ok(hooks) => {
+                storage.write_json(&meta_dir.join("hooks.json"), &hooks)?;
+            }
+            Err(github_backup_client::ClientError::ApiError { status: 404, .. }) => {
+                info!(repo = %repo.full_name, "skipping hooks (no admin access)");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if opts.security_advisories {
+        match client.list_security_advisories(owner, &repo.name).await {
+            Ok(advisories) => {
+                storage.write_json(&meta_dir.join("security_advisories.json"), &advisories)?;
+            }
+            Err(github_backup_client::ClientError::ApiError {
+                status: 404 | 403, ..
+            }) => {
+                info!(repo = %repo.full_name, "skipping security advisories (not available)");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    // Engine integration tests require a full mock API server. The engine
-    // logic is validated indirectly through the per-category backup tests.
-    // The compile-time generic constraints are verified by the existence of
-    // this module.
-
     use super::*;
     use crate::git::test_support::SpyGitRunner;
     use crate::storage::test_support::MemStorage;
@@ -287,5 +335,46 @@ mod tests {
     #[test]
     fn backup_engine_constructs_without_panic() {
         let _engine = make_engine();
+    }
+
+    #[test]
+    fn backup_engine_make_clone_opts_has_no_token_when_prefer_ssh() {
+        let cred = Credential::Token("ghp_test".to_string());
+        let client = GitHubClient::new(cred).expect("client");
+        let opts = BackupOptions {
+            prefer_ssh: true,
+            ..Default::default()
+        };
+        let engine = BackupEngine::new(
+            client,
+            MemStorage::default(),
+            SpyGitRunner::default(),
+            OutputConfig::new("/backup"),
+            opts,
+        );
+        let clone_opts = engine.make_clone_opts();
+        assert!(
+            clone_opts.token.is_none(),
+            "SSH mode should not inject token"
+        );
+    }
+
+    #[test]
+    fn backup_engine_make_clone_opts_injects_token_for_https() {
+        let cred = Credential::Token("ghp_test".to_string());
+        let client = GitHubClient::new(cred).expect("client");
+        let opts = BackupOptions {
+            prefer_ssh: false,
+            ..Default::default()
+        };
+        let engine = BackupEngine::new(
+            client,
+            MemStorage::default(),
+            SpyGitRunner::default(),
+            OutputConfig::new("/backup"),
+            opts,
+        );
+        let clone_opts = engine.make_clone_opts();
+        assert_eq!(clone_opts.token.as_deref(), Some("ghp_test"));
     }
 }

@@ -9,7 +9,10 @@ use tracing::info;
 
 use github_backup_types::{config::BackupOptions, Repository};
 
-use crate::{error::CoreError, git::GitRunner};
+use crate::{
+    error::CoreError,
+    git::{CloneOptions, GitRunner},
+};
 
 /// Backs up a repository's wiki as a bare git mirror.
 ///
@@ -28,6 +31,7 @@ pub async fn backup_wiki(
     opts: &BackupOptions,
     wikis_dir: &Path,
     git: &impl GitRunner,
+    clone_opts: &CloneOptions,
 ) -> Result<(), CoreError> {
     if !opts.wikis || !repo.has_wiki {
         return Ok(());
@@ -38,7 +42,7 @@ pub async fn backup_wiki(
 
     info!(repo = %repo.full_name, dest = %dest.display(), "cloning wiki");
 
-    match git.mirror_clone(&wiki_url, &dest) {
+    match git.mirror_clone(&wiki_url, &dest, clone_opts) {
         Ok(()) => Ok(()),
         Err(CoreError::GitFailed { code: 128, .. }) => {
             // Code 128 is returned when the wiki exists but is empty.
@@ -52,7 +56,7 @@ pub async fn backup_wiki(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::test_support::SpyGitRunner;
+    use crate::git::{test_support::SpyGitRunner, CloneOptions};
     use github_backup_types::{config::BackupOptions, user::User, Repository};
     use std::path::PathBuf;
 
@@ -95,9 +99,15 @@ mod tests {
         };
         let git = SpyGitRunner::default();
 
-        backup_wiki(&repo, &opts, &PathBuf::from("/backup/git/wikis"), &git)
-            .await
-            .expect("wiki backup");
+        backup_wiki(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/wikis"),
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("wiki backup");
 
         let calls = git.recorded_calls();
         assert_eq!(calls.len(), 1);
@@ -117,9 +127,15 @@ mod tests {
         };
         let git = SpyGitRunner::default();
 
-        backup_wiki(&repo, &opts, &PathBuf::from("/backup/git/wikis"), &git)
-            .await
-            .expect("wiki backup");
+        backup_wiki(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/wikis"),
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("wiki backup");
 
         assert_eq!(git.recorded_calls().len(), 0);
     }
@@ -133,9 +149,15 @@ mod tests {
         };
         let git = SpyGitRunner::default();
 
-        backup_wiki(&repo, &opts, &PathBuf::from("/backup/git/wikis"), &git)
-            .await
-            .expect("wiki backup");
+        backup_wiki(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/wikis"),
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("wiki backup");
 
         assert_eq!(git.recorded_calls().len(), 0);
     }

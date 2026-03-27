@@ -42,6 +42,14 @@ pub enum CoreError {
     /// The `git` binary could not be found or launched.
     #[error("could not start git: {0}")]
     GitSpawn(std::io::Error),
+
+    /// A path cannot be converted to UTF-8, which is required to pass it to
+    /// git as a command-line argument.
+    #[error("path contains non-UTF-8 bytes: {path}")]
+    NonUtf8Path {
+        /// The lossy string representation of the offending path.
+        path: String,
+    },
 }
 
 impl CoreError {

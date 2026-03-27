@@ -72,6 +72,13 @@ impl OutputConfig {
         self.root.join(owner).join("json").join("gists")
     }
 
+    /// Returns the top-level JSON directory for an owner:
+    /// `<root>/<owner>/json/`.
+    #[must_use]
+    pub fn owner_json_dir(&self, owner: &str) -> PathBuf {
+        self.root.join(owner).join("json")
+    }
+
     /// Returns the path for a top-level owner JSON file (followers, starred…):
     /// `<root>/<owner>/json/<filename>`.
     #[must_use]
@@ -80,11 +87,25 @@ impl OutputConfig {
     }
 }
 
+/// Whether the backup target is a user account or an organisation.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BackupTarget {
+    /// GitHub user account (default).
+    #[default]
+    User,
+    /// GitHub organisation.
+    Org,
+}
+
 /// Selects which data categories to include in the backup.
 ///
 /// All fields default to `false`; enable only what you need.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackupOptions {
+    // ── Target ────────────────────────────────────────────────────────────
+    /// Whether the target is a user account or an organisation.
+    pub target: BackupTarget,
+
     // ── Repository git clones ──────────────────────────────────────────────
     /// Clone/mirror all repositories (default: true when not overridden).
     pub repositories: bool,
@@ -98,6 +119,8 @@ pub struct BackupOptions {
     pub bare: bool,
     /// Enable Git LFS when cloning.
     pub lfs: bool,
+    /// Do not prune deleted remote refs during updates.
+    pub no_prune: bool,
 
     // ── Issues ────────────────────────────────────────────────────────────
     /// Backup issue metadata (title, body, state, labels, etc.).
@@ -146,6 +169,14 @@ pub struct BackupOptions {
     pub gists: bool,
     /// Backup gists starred by the target user.
     pub starred_gists: bool,
+
+    // ── Execution options ─────────────────────────────────────────────────
+    /// When `true`, log what would be done without writing any files or
+    /// running any git commands.
+    pub dry_run: bool,
+    /// Maximum number of repositories to back up concurrently.
+    /// `1` means fully sequential (safe default).
+    pub concurrency: usize,
 }
 
 impl BackupOptions {
@@ -156,12 +187,14 @@ impl BackupOptions {
     #[must_use]
     pub fn all() -> Self {
         Self {
+            target: BackupTarget::User,
             repositories: true,
             forks: true,
             private: true,
             prefer_ssh: false,
             bare: true,
             lfs: false,
+            no_prune: false,
             issues: true,
             issue_comments: true,
             issue_events: true,
@@ -182,6 +215,8 @@ impl BackupOptions {
             following: true,
             gists: true,
             starred_gists: true,
+            dry_run: false,
+            concurrency: 4,
         }
     }
 }

@@ -14,13 +14,10 @@ use clap::{ArgGroup, Parser};
 ///
 /// # Authentication
 ///
-/// Provide a personal access token (classic or fine-grained) via:
-/// - The `--token` flag
-/// - The `GITHUB_TOKEN` environment variable
+/// Provide a personal access token (classic or fine-grained) via `--token` or
+/// the `GITHUB_TOKEN` environment variable.
 ///
-/// Fine-grained tokens are recommended for long-running or scheduled backups
-/// because their narrow permission scope limits the blast radius of accidental
-/// exposure.
+/// Fine-grained tokens are recommended for long-running or scheduled backups.
 ///
 /// # Examples
 ///
@@ -29,9 +26,10 @@ use clap::{ArgGroup, Parser};
 /// github-backup octocat --token ghp_xxx --output /backup --all
 /// ```
 ///
-/// Back up only repositories and issues:
+/// Back up only repositories and issues for an org, with 8 parallel workers:
 /// ```text
-/// github-backup octocat --token ghp_xxx --output /backup --repositories --issues
+/// github-backup my-org --token ghp_xxx --output /backup --org \
+///   --repositories --issues --concurrency 8
 /// ```
 #[derive(Debug, Parser)]
 #[command(
@@ -46,7 +44,7 @@ use clap::{ArgGroup, Parser};
         .args(["token"]),
 ))]
 pub struct Args {
-    /// GitHub username or organisation to back up.
+    /// GitHub username or organisation name to back up.
     #[arg(value_name = "OWNER")]
     pub owner: String,
 
@@ -68,9 +66,16 @@ pub struct Args {
     #[arg(short = 'o', long = "output", value_name = "DIR", default_value = ".")]
     pub output: PathBuf,
 
+    // ── Target type ────────────────────────────────────────────────────────
+    /// Treat OWNER as a GitHub organisation (uses the org repos API).
+    ///
+    /// Without this flag, OWNER is treated as a user account.
+    #[arg(long)]
+    pub org: bool,
+
     // ── Broad selectors ────────────────────────────────────────────────────
-    /// Enable all backup categories (equivalent to supplying every individual
-    /// flag, except `--lfs` and `--prefer-ssh`).
+    /// Enable all backup categories (equivalent to every individual flag,
+    /// except `--lfs`, `--prefer-ssh`, `--no-prune`, and `--concurrency`).
     #[arg(long, conflicts_with_all = [
         "repositories", "issues", "issue_comments", "issue_events",
         "pulls", "pull_comments", "pull_commits", "pull_reviews",
@@ -102,16 +107,20 @@ pub struct Args {
     #[arg(long)]
     pub lfs: bool,
 
+    /// Do not prune deleted remote refs during git remote updates.
+    #[arg(long)]
+    pub no_prune: bool,
+
     // ── Issue options ──────────────────────────────────────────────────────
     /// Back up issue metadata.
     #[arg(long)]
     pub issues: bool,
 
-    /// Back up issue comment threads (requires `--issues`).
+    /// Back up issue comment threads.
     #[arg(long)]
     pub issue_comments: bool,
 
-    /// Back up issue timeline events (requires `--issues`).
+    /// Back up issue timeline events.
     #[arg(long)]
     pub issue_events: bool,
 
@@ -145,8 +154,10 @@ pub struct Args {
     #[arg(long)]
     pub releases: bool,
 
-    /// Download release binary assets (requires `--releases`).
-    #[arg(long)]
+    /// Download release binary assets.
+    ///
+    /// Requires `--releases`.
+    #[arg(long, requires = "releases")]
     pub release_assets: bool,
 
     /// Back up webhook configurations (requires admin token scope).
@@ -186,6 +197,17 @@ pub struct Args {
     #[arg(long)]
     pub starred_gists: bool,
 
+    // ── Execution ─────────────────────────────────────────────────────────
+    /// Maximum number of repositories to back up in parallel.
+    ///
+    /// Defaults to 4. Set to 1 for sequential operation.
+    #[arg(long, value_name = "N", default_value = "4")]
+    pub concurrency: usize,
+
+    /// Log what would be done without writing any files or running git.
+    #[arg(long)]
+    pub dry_run: bool,
+
     // ── Logging ────────────────────────────────────────────────────────────
     /// Suppress all non-error output.
     #[arg(long, short = 'q')]
@@ -200,23 +222,35 @@ impl Args {
     /// Converts the parsed CLI arguments into a [`BackupOptions`] struct.
     #[must_use]
     pub fn into_backup_options(self) -> github_backup_types::config::BackupOptions {
-        use github_backup_types::config::BackupOptions;
+        use github_backup_types::config::{BackupOptions, BackupTarget};
+
+        let target = if self.org {
+            BackupTarget::Org
+        } else {
+            BackupTarget::User
+        };
 
         if self.all {
             return BackupOptions {
+                target,
                 prefer_ssh: self.prefer_ssh,
                 lfs: self.lfs,
+                no_prune: self.no_prune,
+                dry_run: self.dry_run,
+                concurrency: self.concurrency,
                 ..BackupOptions::all()
             };
         }
 
         BackupOptions {
+            target,
             repositories: self.repositories,
             forks: self.forks,
             private: self.private,
             prefer_ssh: self.prefer_ssh,
             bare: true, // always use bare mirrors for git clones
             lfs: self.lfs,
+            no_prune: self.no_prune,
             issues: self.issues,
             issue_comments: self.issue_comments,
             issue_events: self.issue_events,
@@ -237,6 +271,8 @@ impl Args {
             following: self.following,
             gists: self.gists,
             starred_gists: self.starred_gists,
+            dry_run: self.dry_run,
+            concurrency: self.concurrency,
         }
     }
 }
@@ -252,12 +288,21 @@ mod tests {
         assert_eq!(args.owner, "octocat");
         assert_eq!(args.token, "ghp_test");
         assert!(!args.all);
+        assert!(!args.org);
     }
 
     #[test]
     fn args_parse_all_flag() {
         let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "--all"]);
         assert!(args.all);
+    }
+
+    #[test]
+    fn args_parse_org_flag() {
+        let args = Args::parse_from(["github-backup", "myorg", "--token", "t", "--org", "--all"]);
+        assert!(args.org);
+        let opts = args.into_backup_options();
+        assert_eq!(opts.target, github_backup_types::config::BackupTarget::Org);
     }
 
     #[test]
@@ -286,11 +331,60 @@ mod tests {
     }
 
     #[test]
+    fn args_release_assets_requires_releases() {
+        // clap should reject --release-assets without --releases
+        let result = Args::try_parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--release-assets",
+        ]);
+        assert!(
+            result.is_err(),
+            "--release-assets without --releases should fail"
+        );
+    }
+
+    #[test]
     fn args_parse_quiet_and_verbose() {
         let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "-q"]);
         assert!(args.quiet);
 
         let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "-vv"]);
         assert_eq!(args.verbose, 2);
+    }
+
+    #[test]
+    fn args_parse_concurrency_and_dry_run() {
+        let args = Args::parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--concurrency",
+            "8",
+            "--dry-run",
+        ]);
+        assert_eq!(args.concurrency, 8);
+        assert!(args.dry_run);
+        let opts = args.into_backup_options();
+        assert_eq!(opts.concurrency, 8);
+        assert!(opts.dry_run);
+    }
+
+    #[test]
+    fn args_parse_no_prune() {
+        let args = Args::parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--repositories",
+            "--no-prune",
+        ]);
+        assert!(args.no_prune);
+        let opts = args.into_backup_options();
+        assert!(opts.no_prune);
     }
 }

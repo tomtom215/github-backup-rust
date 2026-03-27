@@ -50,4 +50,11 @@ pub enum ClientError {
         /// Suggested wait before retrying (seconds).
         retry_after_secs: u64,
     },
+
+    /// The request did not complete within the configured timeout.
+    #[error("request timed out: {url}")]
+    Timeout {
+        /// The URL that timed out.
+        url: String,
+    },
 }
