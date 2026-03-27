@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/github-backup-types",
+    "crates/github-backup-client",
+    "crates/github-backup-core",
+    "crates/github-backup",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Tom F"]
+license = "MIT"
+repository = "https://github.com/tomtom215/github-backup-rust"
+homepage = "https://github.com/tomtom215/github-backup-rust"
+keywords = ["github", "backup", "git"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client – no reqwest, no openssl
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "tls12"] }
+rustls = { version = "0.23", features = ["std"] }
+rustls-native-certs = "0.8"
+bytes = "1"
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+
+# Error handling
+thiserror = "2"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# URL parsing
+url = "2"
+
+# Workspace crates
+github-backup-types = { path = "crates/github-backup-types" }
+github-backup-client = { path = "crates/github-backup-client" }
+github-backup-core = { path = "crates/github-backup-core" }
+
+# Test-only
+tokio-test = "0.4"
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
