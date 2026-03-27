@@ -1,0 +1,6 @@
+# Allow module-name repetition (e.g. ClientError, ClientBuilder) — idiomatic for library crates
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
