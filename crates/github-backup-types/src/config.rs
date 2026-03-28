@@ -7,6 +7,55 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+// ── Glob pattern matching ─────────────────────────────────────────────────────
+
+/// Returns `true` if `text` matches `pattern`.
+///
+/// Pattern syntax:
+/// - `*` matches any sequence of characters (including the empty string).
+/// - `?` matches exactly one character.
+/// - All other characters are matched literally, case-insensitively.
+///
+/// # Examples
+///
+/// ```
+/// use github_backup_types::config::glob_match;
+///
+/// assert!(glob_match("hello-*", "hello-world"));
+/// assert!(glob_match("*test*", "my-test-repo"));
+/// assert!(glob_match("repo?", "repos"));
+/// assert!(!glob_match("foo", "bar"));
+/// assert!(glob_match("*", "anything"));
+/// assert!(glob_match("", ""));
+/// assert!(!glob_match("", "nonempty"));
+/// ```
+#[must_use]
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+    let txt: Vec<char> = text.to_lowercase().chars().collect();
+    glob_match_chars(&pat, &txt)
+}
+
+fn glob_match_chars(pat: &[char], txt: &[char]) -> bool {
+    match (pat.first(), txt.first()) {
+        // Both exhausted → match.
+        (None, None) => true,
+        // Pattern exhausted but text remains → no match.
+        (None, _) => false,
+        // Wildcard: match zero chars (skip `*`) or one char (advance txt).
+        (Some('*'), _) => {
+            glob_match_chars(&pat[1..], txt)
+                || (!txt.is_empty() && glob_match_chars(pat, &txt[1..]))
+        }
+        // `?` matches any single char.
+        (Some('?'), Some(_)) => glob_match_chars(&pat[1..], &txt[1..]),
+        (Some('?'), None) => false,
+        // Literal match.
+        (Some(p), Some(t)) if p == t => glob_match_chars(&pat[1..], &txt[1..]),
+        _ => false,
+    }
+}
+
 /// Authentication credential used to interact with the GitHub API.
 #[derive(Debug, Clone)]
 pub enum Credential {
@@ -210,6 +259,44 @@ pub struct BackupOptions {
     /// Backup gists starred by the target user.
     pub starred_gists: bool,
 
+    // ── Additional repository metadata ────────────────────────────────────
+    /// Backup the list of repository topics (tags).
+    pub topics: bool,
+    /// Backup the list of repository branches and their protection status.
+    pub branches: bool,
+
+    // ── Repository name filters ───────────────────────────────────────────
+    /// Only back up repositories whose names match at least one of these glob
+    /// patterns.  An empty list means *all* repositories are included.
+    ///
+    /// Pattern syntax: `*` matches any sequence of characters, `?` matches
+    /// exactly one character.  Matching is case-insensitive.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use github_backup_types::config::BackupOptions;
+    /// let opts = BackupOptions {
+    ///     include_repos: vec!["rust-*".to_string(), "my-repo".to_string()],
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub include_repos: Vec<String>,
+
+    /// Exclude repositories whose names match at least one of these glob
+    /// patterns.  Takes precedence over [`include_repos`].
+    ///
+    /// [`include_repos`]: BackupOptions::include_repos
+    pub exclude_repos: Vec<String>,
+
+    // ── Incremental filter ────────────────────────────────────────────────
+    /// Only fetch issues and pull requests updated *at or after* this ISO 8601
+    /// timestamp (e.g. `"2024-01-01T00:00:00Z"`).
+    ///
+    /// Useful for incremental backups: run a full backup once, then pass the
+    /// previous run's start time to limit subsequent API calls.
+    pub since: Option<String>,
+
     // ── Execution options ─────────────────────────────────────────────────
     /// When `true`, log what would be done without writing any files or
     /// running any git commands.
@@ -223,7 +310,9 @@ impl BackupOptions {
     /// Returns a configuration that enables every available backup category.
     ///
     /// Equivalent to the `--all` flag in the Python reference implementation,
-    /// but also enables `starred_gists` and `pull_reviews`.
+    /// but also enables `starred_gists`, `pull_reviews`, `topics`, and
+    /// `branches`.  Repository name filters and `since` are left at their
+    /// defaults (no filtering).
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -255,6 +344,11 @@ impl BackupOptions {
             following: true,
             gists: true,
             starred_gists: true,
+            topics: true,
+            branches: true,
+            include_repos: vec![],
+            exclude_repos: vec![],
+            since: None,
             dry_run: false,
             concurrency: 4,
         }
@@ -354,6 +448,20 @@ pub struct ConfigFile {
     pub gists: Option<bool>,
     /// Back up starred gists.
     pub starred_gists: Option<bool>,
+
+    /// Back up repository topics.
+    pub topics: Option<bool>,
+    /// Back up the list of repository branches.
+    pub branches: Option<bool>,
+
+    /// Only back up repositories matching these glob patterns (comma-separated
+    /// or as a TOML array).
+    pub include_repos: Option<Vec<String>>,
+    /// Exclude repositories matching these glob patterns.
+    pub exclude_repos: Option<Vec<String>>,
+
+    /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
+    pub since: Option<String>,
 }
 
 impl ConfigFile {
@@ -521,5 +629,84 @@ pulls = true
         assert!(cfg.token.is_none());
         assert!(cfg.output.is_none());
         assert!(cfg.concurrency.is_none());
+    }
+
+    #[test]
+    fn backup_options_all_enables_new_categories() {
+        let opts = BackupOptions::all();
+        assert!(opts.topics);
+        assert!(opts.branches);
+        assert!(opts.include_repos.is_empty());
+        assert!(opts.exclude_repos.is_empty());
+        assert!(opts.since.is_none());
+    }
+
+    // ── glob_match tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_exact_returns_true() {
+        assert!(glob_match("hello", "hello"));
+    }
+
+    #[test]
+    fn glob_match_exact_wrong_returns_false() {
+        assert!(!glob_match("hello", "world"));
+    }
+
+    #[test]
+    fn glob_match_star_prefix_matches_suffix() {
+        assert!(glob_match("*-world", "hello-world"));
+    }
+
+    #[test]
+    fn glob_match_star_suffix_matches_prefix() {
+        assert!(glob_match("hello-*", "hello-world"));
+    }
+
+    #[test]
+    fn glob_match_star_alone_matches_anything() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_match_star_star_matches_anything() {
+        assert!(glob_match("**", "deep/path/here"));
+    }
+
+    #[test]
+    fn glob_match_question_mark_matches_single_char() {
+        assert!(glob_match("repo?", "repos"));
+        assert!(!glob_match("repo?", "repoxx"));
+        assert!(!glob_match("repo?", "repo"));
+    }
+
+    #[test]
+    fn glob_match_case_insensitive() {
+        assert!(glob_match("HELLO-*", "hello-world"));
+        assert!(glob_match("rust-*", "Rust-Lang"));
+    }
+
+    #[test]
+    fn glob_match_empty_pattern_matches_empty_text() {
+        assert!(glob_match("", ""));
+    }
+
+    #[test]
+    fn glob_match_empty_pattern_does_not_match_nonempty() {
+        assert!(!glob_match("", "text"));
+    }
+
+    #[test]
+    fn glob_match_middle_wildcard() {
+        assert!(glob_match("*test*", "my-test-repo"));
+        assert!(glob_match("*test*", "test"));
+        assert!(!glob_match("*test*", "none"));
+    }
+
+    #[test]
+    fn glob_match_consecutive_wildcards() {
+        assert!(glob_match("a**b", "ab"));
+        assert!(glob_match("a**b", "axyzb"));
     }
 }

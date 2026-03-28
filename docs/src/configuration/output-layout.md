@@ -41,7 +41,9 @@ This page explains the directory and file structure that `github-backup` creates
                 ├── labels.json
                 ├── milestones.json
                 ├── hooks.json
-                └── security_advisories.json
+                ├── security_advisories.json
+                ├── topics.json
+                └── branches.json
 ```
 
 ## File Descriptions
@@ -76,6 +78,8 @@ This page explains the directory and file structure that `github-backup` creates
 | `repos/<name>/milestones.json` | `--milestones` |
 | `repos/<name>/hooks.json` | `--hooks` |
 | `repos/<name>/security_advisories.json` | `--security-advisories` |
+| `repos/<name>/topics.json` | `--topics` |
+| `repos/<name>/branches.json` | `--branches` |
 
 ## Design Rationale
 

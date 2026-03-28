@@ -35,7 +35,9 @@ pub async fn backup_issues(
     }
 
     info!(owner, repo = repo_name, "fetching issues");
-    let issues = client.list_issues(owner, repo_name).await?;
+    let issues = client
+        .list_issues(owner, repo_name, opts.since.as_deref())
+        .await?;
 
     if opts.issues {
         storage.write_json(&meta_dir.join("issues.json"), &issues)?;

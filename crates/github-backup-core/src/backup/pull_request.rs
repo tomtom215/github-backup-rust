@@ -37,7 +37,9 @@ pub async fn backup_pull_requests(
     }
 
     info!(owner, repo = repo_name, "fetching pull requests");
-    let pulls = client.list_pull_requests(owner, repo_name).await?;
+    let pulls = client
+        .list_pull_requests(owner, repo_name, opts.since.as_deref())
+        .await?;
 
     if opts.pulls {
         storage.write_json(&meta_dir.join("pulls.json"), &pulls)?;

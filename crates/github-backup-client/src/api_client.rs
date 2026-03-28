@@ -27,8 +27,9 @@ use std::pin::Pin;
 use bytes::Bytes;
 
 use github_backup_types::{
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest, PullRequestComment,
-    PullRequestCommit, PullRequestReview, Release, Repository, SecurityAdvisory, User,
+    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
+    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, User,
 };
 
 use crate::error::ClientError;
@@ -95,10 +96,14 @@ pub trait BackupClient: Send + Sync {
     // ── Issues ────────────────────────────────────────────────────────────
 
     /// Lists all issues for a repository.
+    ///
+    /// `since` — if `Some`, only returns issues updated at or after the given
+    /// ISO 8601 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
     fn list_issues<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<Issue>, ClientError>>;
 
     /// Lists comments on a specific issue.
@@ -120,10 +125,14 @@ pub trait BackupClient: Send + Sync {
     // ── Pull Requests ─────────────────────────────────────────────────────
 
     /// Lists all pull requests for a repository.
+    ///
+    /// `since` — if `Some`, only returns PRs updated at or after the given
+    /// ISO 8601 timestamp.
     fn list_pull_requests<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<PullRequest>, ClientError>>;
 
     /// Lists review comments on a specific pull request.
@@ -186,6 +195,20 @@ pub trait BackupClient: Send + Sync {
         owner: &'a str,
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<SecurityAdvisory>, ClientError>>;
+
+    /// Returns the topics (tags) configured on a repository.
+    fn list_repo_topics<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, ClientError>>;
+
+    /// Lists all branches for a repository.
+    fn list_branches<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>>;
 
     // ── Assets ────────────────────────────────────────────────────────────
 
@@ -256,8 +279,9 @@ impl BackupClient for GitHubClient {
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<Issue>, ClientError>> {
-        Box::pin(GitHubClient::list_issues(self, owner, repo))
+        Box::pin(GitHubClient::list_issues(self, owner, repo, since))
     }
 
     fn list_issue_comments<'a>(
@@ -292,8 +316,9 @@ impl BackupClient for GitHubClient {
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<PullRequest>, ClientError>> {
-        Box::pin(GitHubClient::list_pull_requests(self, owner, repo))
+        Box::pin(GitHubClient::list_pull_requests(self, owner, repo, since))
     }
 
     fn list_pull_comments<'a>(
@@ -367,6 +392,22 @@ impl BackupClient for GitHubClient {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<SecurityAdvisory>, ClientError>> {
         Box::pin(GitHubClient::list_security_advisories(self, owner, repo))
+    }
+
+    fn list_repo_topics<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, ClientError>> {
+        Box::pin(GitHubClient::list_repo_topics(self, owner, repo))
+    }
+
+    fn list_branches<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>> {
+        Box::pin(GitHubClient::list_branches(self, owner, repo))
     }
 
     fn download_release_asset<'a>(

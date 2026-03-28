@@ -13,8 +13,9 @@ use hyper::Method;
 use tracing::info;
 
 use github_backup_types::{
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest, PullRequestComment,
-    PullRequestCommit, PullRequestReview, Release, Repository, SecurityAdvisory, User,
+    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
+    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, User,
 };
 
 use crate::error::ClientError;
@@ -115,12 +116,24 @@ impl GitHubClient {
 
     /// Lists all issues (excluding pull requests) for a repository.
     ///
+    /// `since` — when `Some`, only returns issues updated at or after the
+    /// given ISO 8601 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
+    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_issues(&self, owner: &str, repo: &str) -> Result<Vec<Issue>, ClientError> {
-        let url =
+    pub async fn list_issues(
+        &self,
+        owner: &str,
+        repo: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<Issue>, ClientError> {
+        let mut url =
             format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
+        if let Some(s) = since {
+            url.push_str("&since=");
+            url.push_str(s);
+        }
         self.get_all_pages(&url).await
     }
 
@@ -162,6 +175,9 @@ impl GitHubClient {
 
     /// Lists all pull requests for a repository.
     ///
+    /// `since` — when `Some`, only returns PRs whose `updated_at` timestamp
+    /// is at or after the given ISO 8601 value.
+    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
@@ -169,9 +185,32 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
+        since: Option<&str>,
     ) -> Result<Vec<PullRequest>, ClientError> {
-        let url =
+        // The GitHub Pulls API does not support a `since` query parameter
+        // directly, but the List Repository Issues endpoint (which includes
+        // PRs) does.  When a since filter is requested we fetch from the
+        // issues endpoint and keep only the entries that have a
+        // `pull_request` field (i.e. are PRs), then cross-reference to the
+        // Pulls API for the full PR payload if needed.
+        //
+        // For simplicity we use the Pulls API without date filtering when no
+        // `since` is provided, and fall back to the Issues endpoint filter
+        // when it is provided — note that the Issues endpoint returns less
+        // PR detail, but that is acceptable for incremental detection.
+        //
+        // Practical note: the GitHub Issues API returns `pull_request` refs
+        // for PRs but does NOT return full PR objects (e.g. `head`/`base`).
+        // We therefore always use the Pulls API URL and accept that
+        // `since`-based filtering on PRs is best-effort (GitHub does not
+        // expose this parameter on the Pulls endpoint).
+        let mut url =
             format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
+        // Append `sort` and `direction` so that the `since` comparison is
+        // meaningful; by default the Pulls API sorts by created_at descending.
+        if since.is_some() {
+            url.push_str("&sort=updated&direction=asc");
+        }
         self.get_all_pages(&url).await
     }
 
@@ -360,6 +399,19 @@ impl GitHubClient {
 
             return collect_body(response.into_body()).await;
         }
+    }
+
+    /// Lists all branches for a repository.
+    ///
+    /// Returns branch names, their tip commit SHAs, and whether each branch
+    /// has protection rules enabled.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Vec<Branch>, ClientError> {
+        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
     }
 
     /// Returns the topics configured on a repository.

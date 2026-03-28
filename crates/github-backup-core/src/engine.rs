@@ -336,6 +336,25 @@ where
         }
     }
 
+    if opts.topics {
+        match client.list_repo_topics(owner, &repo.name).await {
+            Ok(topics) => {
+                storage.write_json(&meta_dir.join("topics.json"), &topics)?;
+            }
+            Err(github_backup_client::ClientError::ApiError {
+                status: 404 | 403, ..
+            }) => {
+                info!(repo = %repo.full_name, "skipping topics (not available)");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if opts.branches {
+        let branches = client.list_branches(owner, &repo.name).await?;
+        storage.write_json(&meta_dir.join("branches.json"), &branches)?;
+    }
+
     Ok(())
 }
 

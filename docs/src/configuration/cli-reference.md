@@ -90,6 +90,8 @@ github-backup --completions <SHELL>
 | `--hooks` | `false` | Back up webhook configurations (requires admin token) |
 | `--security-advisories` | `false` | Back up published security advisories |
 | `--wikis` | `false` | Clone repository wikis |
+| `--topics` | `false` | Back up repository topics (tags) |
+| `--branches` | `false` | Back up branch list and protection status |
 
 ## User / Org Data
 
@@ -101,6 +103,37 @@ github-backup --completions <SHELL>
 | `--following` | `false` | Back up following list |
 | `--gists` | `false` | Back up owned gists |
 | `--starred-gists` | `false` | Back up starred gists |
+
+## Repository Filters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--include-repos <PATTERN>` | *(all)* | Only back up repos matching glob (repeat or comma-separate) |
+| `--exclude-repos <PATTERN>` | *(none)* | Exclude repos matching glob (takes precedence over `--include-repos`) |
+
+Pattern syntax: `*` matches any sequence, `?` matches one character. Matching is case-insensitive.
+
+```bash
+# Only repos whose name starts with "rust-"
+github-backup octocat --token $TOKEN --output /backup --repositories \
+  --include-repos "rust-*"
+
+# All repos except archived ones
+github-backup octocat --token $TOKEN --output /backup --repositories \
+  --exclude-repos "*archived*,*deprecated*"
+```
+
+## Incremental Filter
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--since <DATETIME>` | — | Only fetch issues/PRs updated at or after this ISO 8601 timestamp |
+
+```bash
+# Incremental: only issues/PRs updated since 2026-01-01
+github-backup octocat --token $TOKEN --output /backup \
+  --issues --pulls --since "2026-01-01T00:00:00Z"
+```
 
 ## Push-Mirror Options
 

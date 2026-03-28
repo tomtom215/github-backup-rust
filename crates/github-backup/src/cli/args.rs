@@ -174,7 +174,7 @@ pub struct Args {
         "labels", "milestones", "releases", "release_assets",
         "hooks", "security_advisories", "wikis",
         "starred", "watched", "followers", "following",
-        "gists", "starred_gists",
+        "gists", "starred_gists", "topics", "branches",
     ])]
     pub all: bool,
 
@@ -300,6 +300,41 @@ pub struct Args {
     /// Back up gists starred by the authenticated user.
     #[arg(long)]
     pub starred_gists: bool,
+
+    // ── Additional repository metadata ─────────────────────────────────────
+    /// Back up repository topics (tags).
+    #[arg(long)]
+    pub topics: bool,
+
+    /// Back up the list of repository branches and their protection status.
+    #[arg(long)]
+    pub branches: bool,
+
+    // ── Repository name filters ────────────────────────────────────────────
+    /// Only back up repositories whose names match this glob pattern.
+    ///
+    /// Repeat the flag or separate patterns with commas:
+    /// `--include-repos "rust-*"` or `--include-repos "foo,bar-*"`.
+    ///
+    /// Pattern syntax: `*` matches any sequence, `?` matches one character.
+    /// Matching is case-insensitive.
+    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    pub include_repos: Vec<String>,
+
+    /// Exclude repositories whose names match this glob pattern.
+    ///
+    /// Repeat the flag or separate patterns with commas.
+    /// Takes precedence over `--include-repos`.
+    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    pub exclude_repos: Vec<String>,
+
+    // ── Incremental filter ─────────────────────────────────────────────────
+    /// Only fetch issues and pull requests updated at or after this timestamp.
+    ///
+    /// Accepts ISO 8601 format: `"2024-01-01T00:00:00Z"`.
+    /// Useful for incremental backups.
+    #[arg(long, value_name = "DATETIME")]
+    pub since: Option<String>,
 
     // ── Push-mirror options ────────────────────────────────────────────────
     /// Push repository mirrors to a Gitea-compatible instance after backup.
@@ -469,6 +504,21 @@ impl Args {
         self.forks |= cfg.forks.unwrap_or(false);
         self.private |= cfg.private.unwrap_or(false);
         self.all |= cfg.all.unwrap_or(false);
+        self.topics |= cfg.topics.unwrap_or(false);
+        self.branches |= cfg.branches.unwrap_or(false);
+        // Repo filter lists: extend (union) rather than replace.
+        if let Some(ref patterns) = cfg.include_repos {
+            self.include_repos.extend(patterns.iter().cloned());
+        }
+        if let Some(ref patterns) = cfg.exclude_repos {
+            self.exclude_repos.extend(patterns.iter().cloned());
+        }
+        // Since: CLI takes precedence; config supplies default.
+        if self.since.is_none() {
+            if let Some(ref s) = cfg.since {
+                self.since = Some(s.clone());
+            }
+        }
     }
 
     /// Converts the parsed (and optionally merged) CLI arguments into an owner
@@ -513,6 +563,9 @@ impl Args {
                     no_prune: self.no_prune,
                     dry_run: self.dry_run,
                     concurrency: self.concurrency,
+                    include_repos: self.include_repos,
+                    exclude_repos: self.exclude_repos,
+                    since: self.since,
                     ..BackupOptions::all()
                 },
             );
@@ -550,6 +603,11 @@ impl Args {
                 following: self.following,
                 gists: self.gists,
                 starred_gists: self.starred_gists,
+                topics: self.topics,
+                branches: self.branches,
+                include_repos: self.include_repos,
+                exclude_repos: self.exclude_repos,
+                since: self.since,
                 dry_run: self.dry_run,
                 concurrency: self.concurrency,
             },
