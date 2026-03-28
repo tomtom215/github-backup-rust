@@ -93,8 +93,10 @@ Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 | `--milestones` | Repository milestones |
 | `--hooks` | Webhook configurations (requires admin access) |
 | `--security-advisories` | Published security advisories |
+| `--topics` | Repository topics (tags) |
+| `--branches` | Branch list with tip SHAs and protection status |
 
-Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, etc.
+Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, etc.
 
 ---
 

@@ -1,0 +1,51 @@
+name: Deploy Book to GitHub Pages
+
+# Runs on every push to main and can be triggered manually.
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+# Allow only one concurrent deployment; cancel in-progress runs.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+# Grant the GITHUB_TOKEN the permissions required by actions/deploy-pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build mdBook
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "latest"
+
+      - name: Build book
+        run: mdbook build docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

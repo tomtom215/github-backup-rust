@@ -113,6 +113,7 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 |-----|------|---------|-------------|
 | `owner` | string | — | GitHub username or org |
 | `token` | string | — | Personal access token |
+| `api_url` | string | `https://api.github.com` | GitHub API base URL (for GitHub Enterprise Server) |
 | `output` | path | `.` | Output root directory |
 | `concurrency` | integer | `4` | Parallel repository backup count |
 | `org` | bool | `false` | Treat owner as org |
@@ -140,3 +141,33 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 | `following` | bool | `false` | Back up following |
 | `gists` | bool | `false` | Back up gists |
 | `starred_gists` | bool | `false` | Back up starred gists |
+| `topics` | bool | `false` | Back up repository topics |
+| `branches` | bool | `false` | Back up branch list |
+| `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
+| `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
+| `since` | string | — | ISO 8601 timestamp: only fetch issues/PRs updated after this |
+
+## Incremental Backup Config
+
+```toml
+owner = "octocat"
+output = "/var/backup/github"
+issues = true
+pulls  = true
+# Only fetch issues/PRs updated after this date (update each run)
+since  = "2026-01-01T00:00:00Z"
+```
+
+## Repository Filter Config
+
+```toml
+owner        = "octocat"
+output       = "/var/backup/github"
+repositories = true
+
+# Only back up repos whose names start with "rust-" or equal "my-tool"
+include_repos = ["rust-*", "my-tool"]
+
+# But exclude archived repos regardless
+exclude_repos = ["*archived*"]
+```

@@ -639,6 +639,11 @@ proptest! {
             hooks, security_advisories, wikis,
             starred, watched, followers, following,
             gists, starred_gists,
+            topics: false,
+            branches: false,
+            include_repos: vec![],
+            exclude_repos: vec![],
+            since: None,
             dry_run, concurrency,
         };
         let json = serde_json::to_string(&opts).expect("serialise");
@@ -670,6 +675,8 @@ proptest! {
         prop_assert_eq!(decoded.following, opts.following);
         prop_assert_eq!(decoded.gists, opts.gists);
         prop_assert_eq!(decoded.starred_gists, opts.starred_gists);
+        prop_assert_eq!(decoded.topics, opts.topics);
+        prop_assert_eq!(decoded.branches, opts.branches);
         prop_assert_eq!(decoded.dry_run, opts.dry_run);
         prop_assert_eq!(decoded.concurrency, opts.concurrency);
     }

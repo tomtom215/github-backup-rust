@@ -8,7 +8,7 @@ use std::path::Path;
 use tracing::info;
 
 use github_backup_types::{
-    config::{BackupOptions, CloneType},
+    config::{glob_match, BackupOptions, CloneType},
     Repository,
 };
 
@@ -102,7 +102,9 @@ fn clone_repo(
 
 /// Returns `true` if `repo` should be included given `opts`.
 ///
-/// Does not modify state; useful for filtering lists before issuing API calls.
+/// Checks fork/private visibility flags, then applies any
+/// [`BackupOptions::include_repos`] and [`BackupOptions::exclude_repos`]
+/// glob-pattern filters.  Does not modify state.
 #[must_use]
 pub fn should_include(repo: &Repository, opts: &BackupOptions) -> bool {
     if repo.fork && !opts.forks {
@@ -111,6 +113,20 @@ pub fn should_include(repo: &Repository, opts: &BackupOptions) -> bool {
     if repo.private && !opts.private {
         return false;
     }
+
+    // Include filter: if patterns are specified, the repo name must match
+    // at least one of them.
+    if !opts.include_repos.is_empty()
+        && !opts.include_repos.iter().any(|p| glob_match(p, &repo.name))
+    {
+        return false;
+    }
+
+    // Exclude filter: repo name must NOT match any of these patterns.
+    if opts.exclude_repos.iter().any(|p| glob_match(p, &repo.name)) {
+        return false;
+    }
+
     true
 }
 
@@ -370,6 +386,64 @@ mod tests {
             forks: true,
             ..Default::default()
         };
+        assert!(should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_include_filter_allows_matching_repo() {
+        let repo = make_repo("rust-backup", false, false);
+        let opts = BackupOptions {
+            include_repos: vec!["rust-*".to_string()],
+            ..Default::default()
+        };
+        assert!(should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_include_filter_blocks_non_matching_repo() {
+        let repo = make_repo("python-tool", false, false);
+        let opts = BackupOptions {
+            include_repos: vec!["rust-*".to_string()],
+            ..Default::default()
+        };
+        assert!(!should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_exclude_filter_blocks_matching_repo() {
+        let repo = make_repo("archived-old-thing", false, false);
+        let opts = BackupOptions {
+            exclude_repos: vec!["archived-*".to_string()],
+            ..Default::default()
+        };
+        assert!(!should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_exclude_filter_allows_non_matching_repo() {
+        let repo = make_repo("live-project", false, false);
+        let opts = BackupOptions {
+            exclude_repos: vec!["archived-*".to_string()],
+            ..Default::default()
+        };
+        assert!(should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_exclude_overrides_include() {
+        let repo = make_repo("rust-archived", false, false);
+        let opts = BackupOptions {
+            include_repos: vec!["rust-*".to_string()],
+            exclude_repos: vec!["*archived*".to_string()],
+            ..Default::default()
+        };
+        assert!(!should_include(&repo, &opts));
+    }
+
+    #[test]
+    fn should_include_empty_filters_includes_all() {
+        let repo = make_repo("anything", false, false);
+        let opts = BackupOptions::default();
         assert!(should_include(&repo, &opts));
     }
 }

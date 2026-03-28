@@ -174,7 +174,7 @@ pub struct Args {
         "labels", "milestones", "releases", "release_assets",
         "hooks", "security_advisories", "wikis",
         "starred", "watched", "followers", "following",
-        "gists", "starred_gists",
+        "gists", "starred_gists", "topics", "branches",
     ])]
     pub all: bool,
 
@@ -301,6 +301,56 @@ pub struct Args {
     #[arg(long)]
     pub starred_gists: bool,
 
+    // ── Additional repository metadata ─────────────────────────────────────
+    /// Back up repository topics (tags).
+    #[arg(long)]
+    pub topics: bool,
+
+    /// Back up the list of repository branches and their protection status.
+    #[arg(long)]
+    pub branches: bool,
+
+    // ── Repository name filters ────────────────────────────────────────────
+    /// Only back up repositories whose names match this glob pattern.
+    ///
+    /// Repeat the flag or separate patterns with commas:
+    /// `--include-repos "rust-*"` or `--include-repos "foo,bar-*"`.
+    ///
+    /// Pattern syntax: `*` matches any sequence, `?` matches one character.
+    /// Matching is case-insensitive.
+    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    pub include_repos: Vec<String>,
+
+    /// Exclude repositories whose names match this glob pattern.
+    ///
+    /// Repeat the flag or separate patterns with commas.
+    /// Takes precedence over `--include-repos`.
+    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    pub exclude_repos: Vec<String>,
+
+    // ── Incremental filter ─────────────────────────────────────────────────
+    /// Only fetch issues and pull requests updated at or after this timestamp.
+    ///
+    /// Accepts ISO 8601 format: `"2024-01-01T00:00:00Z"`.
+    /// Useful for incremental backups.
+    #[arg(long, value_name = "DATETIME")]
+    pub since: Option<String>,
+
+    // ── GitHub Enterprise ──────────────────────────────────────────────────
+    /// Override the GitHub API base URL for GitHub Enterprise Server.
+    ///
+    /// Example: `https://github.example.com/api/v3`
+    ///
+    /// Defaults to `https://api.github.com`.
+    /// Can also be set via the `GITHUB_API_URL` environment variable.
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "GITHUB_API_URL",
+        hide_env_values = false
+    )]
+    pub api_url: Option<String>,
+
     // ── Push-mirror options ────────────────────────────────────────────────
     /// Push repository mirrors to a Gitea-compatible instance after backup.
     ///
@@ -411,150 +461,6 @@ pub struct Args {
     /// Increase log verbosity (`-v` = debug, `-vv` = trace).
     #[arg(long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
-}
-
-impl Args {
-    /// Merges a loaded `ConfigFile` into this [`Args`], with CLI values taking
-    /// precedence over config file values.
-    ///
-    /// Call this after parsing CLI args but before calling
-    /// [`into_backup_options`][Args::into_backup_options].
-    pub fn merge_config(&mut self, cfg: &github_backup_types::config::ConfigFile) {
-        // Owner: config file wins only if CLI did not provide it.
-        if self.owner.is_none() {
-            if let Some(ref o) = cfg.owner {
-                self.owner = Some(o.clone());
-            }
-        }
-        // Token: CLI / env takes precedence.
-        if self.token.is_none() {
-            if let Some(ref t) = cfg.token {
-                self.token = Some(t.clone());
-            }
-        }
-        // Output dir.
-        if self.output.is_none() {
-            if let Some(ref p) = cfg.output {
-                self.output = Some(p.clone());
-            }
-        }
-        // Concurrency: apply config only when still at the default value.
-        if self.concurrency == 4 {
-            if let Some(c) = cfg.concurrency {
-                self.concurrency = c;
-            }
-        }
-        // Boolean categories: config activates them, CLI can also activate.
-        self.repositories |= cfg.repositories.unwrap_or(false);
-        self.issues |= cfg.issues.unwrap_or(false);
-        self.issue_comments |= cfg.issue_comments.unwrap_or(false);
-        self.issue_events |= cfg.issue_events.unwrap_or(false);
-        self.pulls |= cfg.pulls.unwrap_or(false);
-        self.pull_comments |= cfg.pull_comments.unwrap_or(false);
-        self.pull_commits |= cfg.pull_commits.unwrap_or(false);
-        self.pull_reviews |= cfg.pull_reviews.unwrap_or(false);
-        self.labels |= cfg.labels.unwrap_or(false);
-        self.milestones |= cfg.milestones.unwrap_or(false);
-        self.releases |= cfg.releases.unwrap_or(false);
-        self.release_assets |= cfg.release_assets.unwrap_or(false);
-        self.hooks |= cfg.hooks.unwrap_or(false);
-        self.security_advisories |= cfg.security_advisories.unwrap_or(false);
-        self.wikis |= cfg.wikis.unwrap_or(false);
-        self.starred |= cfg.starred.unwrap_or(false);
-        self.watched |= cfg.watched.unwrap_or(false);
-        self.followers |= cfg.followers.unwrap_or(false);
-        self.following |= cfg.following.unwrap_or(false);
-        self.gists |= cfg.gists.unwrap_or(false);
-        self.starred_gists |= cfg.starred_gists.unwrap_or(false);
-        self.forks |= cfg.forks.unwrap_or(false);
-        self.private |= cfg.private.unwrap_or(false);
-        self.all |= cfg.all.unwrap_or(false);
-    }
-
-    /// Converts the parsed (and optionally merged) CLI arguments into an owner
-    /// string, output path, and `BackupOptions`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no owner has been supplied (neither via positional arg nor
-    /// config file). Callers should validate this before calling.
-    #[must_use]
-    pub fn into_backup_options(
-        self,
-    ) -> (
-        String,
-        std::path::PathBuf,
-        github_backup_types::config::BackupOptions,
-    ) {
-        use github_backup_types::config::{BackupOptions, BackupTarget};
-
-        let owner = self
-            .owner
-            .expect("owner must be set before calling into_backup_options");
-        let output = self.output.unwrap_or_else(|| std::path::PathBuf::from("."));
-
-        let target = if self.org {
-            BackupTarget::Org
-        } else {
-            BackupTarget::User
-        };
-
-        let clone_type = self.clone_type.into_clone_type();
-
-        if self.all {
-            return (
-                owner,
-                output,
-                BackupOptions {
-                    target,
-                    prefer_ssh: self.prefer_ssh,
-                    clone_type,
-                    lfs: self.lfs,
-                    no_prune: self.no_prune,
-                    dry_run: self.dry_run,
-                    concurrency: self.concurrency,
-                    ..BackupOptions::all()
-                },
-            );
-        }
-
-        (
-            owner,
-            output,
-            BackupOptions {
-                target,
-                repositories: self.repositories,
-                forks: self.forks,
-                private: self.private,
-                prefer_ssh: self.prefer_ssh,
-                clone_type,
-                lfs: self.lfs,
-                no_prune: self.no_prune,
-                issues: self.issues,
-                issue_comments: self.issue_comments,
-                issue_events: self.issue_events,
-                pulls: self.pulls,
-                pull_comments: self.pull_comments,
-                pull_commits: self.pull_commits,
-                pull_reviews: self.pull_reviews,
-                labels: self.labels,
-                milestones: self.milestones,
-                releases: self.releases,
-                release_assets: self.release_assets,
-                hooks: self.hooks,
-                security_advisories: self.security_advisories,
-                wikis: self.wikis,
-                starred: self.starred,
-                watched: self.watched,
-                followers: self.followers,
-                following: self.following,
-                gists: self.gists,
-                starred_gists: self.starred_gists,
-                dry_run: self.dry_run,
-                concurrency: self.concurrency,
-            },
-        )
-    }
 }
 
 #[cfg(test)]

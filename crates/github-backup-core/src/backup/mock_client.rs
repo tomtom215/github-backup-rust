@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use github_backup_client::{BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest, PullRequestComment,
-    PullRequestCommit, PullRequestReview, Release, Repository, SecurityAdvisory, User,
+    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
+    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, User,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -45,6 +46,8 @@ struct MockData {
     starred: Vec<Repository>,
     watched: Vec<Repository>,
     asset_bytes: Vec<u8>,
+    topics: Vec<String>,
+    branches: Vec<Branch>,
 }
 
 #[allow(dead_code)]
@@ -117,6 +120,18 @@ impl MockBackupClient {
     /// Pre-loads labels.
     pub fn with_labels(self, labels: Vec<Label>) -> Self {
         self.inner.lock().unwrap().labels = labels;
+        self
+    }
+
+    /// Pre-loads topics.
+    pub fn with_topics(self, topics: Vec<String>) -> Self {
+        self.inner.lock().unwrap().topics = topics;
+        self
+    }
+
+    /// Pre-loads branches.
+    pub fn with_branches(self, branches: Vec<Branch>) -> Self {
+        self.inner.lock().unwrap().branches = branches;
         self
     }
 }
@@ -193,6 +208,7 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
+        _since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<Issue>, ClientError>> {
         let d = self.inner.lock().unwrap().issues.clone();
         Box::pin(async move { Ok(d) })
@@ -222,6 +238,7 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
+        _since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<PullRequest>, ClientError>> {
         let d = self.inner.lock().unwrap().pull_requests.clone();
         Box::pin(async move { Ok(d) })
@@ -299,6 +316,24 @@ impl BackupClient for MockBackupClient {
         _repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<SecurityAdvisory>, ClientError>> {
         let d = self.inner.lock().unwrap().security_advisories.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_repo_topics<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>, ClientError>> {
+        let d = self.inner.lock().unwrap().topics.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_branches<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>> {
+        let d = self.inner.lock().unwrap().branches.clone();
         Box::pin(async move { Ok(d) })
     }
 

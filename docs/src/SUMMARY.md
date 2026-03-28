@@ -40,10 +40,16 @@
 - [Systemd Timer](deployment/systemd.md)
 - [Cron](deployment/cron.md)
 
+# Monitoring
+
+- [Monitoring & Reporting](monitoring.md)
+
 # Development
 
 - [Architecture](development/architecture.md)
 - [Contributing](development/contributing.md)
+- [Security](development/security.md)
+- [Troubleshooting](development/troubleshooting.md)
 - [Changelog](development/changelog.md)
 
 ---

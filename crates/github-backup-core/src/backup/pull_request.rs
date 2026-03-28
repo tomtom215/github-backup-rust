@@ -21,6 +21,8 @@ use crate::{error::CoreError, storage::Storage};
 /// - `meta_dir/pull_commits/<number>.json` – commits per PR
 /// - `meta_dir/pull_reviews/<number>.json` – reviews per PR
 ///
+/// Returns the total number of pull requests fetched.
+///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from API calls or storage writes.
@@ -31,20 +33,23 @@ pub async fn backup_pull_requests(
     opts: &BackupOptions,
     meta_dir: &Path,
     storage: &impl Storage,
-) -> Result<(), CoreError> {
+) -> Result<u64, CoreError> {
     if !opts.pulls && !opts.pull_comments && !opts.pull_commits && !opts.pull_reviews {
-        return Ok(());
+        return Ok(0);
     }
 
     info!(owner, repo = repo_name, "fetching pull requests");
-    let pulls = client.list_pull_requests(owner, repo_name).await?;
+    let pulls = client
+        .list_pull_requests(owner, repo_name, opts.since.as_deref())
+        .await?;
+    let count = pulls.len() as u64;
 
     if opts.pulls {
         storage.write_json(&meta_dir.join("pulls.json"), &pulls)?;
     }
 
     if !opts.pull_comments && !opts.pull_commits && !opts.pull_reviews {
-        return Ok(());
+        return Ok(count);
     }
 
     for pr in &pulls {
@@ -79,7 +84,7 @@ pub async fn backup_pull_requests(
         }
     }
 
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(test)]

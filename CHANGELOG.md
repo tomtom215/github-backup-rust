@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type in `github-backup-types` is parsed with the `toml` crate and merged into
   `Args` before the backup starts.
 - **Backup summary report** (`--report <FILE>`): write a machine-readable JSON
-  summary of the run (repos backed up / skipped / errored, gists, total
-  discovered) to an arbitrary path after the backup completes.  Useful for
-  monitoring and alerting integrations.
+  summary of the run to an arbitrary path after the backup completes.  The
+  report now includes `tool_version`, `started_at` (ISO 8601), `duration_secs`,
+  per-category counters, and a `success` boolean — useful for monitoring and
+  alerting integrations.
 - **Modular CLI**: `cli.rs` (724 lines) refactored into:
   - `cli/args.rs` — `Args` struct, `merge_config()`, `into_backup_options()`
   - `cli/clone_type.rs` — `CliCloneType` parser
@@ -27,19 +28,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `git/mod.rs` — `CloneOptions`, `GitRunner` trait, `ProcessGitRunner`
   - `git/askpass.rs` — `AskpassScript` RAII guard
   - `git/spy.rs` — `SpyGitRunner` test stub + tests
+- **Repository name filters** (`--include-repos` / `--exclude-repos`): back
+  up only a subset of repositories using glob patterns (`*` / `?`), matching
+  is case-insensitive.  Patterns can be comma-separated or the flag can be
+  repeated.  `--exclude-repos` takes precedence over `--include-repos`.
+- **`--since <DATETIME>`**: limit issue and pull-request API calls to items
+  updated at or after an ISO 8601 timestamp.  Enables efficient incremental
+  backups — re-use `started_at` from the previous run's JSON report.
+- **Topics backup** (`--topics`): write `topics.json` (repository tags) per
+  repository.  Already had a `GitHubClient` endpoint; now wired end-to-end
+  through the `BackupClient` trait and the engine.
+- **Branch list backup** (`--branches`): write `branches.json` per repository
+  containing all branch names, tip SHA-1s, and protection status.  New
+  `Branch` / `BranchCommit` types added to `github-backup-types`.
+- **`BackupStats::elapsed_secs()`**: wall-clock duration tracking using
+  `std::time::Instant`; displayed in the `Display` output and included in the
+  JSON report.
+- **GitHub Pages deployment** (`pages.yml`): new CI workflow builds the
+  mdBook and deploys it to `github-pages` environment on every push to `main`.
 - **Full mdBook documentation** in `docs/`:
   - Installation, Quick Start, Authentication
   - Backup Categories, Issues & PRs, Releases, Gists & Wikis, User Data
   - Local Storage, S3 Storage, Mirroring
   - CLI Reference, Config File, Environment Variables, Output Layout
   - Docker, Systemd Timer, Cron
+  - **Monitoring & Reporting** (new): JSON report schema, Prometheus/Grafana
+    integration, Loki alerting, incremental backup patterns
+  - **Security** (new): token scopes, credential handling, TLS policy,
+    dependency policy, vulnerability reporting
+  - **Troubleshooting** (new): auth errors, rate limits, git failures, S3
+    issues, debug logging
   - Architecture, Contributing, Changelog, FAQ
+
+- **GitHub Enterprise Server** support via `--api-url <URL>` (or
+  `GITHUB_API_URL` environment variable / `api_url` config file key).  Pass
+  the GHES API base URL (e.g. `https://github.example.com/api/v3`) and all API
+  requests are directed there.  New `GitHubClient::with_api_url()` constructor
+  added to `github-backup-client`.
+- **Extended backup stats**: `BackupStats` now tracks `issues_fetched` and
+  `prs_fetched` across all repositories.  Both counters appear in the log
+  output, the `Display` summary, and the JSON report (`--report`).
+- **`--since` format validation**: the ISO 8601 value is now validated before
+  the backup starts, producing a clear error for malformed timestamps.
+- **`dry_run` gap fixed**: `backup_gists` and `backup_user_data` now respect
+  `opts.dry_run` and skip all I/O in dry-run mode (previously only
+  per-repository operations were skipped).
+- **Modular code**: `config.rs` split into `config.rs` + `glob.rs`; `args.rs`
+  split into `args.rs` (struct) + `args_impl.rs` (`merge_config` / `into_backup_options`).
 
 ### Changed
 
 - `owner` positional argument is now optional; it can be supplied via the
   `owner` key in the config file instead.
 - `--output` flag now defaults to `.` when not specified via CLI or config.
+- `BackupClient::list_issues` and `BackupClient::list_pull_requests` now
+  accept an optional `since: Option<&str>` parameter (used by `--since`).
+- `BackupOptions::all()` now also enables `topics` and `branches`.
+- `BackupStats::Display` now includes elapsed time, issues fetched, and PRs
+  fetched.
+- `backup_issues` and `backup_pull_requests` return `u64` (count of items
+  fetched) instead of `()`.  The engine uses these to populate `BackupStats`.
 
 ---
 

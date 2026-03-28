@@ -19,6 +19,9 @@ use crate::{error::CoreError, storage::Storage};
 /// - `meta_dir/issue_comments/<number>.json` – comments per issue
 /// - `meta_dir/issue_events/<number>.json` – events per issue
 ///
+/// Returns the total number of issues fetched (including PR-linked ones, which
+/// are skipped for per-issue sub-resources).
+///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from API calls or storage writes.
@@ -29,20 +32,23 @@ pub async fn backup_issues(
     opts: &BackupOptions,
     meta_dir: &Path,
     storage: &impl Storage,
-) -> Result<(), CoreError> {
+) -> Result<u64, CoreError> {
     if !opts.issues && !opts.issue_comments && !opts.issue_events {
-        return Ok(());
+        return Ok(0);
     }
 
     info!(owner, repo = repo_name, "fetching issues");
-    let issues = client.list_issues(owner, repo_name).await?;
+    let issues = client
+        .list_issues(owner, repo_name, opts.since.as_deref())
+        .await?;
+    let count = issues.len() as u64;
 
     if opts.issues {
         storage.write_json(&meta_dir.join("issues.json"), &issues)?;
     }
 
     if !opts.issue_comments && !opts.issue_events {
-        return Ok(());
+        return Ok(count);
     }
 
     for issue in &issues {
@@ -73,7 +79,7 @@ pub async fn backup_issues(
         }
     }
 
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(test)]

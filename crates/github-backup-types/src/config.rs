@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::glob::glob_match;
+
 /// Authentication credential used to interact with the GitHub API.
 #[derive(Debug, Clone)]
 pub enum Credential {
@@ -210,6 +212,44 @@ pub struct BackupOptions {
     /// Backup gists starred by the target user.
     pub starred_gists: bool,
 
+    // ── Additional repository metadata ────────────────────────────────────
+    /// Backup the list of repository topics (tags).
+    pub topics: bool,
+    /// Backup the list of repository branches and their protection status.
+    pub branches: bool,
+
+    // ── Repository name filters ───────────────────────────────────────────
+    /// Only back up repositories whose names match at least one of these glob
+    /// patterns.  An empty list means *all* repositories are included.
+    ///
+    /// Pattern syntax: `*` matches any sequence of characters, `?` matches
+    /// exactly one character.  Matching is case-insensitive.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use github_backup_types::config::BackupOptions;
+    /// let opts = BackupOptions {
+    ///     include_repos: vec!["rust-*".to_string(), "my-repo".to_string()],
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub include_repos: Vec<String>,
+
+    /// Exclude repositories whose names match at least one of these glob
+    /// patterns.  Takes precedence over [`include_repos`].
+    ///
+    /// [`include_repos`]: BackupOptions::include_repos
+    pub exclude_repos: Vec<String>,
+
+    // ── Incremental filter ────────────────────────────────────────────────
+    /// Only fetch issues and pull requests updated *at or after* this ISO 8601
+    /// timestamp (e.g. `"2024-01-01T00:00:00Z"`).
+    ///
+    /// Useful for incremental backups: run a full backup once, then pass the
+    /// previous run's start time to limit subsequent API calls.
+    pub since: Option<String>,
+
     // ── Execution options ─────────────────────────────────────────────────
     /// When `true`, log what would be done without writing any files or
     /// running any git commands.
@@ -223,7 +263,9 @@ impl BackupOptions {
     /// Returns a configuration that enables every available backup category.
     ///
     /// Equivalent to the `--all` flag in the Python reference implementation,
-    /// but also enables `starred_gists` and `pull_reviews`.
+    /// but also enables `starred_gists`, `pull_reviews`, `topics`, and
+    /// `branches`.  Repository name filters and `since` are left at their
+    /// defaults (no filtering).
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -255,6 +297,11 @@ impl BackupOptions {
             following: true,
             gists: true,
             starred_gists: true,
+            topics: true,
+            branches: true,
+            include_repos: vec![],
+            exclude_repos: vec![],
+            since: None,
             dry_run: false,
             concurrency: 4,
         }
@@ -294,6 +341,12 @@ pub struct ConfigFile {
     ///
     /// Prefer the `GITHUB_TOKEN` environment variable over storing tokens here.
     pub token: Option<String>,
+
+    /// Override the GitHub API base URL for GitHub Enterprise Server.
+    ///
+    /// Example: `"https://github.example.com/api/v3"`.
+    /// Defaults to `https://api.github.com` when absent.
+    pub api_url: Option<String>,
 
     /// Root directory where backup artefacts will be written.
     pub output: Option<PathBuf>,
@@ -354,6 +407,20 @@ pub struct ConfigFile {
     pub gists: Option<bool>,
     /// Back up starred gists.
     pub starred_gists: Option<bool>,
+
+    /// Back up repository topics.
+    pub topics: Option<bool>,
+    /// Back up the list of repository branches.
+    pub branches: Option<bool>,
+
+    /// Only back up repositories matching these glob patterns (comma-separated
+    /// or as a TOML array).
+    pub include_repos: Option<Vec<String>>,
+    /// Exclude repositories matching these glob patterns.
+    pub exclude_repos: Option<Vec<String>>,
+
+    /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
+    pub since: Option<String>,
 }
 
 impl ConfigFile {
@@ -382,144 +449,5 @@ impl ConfigFile {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn credential_token_authorization_header_has_bearer_prefix() {
-        let cred = Credential::Token("ghp_test123".to_string());
-        assert_eq!(cred.authorization_header(), "Bearer ghp_test123");
-    }
-
-    #[test]
-    fn output_config_repos_dir_ends_with_expected_suffix() {
-        let cfg = OutputConfig::new("/backup");
-        let path = cfg.repos_dir("octocat");
-        assert_eq!(path, PathBuf::from("/backup/octocat/git/repos"));
-    }
-
-    #[test]
-    fn output_config_repo_meta_dir_ends_with_expected_suffix() {
-        let cfg = OutputConfig::new("/backup");
-        let path = cfg.repo_meta_dir("octocat", "Hello-World");
-        assert_eq!(
-            path,
-            PathBuf::from("/backup/octocat/json/repos/Hello-World")
-        );
-    }
-
-    #[test]
-    fn backup_options_all_enables_repositories() {
-        let opts = BackupOptions::all();
-        assert!(opts.repositories);
-        assert!(opts.issues);
-        assert!(opts.pulls);
-        assert!(opts.releases);
-    }
-
-    #[test]
-    fn backup_options_default_disables_all_categories() {
-        let opts = BackupOptions::default();
-        assert!(!opts.repositories);
-        assert!(!opts.issues);
-        assert!(!opts.pulls);
-    }
-
-    #[test]
-    fn backup_options_roundtrip_json() {
-        let opts = BackupOptions::all();
-        let json = serde_json::to_string(&opts).expect("serialise");
-        let decoded: BackupOptions = serde_json::from_str(&json).expect("deserialise");
-        assert_eq!(decoded.repositories, opts.repositories);
-        assert_eq!(decoded.issues, opts.issues);
-    }
-
-    #[test]
-    fn clone_type_default_is_mirror() {
-        assert_eq!(CloneType::default(), CloneType::Mirror);
-    }
-
-    #[test]
-    fn clone_type_serialises_as_lowercase_string() {
-        let json = serde_json::to_string(&CloneType::Mirror).unwrap();
-        assert_eq!(json, r#""mirror""#);
-        let json = serde_json::to_string(&CloneType::Bare).unwrap();
-        assert_eq!(json, r#""bare""#);
-        let json = serde_json::to_string(&CloneType::Full).unwrap();
-        assert_eq!(json, r#""full""#);
-    }
-
-    #[test]
-    fn clone_type_shallow_serialises_with_depth() {
-        let json = serde_json::to_string(&CloneType::Shallow(10)).unwrap();
-        assert_eq!(json, r#"{"shallow":10}"#);
-    }
-
-    #[test]
-    fn clone_type_roundtrips_json() {
-        for ct in [
-            CloneType::Mirror,
-            CloneType::Bare,
-            CloneType::Full,
-            CloneType::Shallow(5),
-        ] {
-            let json = serde_json::to_string(&ct).unwrap();
-            let decoded: CloneType = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, ct);
-        }
-    }
-
-    #[test]
-    fn backup_options_clone_type_defaults_to_mirror() {
-        let opts = BackupOptions::default();
-        assert_eq!(opts.clone_type, CloneType::Mirror);
-    }
-
-    #[test]
-    fn config_file_from_toml_str_parses_all_fields() {
-        let toml = r#"
-owner = "octocat"
-output = "/var/backup"
-concurrency = 8
-repositories = true
-issues = true
-pulls = true
-"#;
-        let cfg = ConfigFile::from_toml_str(toml).expect("parse");
-        assert_eq!(cfg.owner.as_deref(), Some("octocat"));
-        assert_eq!(cfg.output, Some(PathBuf::from("/var/backup")));
-        assert_eq!(cfg.concurrency, Some(8));
-        assert_eq!(cfg.repositories, Some(true));
-        assert_eq!(cfg.issues, Some(true));
-        assert_eq!(cfg.pulls, Some(true));
-    }
-
-    #[test]
-    fn config_file_from_toml_str_partial_config() {
-        let toml = r#"owner = "octocat""#;
-        let cfg = ConfigFile::from_toml_str(toml).expect("parse");
-        assert_eq!(cfg.owner.as_deref(), Some("octocat"));
-        assert!(cfg.repositories.is_none());
-    }
-
-    #[test]
-    fn config_file_from_toml_str_empty_is_valid() {
-        let cfg = ConfigFile::from_toml_str("").expect("empty config is valid");
-        assert!(cfg.owner.is_none());
-    }
-
-    #[test]
-    fn config_file_from_toml_str_invalid_returns_error() {
-        let result = ConfigFile::from_toml_str("owner = {not a string}");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_file_default_has_all_none() {
-        let cfg = ConfigFile::default();
-        assert!(cfg.owner.is_none());
-        assert!(cfg.token.is_none());
-        assert!(cfg.output.is_none());
-        assert!(cfg.concurrency.is_none());
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

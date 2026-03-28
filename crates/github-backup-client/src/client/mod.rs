@@ -23,7 +23,7 @@ use crate::error::ClientError;
 use crate::pagination::parse_next_link;
 use crate::rate_limit::RateLimitInfo;
 
-const GITHUB_API_BASE: &str = "https://api.github.com";
+pub(super) const GITHUB_API_BASE: &str = "https://api.github.com";
 pub(super) const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
 pub(super) const PER_PAGE: u32 = 100;
 /// Maximum number of times to retry a rate-limited request.
@@ -40,12 +40,18 @@ type HyperClient = Client<
 
 /// Async GitHub REST API v3 client.
 ///
-/// Construct via [`GitHubClient::new`]. The client is cheaply cloneable
-/// (the underlying hyper connection pool is `Arc`-wrapped).
+/// Construct via [`GitHubClient::new`] for standard GitHub.com use, or
+/// [`GitHubClient::with_api_url`] to target a **GitHub Enterprise Server**
+/// instance (supply the `https://hostname/api/v3` base URL).
+///
+/// The client is cheaply cloneable — the underlying hyper connection pool is
+/// `Arc`-wrapped.
 #[derive(Clone)]
 pub struct GitHubClient {
     pub(super) http: HyperClient,
     pub(super) credential: Credential,
+    /// Base URL for all API requests.  Defaults to `https://api.github.com`.
+    pub(super) api_base: String,
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -57,12 +63,27 @@ impl std::fmt::Debug for GitHubClient {
 }
 
 impl GitHubClient {
-    /// Creates a new [`GitHubClient`] using the system CA certificate bundle.
+    /// Creates a new [`GitHubClient`] targeting `https://api.github.com`.
+    ///
+    /// For GitHub Enterprise Server use [`GitHubClient::with_api_url`].
     ///
     /// # Errors
     ///
     /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
     pub fn new(credential: Credential) -> Result<Self, ClientError> {
+        Self::with_api_url(credential, GITHUB_API_BASE)
+    }
+
+    /// Creates a new [`GitHubClient`] targeting the given `api_base_url`.
+    ///
+    /// Use this for **GitHub Enterprise Server** instances, where the API is
+    /// typically at `https://github.example.com/api/v3`.  The URL is stored
+    /// verbatim and used as the prefix for all API requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
+    pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
         let tls_config = build_tls_config()?;
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(tls_config)
@@ -71,8 +92,21 @@ impl GitHubClient {
             .build();
 
         let http = Client::builder(TokioExecutor::new()).build(https);
+        let api_base = api_base_url.trim_end_matches('/').to_string();
 
-        Ok(Self { http, credential })
+        Ok(Self {
+            http,
+            credential,
+            api_base,
+        })
+    }
+
+    /// Returns the API base URL (without trailing slash).
+    ///
+    /// Used by endpoint methods to build request URLs.
+    #[must_use]
+    pub(super) fn api(&self) -> &str {
+        &self.api_base
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
@@ -286,5 +320,28 @@ mod tests {
         let cred = Credential::Token("ghp_mytoken".to_string());
         let client = GitHubClient::new(cred).expect("construct client");
         assert_eq!(client.token(), Some("ghp_mytoken".to_string()));
+    }
+
+    #[test]
+    fn github_client_default_api_base_is_github() {
+        let cred = Credential::Token("ghp_test".to_string());
+        let client = GitHubClient::new(cred).expect("construct client");
+        assert_eq!(client.api(), "https://api.github.com");
+    }
+
+    #[test]
+    fn github_client_with_api_url_uses_custom_base() {
+        let cred = Credential::Token("ghp_test".to_string());
+        let client =
+            GitHubClient::with_api_url(cred, "https://github.example.com/api/v3").expect("client");
+        assert_eq!(client.api(), "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn github_client_with_api_url_strips_trailing_slash() {
+        let cred = Credential::Token("ghp_test".to_string());
+        let client =
+            GitHubClient::with_api_url(cred, "https://github.example.com/api/v3/").expect("client");
+        assert_eq!(client.api(), "https://github.example.com/api/v3");
     }
 }

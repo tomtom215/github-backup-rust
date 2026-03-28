@@ -193,6 +193,7 @@ where
                     &owner,
                     &repo,
                     &clone_opts,
+                    &task_stats,
                 )
                 .await;
                 match result {
@@ -248,6 +249,7 @@ where
 /// (filtered out by fork/private settings or dry-run mode).
 ///
 /// Extracted as a free function so it can be spawned as an independent task.
+#[allow(clippy::too_many_arguments)]
 async fn backup_one_repo<S, G>(
     client: &GitHubClient,
     storage: &S,
@@ -257,6 +259,7 @@ async fn backup_one_repo<S, G>(
     owner: &str,
     repo: &Repository,
     clone_opts: &CloneOptions,
+    stats: &BackupStats,
 ) -> Result<bool, CoreError>
 where
     S: Storage,
@@ -279,7 +282,7 @@ where
 
     backup_repository(repo, opts, &repos_dir, &meta_dir, storage, git, clone_opts).await?;
     backup_wiki(repo, opts, &wikis_dir, git, clone_opts).await?;
-    backup_repo_metadata(client, storage, opts, owner, repo, &meta_dir).await?;
+    backup_repo_metadata(client, storage, opts, owner, repo, &meta_dir, stats).await?;
 
     Ok(true)
 }
@@ -292,12 +295,17 @@ async fn backup_repo_metadata<S>(
     owner: &str,
     repo: &Repository,
     meta_dir: &std::path::Path,
+    stats: &BackupStats,
 ) -> Result<(), CoreError>
 where
     S: Storage,
 {
-    backup_issues(client, owner, &repo.name, opts, meta_dir, storage).await?;
-    backup_pull_requests(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    let issues_count = backup_issues(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    stats.add_issues(issues_count);
+
+    let prs_count =
+        backup_pull_requests(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    stats.add_prs(prs_count);
     backup_releases(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
     if opts.labels {
@@ -334,6 +342,25 @@ where
             }
             Err(e) => return Err(e.into()),
         }
+    }
+
+    if opts.topics {
+        match client.list_repo_topics(owner, &repo.name).await {
+            Ok(topics) => {
+                storage.write_json(&meta_dir.join("topics.json"), &topics)?;
+            }
+            Err(github_backup_client::ClientError::ApiError {
+                status: 404 | 403, ..
+            }) => {
+                info!(repo = %repo.full_name, "skipping topics (not available)");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if opts.branches {
+        let branches = client.list_branches(owner, &repo.name).await?;
+        storage.write_json(&meta_dir.join("branches.json"), &branches)?;
     }
 
     Ok(())

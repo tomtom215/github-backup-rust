@@ -30,6 +30,11 @@ pub async fn backup_user_data(
     owner_json_dir: &Path,
     storage: &impl Storage,
 ) -> Result<(), CoreError> {
+    if opts.dry_run {
+        info!(username, "dry-run: skipping user data backup");
+        return Ok(());
+    }
+
     if opts.starred {
         info!(username, "fetching starred repositories");
         let starred = client.list_starred(username).await?;
@@ -168,6 +173,32 @@ mod tests {
         assert!(storage
             .get(&PathBuf::from(format!("{JSON_DIR}/starred.json")))
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn backup_user_data_dry_run_writes_nothing() {
+        let client = MockBackupClient::new();
+        let storage = MemStorage::default();
+        let opts = BackupOptions {
+            starred: true,
+            watched: true,
+            followers: true,
+            following: true,
+            dry_run: true,
+            ..Default::default()
+        };
+
+        backup_user_data(
+            &client,
+            "octocat",
+            &opts,
+            &PathBuf::from(JSON_DIR),
+            &storage,
+        )
+        .await
+        .expect("backup_user_data dry_run");
+
+        assert_eq!(storage.len(), 0, "dry-run must write nothing");
     }
 
     #[tokio::test]
