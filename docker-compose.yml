@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: MIT
+# Copyright 2026 Tom F
+#
+# Docker Compose configurations for github-backup-rust.
+#
+# Profiles:
+#   (default)  – local filesystem backup
+#   s3         – backup JSON metadata to AWS S3
+#   b2         – backup JSON metadata to Backblaze B2 (S3-compatible)
+#   minio      – backup to self-hosted MinIO
+#   codeberg   – push mirrors to Codeberg after backup
+#
+# Usage:
+#   # Local backup:
+#   GITHUB_TOKEN=ghp_xxx docker compose run --rm backup octocat --all
+#
+#   # S3 backup:
+#   GITHUB_TOKEN=ghp_xxx \
+#   AWS_ACCESS_KEY_ID=AKID AWS_SECRET_ACCESS_KEY=SECRET \
+#   docker compose --profile s3 run --rm backup-s3 octocat --all
+#
+#   # Codeberg mirror:
+#   GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_token \
+#   docker compose --profile codeberg run --rm backup-codeberg octocat --all
+
+services:
+  # ── Local filesystem backup ────────────────────────────────────────────────
+  backup:
+    build: .
+    image: github-backup-rust:latest
+    volumes:
+      - ./data:/backup
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+    # Pass remaining arguments via the command:
+    # docker compose run --rm backup octocat --all
+    #
+    # Or use --output inside the container:
+    command: ["--output", "/backup"]
+
+  # ── AWS S3 metadata sync ───────────────────────────────────────────────────
+  backup-s3:
+    profiles: [s3]
+    build: .
+    image: github-backup-rust:latest
+    volumes:
+      - ./data:/backup
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    command:
+      - "--output"
+      - "/backup"
+      - "--s3-bucket"
+      - "${S3_BUCKET:-my-github-backup-bucket}"
+      - "--s3-region"
+      - "${S3_REGION:-us-east-1}"
+
+  # ── Backblaze B2 (S3-compatible) ───────────────────────────────────────────
+  backup-b2:
+    profiles: [b2]
+    build: .
+    image: github-backup-rust:latest
+    volumes:
+      - ./data:/backup
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      AWS_ACCESS_KEY_ID: ${B2_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${B2_APP_KEY}
+    command:
+      - "--output"
+      - "/backup"
+      - "--s3-bucket"
+      - "${B2_BUCKET:-my-b2-bucket}"
+      - "--s3-region"
+      - "${B2_REGION:-us-west-004}"
+      - "--s3-endpoint"
+      - "https://s3.${B2_REGION:-us-west-004}.backblazeb2.com"
+
+  # ── MinIO (self-hosted S3-compatible) ──────────────────────────────────────
+  minio:
+    profiles: [minio]
+    image: minio/minio:latest
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backup-minio:
+    profiles: [minio]
+    build: .
+    image: github-backup-rust:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./data:/backup
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command:
+      - "--output"
+      - "/backup"
+      - "--s3-bucket"
+      - "${MINIO_BUCKET:-github-backup}"
+      - "--s3-region"
+      - "us-east-1"
+      - "--s3-endpoint"
+      - "http://minio:9000"
+
+  # ── Codeberg mirror ────────────────────────────────────────────────────────
+  backup-codeberg:
+    profiles: [codeberg]
+    build: .
+    image: github-backup-rust:latest
+    volumes:
+      - ./data:/backup
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      MIRROR_TOKEN: ${MIRROR_TOKEN}
+    command:
+      - "--output"
+      - "/backup"
+      - "--mirror-to"
+      - "${MIRROR_URL:-https://codeberg.org}"
+      - "--mirror-owner"
+      - "${MIRROR_OWNER}"
+
+volumes:
+  minio-data:

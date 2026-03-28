@@ -5,10 +5,12 @@ members = [
     "crates/github-backup-client",
     "crates/github-backup-core",
     "crates/github-backup",
+    "crates/github-backup-mirror",
+    "crates/github-backup-s3",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Tom F"]
@@ -26,7 +28,7 @@ tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
-hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "tls12"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "http2", "tls12"] }
 rustls = { version = "0.23", features = ["std"] }
 rustls-native-certs = "0.8"
 bytes = "1"
@@ -49,14 +51,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # URL parsing
 url = "2"
 
+# Cryptography (AWS SigV4 signing for S3 backend)
+sha2 = "0.10"
+hmac = "0.12"
+
 # Workspace crates
 github-backup-types = { path = "crates/github-backup-types" }
 github-backup-client = { path = "crates/github-backup-client" }
 github-backup-core = { path = "crates/github-backup-core" }
+github-backup-mirror = { path = "crates/github-backup-mirror" }
+github-backup-s3 = { path = "crates/github-backup-s3" }
 
 # Test-only
 tokio-test = "0.4"
 proptest = "1"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

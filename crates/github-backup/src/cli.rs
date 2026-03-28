@@ -4,6 +4,7 @@
 //! Command-line argument definitions using [`clap`].
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{ArgGroup, Parser};
 
@@ -15,9 +16,28 @@ use clap::{ArgGroup, Parser};
 /// # Authentication
 ///
 /// Provide a personal access token (classic or fine-grained) via `--token` or
-/// the `GITHUB_TOKEN` environment variable.
+/// the `GITHUB_TOKEN` environment variable, **or** use `--device-auth` to
+/// authenticate interactively via the GitHub OAuth device flow (requires
+/// a registered OAuth App — see `--oauth-client-id`).
 ///
 /// Fine-grained tokens are recommended for long-running or scheduled backups.
+///
+/// # Clone Types
+///
+/// By default repositories are cloned as bare mirrors (`--clone-type mirror`).
+/// Choose `bare`, `full`, or `shallow:<depth>` to trade completeness for
+/// speed or working-tree access.
+///
+/// # Mirror to Self-Hosted Git
+///
+/// After the primary backup, use `--mirror-to` to push every cloned
+/// repository as a mirror to a Gitea-compatible instance (Codeberg, Forgejo,
+/// self-hosted Gitea, …).
+///
+/// # S3 Storage
+///
+/// Use `--s3-bucket` (and related flags) to sync JSON metadata and release
+/// assets to any S3-compatible object store (AWS, Backblaze B2, MinIO, …).
 ///
 /// # Examples
 ///
@@ -31,6 +51,20 @@ use clap::{ArgGroup, Parser};
 /// github-backup my-org --token ghp_xxx --output /backup --org \
 ///   --repositories --issues --concurrency 8
 /// ```
+///
+/// Use the OAuth device flow:
+/// ```text
+/// github-backup octocat --device-auth --oauth-client-id YOUR_APP_ID \
+///   --output /backup --all
+/// ```
+///
+/// Shallow-clone repos and mirror to Codeberg:
+/// ```text
+/// github-backup octocat --token ghp_xxx --output /backup --repositories \
+///   --clone-type shallow:5 \
+///   --mirror-to https://codeberg.org \
+///   --mirror-token CODEBERG_TOKEN --mirror-owner your_username
+/// ```
 #[derive(Debug, Parser)]
 #[command(
     name = "github-backup",
@@ -41,7 +75,7 @@ use clap::{ArgGroup, Parser};
 #[command(group(
     ArgGroup::new("auth")
         .required(true)
-        .args(["token"]),
+        .args(["token", "device_auth"]),
 ))]
 pub struct Args {
     /// GitHub username or organisation name to back up.
@@ -59,7 +93,37 @@ pub struct Args {
         value_name = "TOKEN",
         hide_env_values = true
     )]
-    pub token: String,
+    pub token: Option<String>,
+
+    /// Authenticate interactively using the GitHub OAuth device flow.
+    ///
+    /// Opens a browser code at `github.com/login/device`.  Requires
+    /// `--oauth-client-id`.
+    #[arg(long)]
+    pub device_auth: bool,
+
+    /// GitHub OAuth App client ID (required when using `--device-auth`).
+    ///
+    /// Create an OAuth App at <https://github.com/settings/developers>.
+    /// Can also be set via the `GITHUB_OAUTH_CLIENT_ID` environment variable.
+    #[arg(
+        long,
+        value_name = "CLIENT_ID",
+        env = "GITHUB_OAUTH_CLIENT_ID",
+        requires = "device_auth"
+    )]
+    pub oauth_client_id: Option<String>,
+
+    /// OAuth scopes to request (space-separated).
+    ///
+    /// Default: `"repo gist read:org"` — sufficient for a complete backup.
+    #[arg(
+        long,
+        value_name = "SCOPES",
+        default_value = "repo gist read:org",
+        requires = "device_auth"
+    )]
+    pub oauth_scopes: String,
 
     // ── Output ─────────────────────────────────────────────────────────────
     /// Root directory where backup artefacts will be written.
@@ -102,6 +166,18 @@ pub struct Args {
     /// Clone using SSH URLs instead of HTTPS.
     #[arg(long)]
     pub prefer_ssh: bool,
+
+    /// How to clone repositories.
+    ///
+    /// Accepted values:
+    /// - `mirror` (default) — `git clone --mirror`; complete backup
+    /// - `bare`             — `git clone --bare`; no remote-tracking refs
+    /// - `full`             — `git clone`; working-tree clone
+    /// - `shallow:<depth>`  — `git clone --depth <n>`; limited history
+    ///
+    /// Example: `--clone-type shallow:10`
+    #[arg(long, value_name = "TYPE", default_value = "mirror")]
+    pub clone_type: CliCloneType,
 
     /// Clone with Git LFS support.
     #[arg(long)]
@@ -197,6 +273,97 @@ pub struct Args {
     #[arg(long)]
     pub starred_gists: bool,
 
+    // ── Push-mirror options ────────────────────────────────────────────────
+    /// Push repository mirrors to a Gitea-compatible instance after backup.
+    ///
+    /// Supported hosts: Gitea, Codeberg (<https://codeberg.org>), Forgejo.
+    /// Provide the base URL, e.g. `https://codeberg.org`.
+    #[arg(long, value_name = "URL")]
+    pub mirror_to: Option<String>,
+
+    /// API token for the mirror destination.
+    ///
+    /// Can also be set via the `MIRROR_TOKEN` environment variable.
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "MIRROR_TOKEN",
+        hide_env_values = true,
+        requires = "mirror_to"
+    )]
+    pub mirror_token: Option<String>,
+
+    /// Owner name at the mirror destination (username or org).
+    #[arg(long, value_name = "OWNER", requires = "mirror_to")]
+    pub mirror_owner: Option<String>,
+
+    /// Create repositories as private at the mirror destination.
+    #[arg(long, requires = "mirror_to")]
+    pub mirror_private: bool,
+
+    // ── S3 storage options ─────────────────────────────────────────────────
+    /// S3 bucket to sync backup metadata to.
+    ///
+    /// Works with AWS S3, Backblaze B2 (S3-compatible), MinIO, Cloudflare R2,
+    /// DigitalOcean Spaces, and Wasabi.
+    #[arg(long, value_name = "BUCKET")]
+    pub s3_bucket: Option<String>,
+
+    /// AWS region for the S3 bucket (e.g., `us-east-1`).
+    #[arg(
+        long,
+        value_name = "REGION",
+        default_value = "us-east-1",
+        requires = "s3_bucket"
+    )]
+    pub s3_region: String,
+
+    /// Key prefix for all S3 objects (e.g., `github-backup/`).
+    #[arg(
+        long,
+        value_name = "PREFIX",
+        default_value = "",
+        requires = "s3_bucket"
+    )]
+    pub s3_prefix: String,
+
+    /// Custom S3-compatible endpoint (for B2, MinIO, R2, etc.).
+    ///
+    /// Example for B2: `https://s3.us-west-004.backblazeb2.com`
+    #[arg(long, value_name = "URL", requires = "s3_bucket")]
+    pub s3_endpoint: Option<String>,
+
+    /// AWS access key ID.
+    ///
+    /// Can also be set via the `AWS_ACCESS_KEY_ID` environment variable.
+    #[arg(
+        long,
+        value_name = "KEY",
+        env = "AWS_ACCESS_KEY_ID",
+        hide_env_values = true,
+        requires = "s3_bucket"
+    )]
+    pub s3_access_key: Option<String>,
+
+    /// AWS secret access key.
+    ///
+    /// Can also be set via the `AWS_SECRET_ACCESS_KEY` environment variable.
+    #[arg(
+        long,
+        value_name = "SECRET",
+        env = "AWS_SECRET_ACCESS_KEY",
+        hide_env_values = true,
+        requires = "s3_bucket"
+    )]
+    pub s3_secret_key: Option<String>,
+
+    /// Also upload binary release assets to S3 (can be very large).
+    ///
+    /// By default, only JSON metadata is uploaded; binary release assets
+    /// are kept local only.
+    #[arg(long, requires = "s3_bucket")]
+    pub s3_include_assets: bool,
+
     // ── Execution ─────────────────────────────────────────────────────────
     /// Maximum number of repositories to back up in parallel.
     ///
@@ -230,10 +397,13 @@ impl Args {
             BackupTarget::User
         };
 
+        let clone_type = self.clone_type.into_clone_type();
+
         if self.all {
             return BackupOptions {
                 target,
                 prefer_ssh: self.prefer_ssh,
+                clone_type,
                 lfs: self.lfs,
                 no_prune: self.no_prune,
                 dry_run: self.dry_run,
@@ -248,7 +418,7 @@ impl Args {
             forks: self.forks,
             private: self.private,
             prefer_ssh: self.prefer_ssh,
-            bare: true, // always use bare mirrors for git clones
+            clone_type,
             lfs: self.lfs,
             no_prune: self.no_prune,
             issues: self.issues,
@@ -277,16 +447,74 @@ impl Args {
     }
 }
 
+// ── Clone type argument ───────────────────────────────────────────────────────
+
+/// CLI representation of `--clone-type`.
+///
+/// Parses the human-friendly strings accepted by the `--clone-type` flag.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CliCloneType {
+    /// `git clone --mirror`
+    #[default]
+    Mirror,
+    /// `git clone --bare`
+    Bare,
+    /// `git clone` (full working tree)
+    Full,
+    /// `git clone --depth <n>`
+    Shallow(u32),
+}
+
+impl CliCloneType {
+    /// Converts to the corresponding [`github_backup_types::config::CloneType`].
+    #[must_use]
+    pub fn into_clone_type(self) -> github_backup_types::config::CloneType {
+        use github_backup_types::config::CloneType;
+        match self {
+            Self::Mirror => CloneType::Mirror,
+            Self::Bare => CloneType::Bare,
+            Self::Full => CloneType::Full,
+            Self::Shallow(d) => CloneType::Shallow(d),
+        }
+    }
+}
+
+impl FromStr for CliCloneType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mirror" => Ok(Self::Mirror),
+            "bare" => Ok(Self::Bare),
+            "full" => Ok(Self::Full),
+            s if s.starts_with("shallow:") => {
+                let depth_str = &s["shallow:".len()..];
+                let depth: u32 = depth_str.parse().map_err(|_| {
+                    format!("invalid depth '{depth_str}' in '{s}'; expected e.g. 'shallow:10'")
+                })?;
+                if depth == 0 {
+                    return Err("shallow depth must be at least 1".to_string());
+                }
+                Ok(Self::Shallow(depth))
+            }
+            _ => Err(format!(
+                "unknown clone type '{s}'; valid values: mirror, bare, full, shallow:<depth>"
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use github_backup_types::config::CloneType;
 
     #[test]
     fn args_parse_minimal_required_fields() {
         let args = Args::parse_from(["github-backup", "octocat", "--token", "ghp_test"]);
         assert_eq!(args.owner, "octocat");
-        assert_eq!(args.token, "ghp_test");
+        assert_eq!(args.token.as_deref(), Some("ghp_test"));
         assert!(!args.all);
         assert!(!args.org);
     }
@@ -332,7 +560,6 @@ mod tests {
 
     #[test]
     fn args_release_assets_requires_releases() {
-        // clap should reject --release-assets without --releases
         let result = Args::try_parse_from([
             "github-backup",
             "octocat",
@@ -386,5 +613,112 @@ mod tests {
         assert!(args.no_prune);
         let opts = args.into_backup_options();
         assert!(opts.no_prune);
+    }
+
+    #[test]
+    fn cli_clone_type_parse_mirror() {
+        assert_eq!(
+            "mirror".parse::<CliCloneType>().unwrap(),
+            CliCloneType::Mirror
+        );
+    }
+
+    #[test]
+    fn cli_clone_type_parse_bare() {
+        assert_eq!("bare".parse::<CliCloneType>().unwrap(), CliCloneType::Bare);
+    }
+
+    #[test]
+    fn cli_clone_type_parse_full() {
+        assert_eq!("full".parse::<CliCloneType>().unwrap(), CliCloneType::Full);
+    }
+
+    #[test]
+    fn cli_clone_type_parse_shallow() {
+        assert_eq!(
+            "shallow:10".parse::<CliCloneType>().unwrap(),
+            CliCloneType::Shallow(10)
+        );
+    }
+
+    #[test]
+    fn cli_clone_type_parse_shallow_zero_is_error() {
+        assert!("shallow:0".parse::<CliCloneType>().is_err());
+    }
+
+    #[test]
+    fn cli_clone_type_parse_invalid_is_error() {
+        assert!("invalid".parse::<CliCloneType>().is_err());
+        assert!("shallow:abc".parse::<CliCloneType>().is_err());
+    }
+
+    #[test]
+    fn cli_clone_type_into_clone_type_mirror() {
+        assert_eq!(CliCloneType::Mirror.into_clone_type(), CloneType::Mirror);
+    }
+
+    #[test]
+    fn cli_clone_type_into_clone_type_shallow() {
+        assert_eq!(
+            CliCloneType::Shallow(5).into_clone_type(),
+            CloneType::Shallow(5)
+        );
+    }
+
+    #[test]
+    fn args_parse_clone_type_full() {
+        let args = Args::parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--repositories",
+            "--clone-type",
+            "full",
+        ]);
+        assert_eq!(args.clone_type, CliCloneType::Full);
+        let opts = args.into_backup_options();
+        assert_eq!(opts.clone_type, CloneType::Full);
+    }
+
+    #[test]
+    fn args_parse_s3_flags() {
+        let args = Args::parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--repositories",
+            "--s3-bucket",
+            "my-bucket",
+            "--s3-region",
+            "eu-west-1",
+            "--s3-access-key",
+            "AKID",
+            "--s3-secret-key",
+            "SECRET",
+        ]);
+        assert_eq!(args.s3_bucket.as_deref(), Some("my-bucket"));
+        assert_eq!(args.s3_region, "eu-west-1");
+    }
+
+    #[test]
+    fn args_parse_mirror_flags() {
+        let args = Args::parse_from([
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--repositories",
+            "--mirror-to",
+            "https://codeberg.org",
+            "--mirror-token",
+            "cb_token",
+            "--mirror-owner",
+            "alice",
+        ]);
+        assert_eq!(args.mirror_to.as_deref(), Some("https://codeberg.org"));
+        assert_eq!(args.mirror_token.as_deref(), Some("cb_token"));
+        assert_eq!(args.mirror_owner.as_deref(), Some("alice"));
     }
 }

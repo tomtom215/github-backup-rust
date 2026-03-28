@@ -10,7 +10,7 @@
 use proptest::prelude::*;
 
 use github_backup_types::{
-    config::{BackupOptions, BackupTarget},
+    config::{BackupOptions, BackupTarget, CloneType},
     gist::{Gist, GistFile},
     hook::Hook,
     issue::{EventLabel, EventMilestone, IssueComment, IssueEvent, IssuePullRequestRef},
@@ -631,7 +631,7 @@ proptest! {
         let opts = BackupOptions {
             target,
             repositories, forks, private, prefer_ssh,
-            bare: true,
+            clone_type: CloneType::Mirror,
             lfs, no_prune,
             issues, issue_comments, issue_events,
             pulls, pull_comments, pull_commits, pull_reviews,
