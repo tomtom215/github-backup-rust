@@ -3,7 +3,6 @@ title = "github-backup"
 description = "Comprehensive GitHub backup tool written in Rust"
 authors = ["Tom F"]
 language = "en"
-multilingual = false
 src = "src"
 
 [build]
