@@ -175,6 +175,7 @@ pub struct Args {
         "hooks", "security_advisories", "wikis",
         "starred", "watched", "followers", "following",
         "gists", "starred_gists", "topics", "branches",
+        "deploy_keys", "collaborators", "org_members", "org_teams",
     ])]
     pub all: bool,
 
@@ -309,6 +310,31 @@ pub struct Args {
     /// Back up the list of repository branches and their protection status.
     #[arg(long)]
     pub branches: bool,
+
+    /// Back up deploy keys for each repository (requires admin access).
+    ///
+    /// Repositories where the token lacks admin access are skipped silently.
+    #[arg(long)]
+    pub deploy_keys: bool,
+
+    /// Back up the list of collaborators for each repository (requires admin access).
+    ///
+    /// Repositories where the token lacks admin access are skipped silently.
+    #[arg(long)]
+    pub collaborators: bool,
+
+    // ── Organisation data ──────────────────────────────────────────────────
+    /// Back up the member list of the organisation (requires `--org`).
+    ///
+    /// Ignored when backing up a user account.
+    #[arg(long)]
+    pub org_members: bool,
+
+    /// Back up the team list of the organisation (requires `--org`).
+    ///
+    /// Ignored when backing up a user account.
+    #[arg(long)]
+    pub org_teams: bool,
 
     // ── Repository name filters ────────────────────────────────────────────
     /// Only back up repositories whose names match this glob pattern.

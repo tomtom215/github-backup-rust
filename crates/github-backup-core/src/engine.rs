@@ -14,9 +14,9 @@ use github_backup_types::Repository;
 
 use crate::{
     backup::{
-        gist::backup_gists, issue::backup_issues, pull_request::backup_pull_requests,
-        release::backup_releases, repository::backup_repository, user_data::backup_user_data,
-        wiki::backup_wiki,
+        collaborators::backup_collaborators, deploy_keys::backup_deploy_keys, gist::backup_gists,
+        issue::backup_issues, pull_request::backup_pull_requests, release::backup_releases,
+        repository::backup_repository, user_data::backup_user_data, wiki::backup_wiki,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -362,6 +362,9 @@ where
         let branches = client.list_branches(owner, &repo.name).await?;
         storage.write_json(&meta_dir.join("branches.json"), &branches)?;
     }
+
+    backup_deploy_keys(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_collaborators(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
     Ok(())
 }

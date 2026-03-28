@@ -33,6 +33,7 @@
 - [Config File (TOML)](configuration/config-file.md)
 - [Environment Variables](configuration/environment.md)
 - [Output Directory Layout](configuration/output-layout.md)
+- [GitHub Enterprise Server](configuration/github-enterprise.md)
 
 # Deployment
 
@@ -48,6 +49,7 @@
 
 - [Architecture](development/architecture.md)
 - [Contributing](development/contributing.md)
+- [Restore from Backup](development/restore.md)
 - [Security](development/security.md)
 - [Troubleshooting](development/troubleshooting.md)
 - [Changelog](development/changelog.md)

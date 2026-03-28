@@ -54,11 +54,53 @@ json/following.json
 
 ---
 
+## Organisation Members
+
+> **Organisation targets only** — this flag has no effect when backing up a regular user account.
+
+```bash
+github-backup my-org --org --token $GITHUB_TOKEN --output /backup --org-members
+```
+
+Saves the public member list of the organisation:
+
+```
+json/org_members.json
+```
+
+Each entry includes the member's login, ID, avatar URL, and profile URL.
+
+## Organisation Teams
+
+> **Organisation targets only** — this flag has no effect when backing up a regular user account.
+
+```bash
+github-backup my-org --org --token $GITHUB_TOKEN --output /backup --org-teams
+```
+
+Saves all teams within the organisation, including nested parent–child relationships:
+
+```
+json/org_teams.json
+```
+
+Each entry includes the team's name, slug, description, privacy setting, permission level, member and repository URLs, and an optional `parent` field for nested teams.
+
+---
+
 ## All User Data Together
 
 ```bash
 github-backup octocat --token $GITHUB_TOKEN --output /backup \
   --starred --watched --followers --following
+```
+
+For an organisation backup with all owner-level data:
+
+```bash
+github-backup my-org --org --token $GITHUB_TOKEN --output /backup \
+  --starred --watched --followers --following \
+  --org-members --org-teams
 ```
 
 Or simply use `--all` to include everything.
@@ -67,13 +109,13 @@ Or simply use `--all` to include everything.
 
 ## Organisation Notes
 
-When using `--org`, the following flags behave differently:
+When using `--org`, all flags are available but some apply only to organisation targets:
 
 | Flag | User target | Org target |
 |------|-------------|-----------|
-| `--starred` | User's starred repos | *Not applicable* |
-| `--watched` | User's watched repos | *Not applicable* |
-| `--followers` | User's followers | *Not applicable* |
-| `--following` | User's following | *Not applicable* |
-
-User-level data flags are silently skipped when `--org` is passed.
+| `--starred` | User's starred repos | Org's starred repos |
+| `--watched` | User's watched repos | Org's watched repos |
+| `--followers` | User's followers | Org's followers |
+| `--following` | User's following | Org's following |
+| `--org-members` | *Silently skipped* | Organisation member list |
+| `--org-teams` | *Silently skipped* | Organisation team list |

@@ -217,6 +217,32 @@ pub struct BackupOptions {
     pub topics: bool,
     /// Backup the list of repository branches and their protection status.
     pub branches: bool,
+    /// Backup the deploy keys configured on each repository.
+    ///
+    /// Requires admin access to the repository; non-admin repos are skipped
+    /// with an informational log message (not an error).
+    pub deploy_keys: bool,
+    /// Backup the list of repository collaborators and their permissions.
+    ///
+    /// Requires admin access to the repository; non-admin repos are skipped
+    /// with an informational log message.
+    pub collaborators: bool,
+
+    // ── Organisation data ─────────────────────────────────────────────────
+    /// Backup the member list of the organisation.
+    ///
+    /// Only meaningful when [`target`] is [`BackupTarget::Org`]; ignored for
+    /// user targets.
+    ///
+    /// [`target`]: BackupOptions::target
+    pub org_members: bool,
+    /// Backup the team list of the organisation.
+    ///
+    /// Only meaningful when [`target`] is [`BackupTarget::Org`]; ignored for
+    /// user targets.
+    ///
+    /// [`target`]: BackupOptions::target
+    pub org_teams: bool,
 
     // ── Repository name filters ───────────────────────────────────────────
     /// Only back up repositories whose names match at least one of these glob
@@ -299,6 +325,10 @@ impl BackupOptions {
             starred_gists: true,
             topics: true,
             branches: true,
+            deploy_keys: true,
+            collaborators: true,
+            org_members: true,
+            org_teams: true,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
@@ -412,6 +442,14 @@ pub struct ConfigFile {
     pub topics: Option<bool>,
     /// Back up the list of repository branches.
     pub branches: Option<bool>,
+    /// Back up deploy keys for each repository.
+    pub deploy_keys: Option<bool>,
+    /// Back up the list of repository collaborators.
+    pub collaborators: Option<bool>,
+    /// Back up the member list of the organisation.
+    pub org_members: Option<bool>,
+    /// Back up the team list of the organisation.
+    pub org_teams: Option<bool>,
 
     /// Only back up repositories matching these glob patterns (comma-separated
     /// or as a TOML array).

@@ -69,6 +69,10 @@ impl Args {
         self.all |= cfg.all.unwrap_or(false);
         self.topics |= cfg.topics.unwrap_or(false);
         self.branches |= cfg.branches.unwrap_or(false);
+        self.deploy_keys |= cfg.deploy_keys.unwrap_or(false);
+        self.collaborators |= cfg.collaborators.unwrap_or(false);
+        self.org_members |= cfg.org_members.unwrap_or(false);
+        self.org_teams |= cfg.org_teams.unwrap_or(false);
         // Repo filter lists: extend (union) rather than replace.
         if let Some(ref patterns) = cfg.include_repos {
             self.include_repos.extend(patterns.iter().cloned());
@@ -168,6 +172,10 @@ impl Args {
                 starred_gists: self.starred_gists,
                 topics: self.topics,
                 branches: self.branches,
+                deploy_keys: self.deploy_keys,
+                collaborators: self.collaborators,
+                org_members: self.org_members,
+                org_teams: self.org_teams,
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,
