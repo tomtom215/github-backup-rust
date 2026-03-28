@@ -41,6 +41,11 @@ pub async fn backup_gists(
         return Ok(0);
     }
 
+    if opts.dry_run {
+        info!(username, "dry-run: skipping gist backup");
+        return Ok(0);
+    }
+
     let mut count = 0u64;
 
     if opts.gists {
@@ -171,6 +176,40 @@ mod tests {
 
         assert_eq!(count, 0);
         assert_eq!(storage.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn backup_gists_dry_run_returns_zero_and_no_io() {
+        let client = MockBackupClient::new();
+        let storage = MemStorage::default();
+        let git = SpyGitRunner::default();
+        let opts = BackupOptions {
+            gists: true,
+            starred_gists: true,
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let count = backup_gists(
+            &client,
+            "octocat",
+            &opts,
+            &PathBuf::from(GIST_DIR),
+            &PathBuf::from(META_DIR),
+            &storage,
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("backup_gists dry_run");
+
+        assert_eq!(count, 0, "dry-run must return 0");
+        assert_eq!(
+            git.recorded_calls().len(),
+            0,
+            "dry-run must make no git calls"
+        );
+        assert_eq!(storage.len(), 0, "dry-run must write nothing");
     }
 
     #[tokio::test]

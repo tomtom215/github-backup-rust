@@ -20,7 +20,7 @@ use github_backup_types::{
 
 use crate::error::ClientError;
 
-use super::{collect_body, GitHubClient, DEFAULT_TIMEOUT_SECS, GITHUB_API_BASE, PER_PAGE};
+use super::{collect_body, GitHubClient, DEFAULT_TIMEOUT_SECS, PER_PAGE};
 
 impl GitHubClient {
     // ── User & org repos ──────────────────────────────────────────────────
@@ -34,7 +34,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_user_repos(&self, username: &str) -> Result<Vec<Repository>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/repos?type=all&per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/repos?type=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -44,7 +45,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_org_repos(&self, org: &str) -> Result<Vec<Repository>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -56,7 +58,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_followers(&self, username: &str) -> Result<Vec<User>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/followers?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/followers?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -66,7 +69,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_following(&self, username: &str) -> Result<Vec<User>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/following?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/following?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -76,7 +80,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_starred(&self, username: &str) -> Result<Vec<Repository>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/starred?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/starred?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -86,7 +91,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_watched(&self, username: &str) -> Result<Vec<Repository>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/subscriptions?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/subscriptions?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -98,7 +104,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_gists(&self, username: &str) -> Result<Vec<Gist>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/users/{username}/gists?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/users/{username}/gists?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -108,7 +115,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_starred_gists(&self) -> Result<Vec<Gist>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/gists/starred?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/gists/starred?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -128,8 +136,8 @@ impl GitHubClient {
         repo: &str,
         since: Option<&str>,
     ) -> Result<Vec<Issue>, ClientError> {
-        let mut url =
-            format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
+        let api = self.api();
+        let mut url = format!("{api}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
         if let Some(s) = since {
             url.push_str("&since=");
             url.push_str(s);
@@ -148,8 +156,9 @@ impl GitHubClient {
         repo: &str,
         issue_number: u64,
     ) -> Result<Vec<IssueComment>, ClientError> {
+        let api = self.api();
         let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/comments?per_page={PER_PAGE}"
+            "{api}/repos/{owner}/{repo}/issues/{issue_number}/comments?per_page={PER_PAGE}"
         );
         self.get_all_pages(&url).await
     }
@@ -165,9 +174,9 @@ impl GitHubClient {
         repo: &str,
         issue_number: u64,
     ) -> Result<Vec<IssueEvent>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/events?per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url =
+            format!("{api}/repos/{owner}/{repo}/issues/{issue_number}/events?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -204,8 +213,8 @@ impl GitHubClient {
         // We therefore always use the Pulls API URL and accept that
         // `since`-based filtering on PRs is best-effort (GitHub does not
         // expose this parameter on the Pulls endpoint).
-        let mut url =
-            format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
+        let api = self.api();
+        let mut url = format!("{api}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
         // Append `sort` and `direction` so that the `since` comparison is
         // meaningful; by default the Pulls API sorts by created_at descending.
         if since.is_some() {
@@ -225,9 +234,9 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
     ) -> Result<Vec<PullRequestComment>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url =
+            format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -242,9 +251,9 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
     ) -> Result<Vec<PullRequestCommit>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/commits?per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url =
+            format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/commits?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -259,9 +268,9 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
     ) -> Result<Vec<PullRequestReview>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url =
+            format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -273,7 +282,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_labels(&self, owner: &str, repo: &str) -> Result<Vec<Label>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/labels?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/labels?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -287,9 +297,8 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<Milestone>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/milestones?state=all&per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/milestones?state=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -303,7 +312,8 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<Release>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/releases?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/releases?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -315,7 +325,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_hooks(&self, owner: &str, repo: &str) -> Result<Vec<Hook>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/hooks?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/hooks?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -329,9 +340,8 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<SecurityAdvisory>, ClientError> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{owner}/{repo}/security-advisories?per_page={PER_PAGE}"
-        );
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/security-advisories?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -410,7 +420,8 @@ impl GitHubClient {
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Vec<Branch>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -427,7 +438,8 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<String>, ClientError> {
-        let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/topics");
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/topics");
 
         let req = self
             .build_request(Method::GET, &url)?

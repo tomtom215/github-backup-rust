@@ -4,7 +4,26 @@
 
 ### Does it support GitHub Enterprise?
 
-Not yet.  GitHub Enterprise Server uses a different API base URL.  Support is planned for a future release.
+Yes.  Use `--api-url` (or `GITHUB_API_URL`) to point `github-backup` at your
+GitHub Enterprise Server instance.  The API is typically at
+`https://github.example.com/api/v3`:
+
+```bash
+github-backup myorg \
+  --token "$GITHUB_TOKEN" \
+  --api-url https://github.example.com/api/v3 \
+  --output /backup --org --all
+```
+
+Or in the config file:
+
+```toml
+owner   = "myorg"
+api_url = "https://github.example.com/api/v3"
+output  = "/var/backup/github"
+org     = true
+all     = true
+```
 
 ### Can I back up a GitHub organisation?
 

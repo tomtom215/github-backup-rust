@@ -60,6 +60,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     issues, debug logging
   - Architecture, Contributing, Changelog, FAQ
 
+- **GitHub Enterprise Server** support via `--api-url <URL>` (or
+  `GITHUB_API_URL` environment variable / `api_url` config file key).  Pass
+  the GHES API base URL (e.g. `https://github.example.com/api/v3`) and all API
+  requests are directed there.  New `GitHubClient::with_api_url()` constructor
+  added to `github-backup-client`.
+- **Extended backup stats**: `BackupStats` now tracks `issues_fetched` and
+  `prs_fetched` across all repositories.  Both counters appear in the log
+  output, the `Display` summary, and the JSON report (`--report`).
+- **`--since` format validation**: the ISO 8601 value is now validated before
+  the backup starts, producing a clear error for malformed timestamps.
+- **`dry_run` gap fixed**: `backup_gists` and `backup_user_data` now respect
+  `opts.dry_run` and skip all I/O in dry-run mode (previously only
+  per-repository operations were skipped).
+- **Modular code**: `config.rs` split into `config.rs` + `glob.rs`; `args.rs`
+  split into `args.rs` (struct) + `args_impl.rs` (`merge_config` / `into_backup_options`).
+
 ### Changed
 
 - `owner` positional argument is now optional; it can be supplied via the
@@ -68,7 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BackupClient::list_issues` and `BackupClient::list_pull_requests` now
   accept an optional `since: Option<&str>` parameter (used by `--since`).
 - `BackupOptions::all()` now also enables `topics` and `branches`.
-- `BackupStats::Display` now includes the elapsed time in seconds.
+- `BackupStats::Display` now includes elapsed time, issues fetched, and PRs
+  fetched.
+- `backup_issues` and `backup_pull_requests` return `u64` (count of items
+  fetched) instead of `()`.  The engine uses these to populate `BackupStats`.
 
 ---
 

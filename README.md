@@ -51,6 +51,7 @@ docker run --rm \
 | **S3 sync** | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
 | **Git mirroring** | Push to Gitea, Codeberg, Forgejo |
 | **Auth** | PAT or OAuth device flow |
+| **GitHub Enterprise** | `--api-url` for GHES instances |
 | **Config file** | TOML config with CLI override |
 | **Concurrency** | Configurable parallel backup |
 | **Dry-run** | Preview without writing |
@@ -86,6 +87,14 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 | Architecture | [development/architecture](https://tomtom215.github.io/github-backup-rust/development/architecture.html) |
 
 ## Common Examples
+
+```bash
+# GitHub Enterprise Server
+github-backup myorg --token $GITHUB_TOKEN \
+  --api-url https://github.example.com/api/v3 \
+  --output /backup --org --all
+```
+
 
 ```bash
 # Config file (recommended for repeated use)

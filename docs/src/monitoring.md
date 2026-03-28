@@ -32,6 +32,8 @@ github-backup octocat \
   "repos_skipped": 2,
   "repos_errored": 0,
   "gists_backed_up": 5,
+  "issues_fetched": 1204,
+  "prs_fetched": 387,
   "success": true
 }
 ```
@@ -47,6 +49,8 @@ github-backup octocat \
 | `repos_skipped` | integer | Repos skipped by filters or dry-run |
 | `repos_errored` | integer | Repos with non-fatal errors |
 | `gists_backed_up` | integer | Gists backed up |
+| `issues_fetched` | integer | Total issues fetched across all repos |
+| `prs_fetched` | integer | Total pull requests fetched across all repos |
 | `success` | bool | `true` when `repos_errored == 0` |
 
 ---

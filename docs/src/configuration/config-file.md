@@ -113,6 +113,7 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 |-----|------|---------|-------------|
 | `owner` | string | — | GitHub username or org |
 | `token` | string | — | Personal access token |
+| `api_url` | string | `https://api.github.com` | GitHub API base URL (for GitHub Enterprise Server) |
 | `output` | path | `.` | Output root directory |
 | `concurrency` | integer | `4` | Parallel repository backup count |
 | `org` | bool | `false` | Treat owner as org |

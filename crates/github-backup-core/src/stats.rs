@@ -33,6 +33,10 @@ struct StatsInner {
     repos_errored: AtomicU64,
     /// Gists backed up (cloned or updated).
     gists_backed_up: AtomicU64,
+    /// Total issues fetched across all repositories.
+    issues_fetched: AtomicU64,
+    /// Total pull requests fetched across all repositories.
+    prs_fetched: AtomicU64,
 }
 
 impl Default for StatsInner {
@@ -44,6 +48,8 @@ impl Default for StatsInner {
             repos_skipped: AtomicU64::new(0),
             repos_errored: AtomicU64::new(0),
             gists_backed_up: AtomicU64::new(0),
+            issues_fetched: AtomicU64::new(0),
+            prs_fetched: AtomicU64::new(0),
         }
     }
 }
@@ -102,6 +108,16 @@ impl BackupStats {
         self.inner.gists_backed_up.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records that `n` issues were fetched for a repository.
+    pub fn add_issues(&self, n: u64) {
+        self.inner.issues_fetched.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Records that `n` pull requests were fetched for a repository.
+    pub fn add_prs(&self, n: u64) {
+        self.inner.prs_fetched.fetch_add(n, Ordering::Relaxed);
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────────
 
     /// Repositories discovered in the owner listing.
@@ -134,6 +150,18 @@ impl BackupStats {
         self.inner.gists_backed_up.load(Ordering::Relaxed)
     }
 
+    /// Total issues fetched across all repositories.
+    #[must_use]
+    pub fn issues_fetched(&self) -> u64 {
+        self.inner.issues_fetched.load(Ordering::Relaxed)
+    }
+
+    /// Total pull requests fetched across all repositories.
+    #[must_use]
+    pub fn prs_fetched(&self) -> u64 {
+        self.inner.prs_fetched.load(Ordering::Relaxed)
+    }
+
     /// Elapsed seconds since this [`BackupStats`] was constructed.
     ///
     /// Because every handle shares the same [`Arc`], this returns the time
@@ -149,11 +177,16 @@ impl fmt::Display for BackupStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "repos: {} backed up, {} skipped, {} errored; gists: {} backed up ({:.1}s elapsed)",
+            "repos: {} backed up, {} skipped, {} errored; \
+             gists: {} backed up; \
+             issues: {} fetched; PRs: {} fetched \
+             ({:.1}s elapsed)",
             self.repos_backed_up(),
             self.repos_skipped(),
             self.repos_errored(),
             self.gists_backed_up(),
+            self.issues_fetched(),
+            self.prs_fetched(),
             self.elapsed_secs(),
         )
     }

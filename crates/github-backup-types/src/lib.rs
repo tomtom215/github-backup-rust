@@ -13,6 +13,7 @@
 //! | Module | Contents |
 //! |--------|----------|
 //! | [`config`] | Backup options and output-path configuration |
+//! | [`glob`] | Glob pattern matching for `--include-repos` / `--exclude-repos` |
 //! | [`repository`] | Repository metadata |
 //! | [`branch`] | Branch list and commit tips |
 //! | [`issue`] | Issues, comments, and events |
@@ -32,6 +33,7 @@
 pub mod branch;
 pub mod config;
 pub mod gist;
+pub mod glob;
 pub mod hook;
 pub mod issue;
 pub mod label;

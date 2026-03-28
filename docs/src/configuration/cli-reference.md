@@ -25,6 +25,22 @@ github-backup --completions <SHELL>
 | `--oauth-client-id <ID>` | `GITHUB_OAUTH_CLIENT_ID` | — | OAuth App client ID (required with `--device-auth`) |
 | `--oauth-scopes <SCOPES>` | — | `repo gist read:org` | OAuth scopes (space-separated) |
 
+## GitHub Enterprise Server
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--api-url <URL>` | `GITHUB_API_URL` | `https://api.github.com` | Override the GitHub API base URL for GitHub Enterprise Server |
+
+For GHES instances the API is typically at `https://github.example.com/api/v3`.
+
+```bash
+# Back up a GitHub Enterprise Server instance
+github-backup myorg \
+  --token $GITHUB_TOKEN \
+  --api-url https://github.example.com/api/v3 \
+  --output /backup --org --all
+```
+
 ## Configuration
 
 | Flag | Default | Description |
