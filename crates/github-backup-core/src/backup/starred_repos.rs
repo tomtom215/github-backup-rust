@@ -351,7 +351,11 @@ mod tests {
         .await
         .expect("noop");
 
-        assert_eq!(git.recorded_calls().len(), 0, "no git calls for disabled flag");
+        assert_eq!(
+            git.recorded_calls().len(),
+            0,
+            "no git calls for disabled flag"
+        );
     }
 
     #[tokio::test]
@@ -404,8 +408,8 @@ mod tests {
 
     #[tokio::test]
     async fn repos_are_cloned_into_subdirectory() {
-        use github_backup_types::Repository;
         use github_backup_types::user::User;
+        use github_backup_types::Repository;
 
         let repo = Repository {
             id: 1,
@@ -458,17 +462,17 @@ mod tests {
 
         // Verify queue persisted with Done state.
         assert!(queue_path.exists(), "queue file should be written");
-        let queue = starred_queue::load_or_create(&queue_path, "octocat", &[])
-            .expect("load saved queue");
+        let queue =
+            starred_queue::load_or_create(&queue_path, "octocat", &[]).expect("load saved queue");
         assert_eq!(queue.items.len(), 1);
         assert_eq!(queue.items[0].state, CloneState::Done);
     }
 
     #[tokio::test]
     async fn second_run_skips_done_items() {
-        use github_backup_types::Repository;
         use github_backup_types::starred_queue::StarredQueueItem;
         use github_backup_types::user::User;
+        use github_backup_types::Repository;
 
         let repo = Repository {
             id: 999,

@@ -20,8 +20,8 @@ use std::path::Path;
 
 use chrono::Utc;
 
-use github_backup_types::Repository;
 use github_backup_types::starred_queue::{CloneState, StarredCloneQueue, StarredQueueItem};
+use github_backup_types::Repository;
 
 use crate::error::CoreError;
 
