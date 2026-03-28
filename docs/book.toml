@@ -13,7 +13,6 @@ create-missing = false
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/tomtom215/github-backup-rust"
-git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/tomtom215/github-backup-rust/edit/main/docs/{path}"
 site-url = "/github-backup-rust/"
 cname = ""
