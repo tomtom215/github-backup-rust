@@ -40,7 +40,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// All GitHub API operations required by the backup engine.
 ///
 /// The production implementation is [`GitHubClient`]. Tests substitute a
-/// [`MockClient`](test_support::MockClient) that returns pre-configured data.
+/// `MockClient` (available in the `test_support` module) that returns
+/// pre-configured data.
 pub trait BackupClient: Send + Sync {
     // ── Repositories ──────────────────────────────────────────────────────
 

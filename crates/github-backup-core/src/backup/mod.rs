@@ -4,8 +4,8 @@
 //! Per-category backup helpers invoked by the [`crate::engine::BackupEngine`].
 //!
 //! Each submodule handles one data category (repositories, issues, …) and
-//! exposes a single async function that writes artefacts via the [`Storage`]
-//! and [`GitRunner`] traits.
+//! exposes a single async function that writes artefacts via the
+//! [`crate::storage::Storage`] and [`crate::git::GitRunner`] traits.
 
 pub mod gist;
 pub mod issue;

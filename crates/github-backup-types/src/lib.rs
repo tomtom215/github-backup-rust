@@ -41,7 +41,7 @@ pub mod security_advisory;
 pub mod user;
 
 // Convenience re-exports for the most commonly used types.
-pub use config::{BackupOptions, OutputConfig};
+pub use config::{BackupOptions, ConfigFile, OutputConfig};
 pub use gist::Gist;
 pub use hook::Hook;
 pub use issue::{Issue, IssueComment, IssueEvent};
