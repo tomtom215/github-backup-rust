@@ -118,6 +118,26 @@ impl OutputConfig {
         self.root.join(owner).join("json")
     }
 
+    /// Returns the root directory for starred-repository git clones:
+    /// `<root>/<owner>/git/starred/`.
+    ///
+    /// Individual repos are cloned into subdirectories:
+    /// `<root>/<owner>/git/starred/<upstream-owner>/<repo>.git`.
+    #[must_use]
+    pub fn starred_repos_dir(&self, owner: &str) -> PathBuf {
+        self.root.join(owner).join("git").join("starred")
+    }
+
+    /// Returns the path to the starred-repos clone queue file:
+    /// `<root>/<owner>/json/starred_clone_queue.json`.
+    #[must_use]
+    pub fn starred_queue_path(&self, owner: &str) -> PathBuf {
+        self.root
+            .join(owner)
+            .join("json")
+            .join("starred_clone_queue.json")
+    }
+
     /// Returns the path for a top-level owner JSON file (followers, starred…):
     /// `<root>/<owner>/json/<filename>`.
     #[must_use]
@@ -199,8 +219,18 @@ pub struct BackupOptions {
     pub wikis: bool,
 
     // ── User / organisation data ──────────────────────────────────────────
-    /// Backup the list of repositories starred by the target user.
+    /// Backup the list of repositories starred by the target user (JSON list).
     pub starred: bool,
+    /// Clone every starred repository as a bare mirror.
+    ///
+    /// Uses a durable queue at
+    /// `<output>/<owner>/json/starred_clone_queue.json` that persists across
+    /// runs, enabling pause and resume.  Re-running with this flag set will
+    /// continue from where the previous run stopped.
+    ///
+    /// Not included in [`BackupOptions::all`] because it can consume
+    /// substantial disk space and time for users with many starred repos.
+    pub clone_starred: bool,
     /// Backup the list of repositories watched by the target user.
     pub watched: bool,
     /// Backup the target user's follower list.
@@ -318,6 +348,7 @@ impl BackupOptions {
             security_advisories: true,
             wikis: true,
             starred: true,
+            clone_starred: false, // opt-in only; can be very large
             watched: true,
             followers: true,
             following: true,
@@ -425,8 +456,10 @@ pub struct ConfigFile {
     pub security_advisories: Option<bool>,
     /// Clone repository wikis.
     pub wikis: Option<bool>,
-    /// Back up starred repositories.
+    /// Back up starred repositories (JSON list).
     pub starred: Option<bool>,
+    /// Clone every starred repository as a git mirror.
+    pub clone_starred: Option<bool>,
     /// Back up watched repositories.
     pub watched: Option<bool>,
     /// Back up follower list.

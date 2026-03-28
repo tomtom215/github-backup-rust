@@ -618,6 +618,7 @@ proptest! {
         security_advisories in any::<bool>(),
         wikis in any::<bool>(),
         starred in any::<bool>(),
+        clone_starred in any::<bool>(),
         watched in any::<bool>(),
         followers in any::<bool>(),
         following in any::<bool>(),
@@ -641,7 +642,7 @@ proptest! {
             pulls, pull_comments, pull_commits, pull_reviews,
             labels, milestones, releases, release_assets,
             hooks, security_advisories, wikis,
-            starred, watched, followers, following,
+            starred, clone_starred, watched, followers, following,
             gists, starred_gists,
             topics: false,
             branches: false,
@@ -678,6 +679,7 @@ proptest! {
         prop_assert_eq!(decoded.security_advisories, opts.security_advisories);
         prop_assert_eq!(decoded.wikis, opts.wikis);
         prop_assert_eq!(decoded.starred, opts.starred);
+        prop_assert_eq!(decoded.clone_starred, opts.clone_starred);
         prop_assert_eq!(decoded.watched, opts.watched);
         prop_assert_eq!(decoded.followers, opts.followers);
         prop_assert_eq!(decoded.following, opts.following);

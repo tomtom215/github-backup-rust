@@ -278,9 +278,20 @@ pub struct Args {
     pub wikis: bool,
 
     // ── User / org data ────────────────────────────────────────────────────
-    /// Back up repositories starred by the owner.
+    /// Record the list of repositories starred by the owner as JSON.
     #[arg(long)]
     pub starred: bool,
+
+    /// Clone every starred repository as a bare mirror.
+    ///
+    /// Uses a durable queue at
+    /// `<output>/<owner>/json/starred_clone_queue.json` that persists across
+    /// runs.  Re-run with this flag to resume an interrupted clone.
+    ///
+    /// Not included in `--all` because it can consume significant disk space
+    /// and time for users with many starred repositories.
+    #[arg(long)]
+    pub clone_starred: bool,
 
     /// Back up repositories watched by the owner.
     #[arg(long)]

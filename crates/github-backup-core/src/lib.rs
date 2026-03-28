@@ -36,6 +36,7 @@ pub mod backup;
 pub mod engine;
 pub mod error;
 pub mod git;
+pub mod starred_queue;
 pub mod stats;
 pub mod storage;
 

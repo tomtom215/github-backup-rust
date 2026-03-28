@@ -8,6 +8,7 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ### Added
 
+- **Starred-repository clone** (`--clone-starred`): mirrors every starred repo into `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git` using a crash-safe durable queue (`starred_clone_queue.json`). Features: pause/resume across runs, per-item retry with exponential backoff (5 s → 30 s → 2 min), Ctrl+C graceful shutdown, and structured progress logging (`done`, `pending`, `failed`, `rate_per_min`, `eta_secs`). Not included in `--all` due to potentially large footprint.
 - **Deploy keys backup** (`--deploy-keys`): saves `deploy_keys.json` per repository. Requires admin access; gracefully skips on 403/404.
 - **Collaborators backup** (`--collaborators`): saves `collaborators.json` per repository with per-user permissions. Requires admin access; gracefully skips on 403/404.
 - **Organisation members backup** (`--org-members`): saves `org_members.json` for organisation targets. Silently skipped for user targets.

@@ -122,7 +122,8 @@ Output:
 
 | Flag | Description | Target |
 |------|-------------|--------|
-| `--starred` | Repositories starred by the owner | User & Org |
+| `--starred` | Starred repos as a JSON list | User & Org |
+| `--clone-starred` | Clone every starred repo as a bare mirror (durable queue, pause/resume) | User & Org |
 | `--watched` | Repositories watched by the owner | User & Org |
 | `--followers` | Follower list | User & Org |
 | `--following` | Following list | User & Org |
@@ -130,8 +131,9 @@ Output:
 | `--org-teams` | Organisation team list | **Org only** |
 
 Output: `<output>/<owner>/json/starred.json`, `watched.json`, `org_members.json`, `org_teams.json`, etc.
+Cloned starred repos: `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git`
 
-> **Note**: `--org-members` and `--org-teams` are silently skipped for user targets even if specified; they only apply when `--org` is passed.
+> **Note**: `--org-members` and `--org-teams` are silently skipped for user targets. `--clone-starred` is intentionally omitted from `--all` due to its potentially large footprint.
 
 ---
 

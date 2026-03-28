@@ -2,7 +2,7 @@
 
 These categories back up list-style metadata that is associated with the owner rather than individual repositories.
 
-## Starred Repositories
+## Starred Repositories (JSON list)
 
 ```bash
 github-backup octocat --token $GITHUB_TOKEN --output /backup --starred
@@ -15,6 +15,77 @@ json/starred.json
 ```
 
 Each entry contains the full repository metadata: name, description, owner, visibility, star count, fork count, topics, and clone URLs.
+
+---
+
+## Clone Starred Repositories
+
+```bash
+github-backup octocat --token $GITHUB_TOKEN --output /backup --clone-starred
+```
+
+Clones (or updates) every starred repository as a bare mirror.  This is
+independent from `--starred` — you can use either or both.
+
+Repositories are cloned into:
+
+```
+git/starred/<upstream-owner>/<repo-name>.git
+```
+
+### Durable Queue & Resume
+
+`--clone-starred` uses a durable JSON queue stored at:
+
+```
+json/starred_clone_queue.json
+```
+
+The queue is written atomically after **every** repository.  If the run is
+interrupted (Ctrl+C, power cut, network loss), simply re-run the same command
+to resume.  Already-cloned repositories are skipped automatically.
+
+```bash
+# First run — clones whatever it can, writes progress to the queue
+github-backup octocat --token $GITHUB_TOKEN --output /backup --clone-starred
+
+# Interrupted?  Just re-run the same command — it resumes from where it left off
+github-backup octocat --token $GITHUB_TOKEN --output /backup --clone-starred
+```
+
+### Retry & Backoff
+
+Failed clones are retried up to **4 total attempts** with exponential backoff:
+
+| Attempt | Delay before next retry |
+|---------|------------------------|
+| 1 (initial) | — |
+| 2 | 5 s |
+| 3 | 30 s |
+| 4 (last) | 2 min |
+
+After 4 failures the item is marked `"failed"` in the queue and skipped on
+subsequent runs.  To retry a failed item manually, open the queue file and
+change its `"state"` from `"failed"` back to `"pending"`.
+
+### Progress Logging
+
+After each clone the tool emits a structured log line:
+
+```
+INFO starred repo cloned repo="rust-lang/rust" done=42 pending=1505 failed=0 total=1547 rate_per_min="8.3" eta_secs=10880
+```
+
+### Clone Type
+
+The clone mode follows the same `--clone-type` flag as owned repos (default:
+`mirror`).  Use `--prefer-ssh` to clone via SSH instead of HTTPS.
+
+### Not included in `--all`
+
+`--clone-starred` is deliberately **not** enabled by `--all` because it can
+consume significant disk space and run time for users with hundreds or
+thousands of starred repositories.  Enable it explicitly when needed.
 
 ## Watched Repositories
 

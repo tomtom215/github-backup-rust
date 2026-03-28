@@ -59,6 +59,7 @@ impl Args {
         self.security_advisories |= cfg.security_advisories.unwrap_or(false);
         self.wikis |= cfg.wikis.unwrap_or(false);
         self.starred |= cfg.starred.unwrap_or(false);
+        self.clone_starred |= cfg.clone_starred.unwrap_or(false);
         self.watched |= cfg.watched.unwrap_or(false);
         self.followers |= cfg.followers.unwrap_or(false);
         self.following |= cfg.following.unwrap_or(false);
@@ -165,6 +166,7 @@ impl Args {
                 security_advisories: self.security_advisories,
                 wikis: self.wikis,
                 starred: self.starred,
+                clone_starred: self.clone_starred,
                 watched: self.watched,
                 followers: self.followers,
                 following: self.following,

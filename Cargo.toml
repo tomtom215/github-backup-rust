@@ -65,6 +65,9 @@ github-backup-s3 = { path = "crates/github-backup-s3" }
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 
+# Date / time formatting (RFC 3339 timestamps in queue files)
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+
 # Test-only
 tokio-test = "0.4"
 proptest = "1"

@@ -27,7 +27,8 @@
 //! | [`user`] | User / actor summaries |
 //! | [`deploy_key`] | Repository deploy keys |
 //! | [`collaborator`] | Repository collaborators with permission levels |
-//! | [`team`] | GitHub organisation teams | |
+//! | [`team`] | GitHub organisation teams |
+//! | [`starred_queue`] | Durable queue types for starred-repo clone progress |
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -47,6 +48,7 @@ pub mod pull_request;
 pub mod release;
 pub mod repository;
 pub mod security_advisory;
+pub mod starred_queue;
 pub mod team;
 pub mod user;
 

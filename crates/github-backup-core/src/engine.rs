@@ -16,7 +16,8 @@ use crate::{
     backup::{
         collaborators::backup_collaborators, deploy_keys::backup_deploy_keys, gist::backup_gists,
         issue::backup_issues, pull_request::backup_pull_requests, release::backup_releases,
-        repository::backup_repository, user_data::backup_user_data, wiki::backup_wiki,
+        repository::backup_repository, starred_repos::backup_starred_repos,
+        user_data::backup_user_data, wiki::backup_wiki,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -118,8 +119,20 @@ where
         )
         .await?;
 
-        // ── Gists ──────────────────────────────────────────────────────────
+        // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();
+        backup_starred_repos(
+            &self.client,
+            &self.git,
+            owner,
+            &self.opts,
+            &self.output.starred_repos_dir(owner),
+            &self.output.starred_queue_path(owner),
+            &clone_opts,
+        )
+        .await?;
+
+        // ── Gists ──────────────────────────────────────────────────────────
         let gist_count = backup_gists(
             &self.client,
             owner,
