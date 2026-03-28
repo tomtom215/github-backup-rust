@@ -57,4 +57,12 @@ pub enum ClientError {
         /// The URL that timed out.
         url: String,
     },
+
+    /// The OAuth device flow session expired before the user authorised.
+    #[error("OAuth device code expired; run again to get a new code")]
+    OAuthExpired,
+
+    /// The user explicitly denied the OAuth authorisation request.
+    #[error("OAuth authorisation was denied by the user")]
+    OAuthDenied,
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Git subprocess abstraction: clone, mirror, and fetch.
+//! Git subprocess abstraction: clone, mirror, push, and fetch.
 //!
 //! The production implementation shells out to the system `git` binary.
 //! Credentials for HTTPS cloning are injected via the `GIT_ASKPASS` environment
@@ -41,14 +41,18 @@ impl CloneOptions {
 /// The production implementation ([`ProcessGitRunner`]) shells out to the
 /// system `git` binary. A no-op stub can be substituted during unit tests to
 /// avoid network and filesystem side-effects.
+///
+/// All clone methods follow a common pattern:
+/// - If `dest` already exists, update it in-place.
+/// - If `dest` does not exist, perform a fresh clone.
+///
+/// For HTTPS URLs, `opts.token` is injected via a temporary `GIT_ASKPASS`
+/// script that is removed by a RAII guard after the git process exits.
 pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a bare mirror (`git clone --mirror`).
     ///
     /// If `dest` already exists, updates it with `git remote update` instead
     /// of re-cloning (pruning deleted refs unless `opts.no_prune` is set).
-    ///
-    /// For HTTPS URLs, `opts.token` is injected via a temporary `GIT_ASKPASS`
-    /// script so the token never appears in process listings.
     ///
     /// # Errors
     ///
@@ -56,12 +60,65 @@ pub trait GitRunner: Send + Sync {
     /// [`CoreError::GitSpawn`] if the binary cannot be started.
     fn mirror_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
 
+    /// Clones `url` into `dest` as a bare clone (`git clone --bare`).
+    ///
+    /// Similar to [`mirror_clone`] but does not configure remote-tracking refs.
+    /// If `dest` already exists, updates refs with `git fetch --all`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
+    fn bare_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+
+    /// Clones `url` into `dest` as a full working-tree clone.
+    ///
+    /// Use when you need to browse or build the backed-up source code.
+    /// If `dest` already exists, updates with `git fetch --all --prune`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
+    fn full_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+
+    /// Clones `url` into `dest` as a shallow clone with limited history.
+    ///
+    /// Creates a bare-style repository with at most `depth` commits per
+    /// branch.  Reduces disk usage significantly but loses older history.
+    /// If `dest` already exists, deepens the clone with `git fetch --depth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
+    fn shallow_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+        depth: u32,
+    ) -> Result<(), CoreError>;
+
     /// Clones `url` into `dest` using Git LFS.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
     fn lfs_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+
+    /// Pushes all refs from the local repository at `src` to `remote_url`.
+    ///
+    /// Equivalent to `git -C <src> push --mirror <remote_url>`.  Used to push
+    /// a local bare/mirror clone to a secondary Git host (Gitea, Codeberg,
+    /// GitLab, etc.) after the primary backup has completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
+    fn push_mirror(
+        &self,
+        src: &Path,
+        remote_url: &str,
+        opts: &CloneOptions,
+    ) -> Result<(), CoreError>;
 }
 
 /// Production [`GitRunner`] that shells out to the system `git` binary.
@@ -80,7 +137,7 @@ impl GitRunner for ProcessGitRunner {
     fn mirror_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
         let dest_str = path_to_str(dest)?;
         if dest.exists() {
-            info!(dest = %dest.display(), "repository exists, updating");
+            info!(dest = %dest.display(), "repository exists, updating mirror");
             let update_args: &[&str] = if opts.no_prune {
                 &["remote", "update"]
             } else {
@@ -91,6 +148,77 @@ impl GitRunner for ProcessGitRunner {
             info!(url = %url, dest = %dest.display(), "cloning bare mirror");
             run_git(
                 &["clone", "--mirror", url, dest_str],
+                Path::new("."),
+                false,
+                opts.token.as_deref(),
+            )
+        }
+    }
+
+    fn bare_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
+        let dest_str = path_to_str(dest)?;
+        if dest.exists() {
+            info!(dest = %dest.display(), "bare repository exists, fetching");
+            let fetch_args: &[&str] = if opts.no_prune {
+                &["fetch", "--all"]
+            } else {
+                &["fetch", "--all", "--prune"]
+            };
+            run_git(fetch_args, dest, true, opts.token.as_deref())
+        } else {
+            info!(url = %url, dest = %dest.display(), "cloning bare");
+            run_git(
+                &["clone", "--bare", url, dest_str],
+                Path::new("."),
+                false,
+                opts.token.as_deref(),
+            )
+        }
+    }
+
+    fn full_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
+        let dest_str = path_to_str(dest)?;
+        if dest.exists() {
+            info!(dest = %dest.display(), "full clone exists, fetching all branches");
+            let fetch_args: &[&str] = if opts.no_prune {
+                &["fetch", "--all"]
+            } else {
+                &["fetch", "--all", "--prune"]
+            };
+            run_git(fetch_args, dest, true, opts.token.as_deref())
+        } else {
+            info!(url = %url, dest = %dest.display(), "cloning full working tree");
+            // Clone all branches, not just the default one.
+            run_git(
+                &["clone", "--no-local", url, dest_str],
+                Path::new("."),
+                false,
+                opts.token.as_deref(),
+            )
+        }
+    }
+
+    fn shallow_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+        depth: u32,
+    ) -> Result<(), CoreError> {
+        let dest_str = path_to_str(dest)?;
+        let depth_str = depth.to_string();
+        if dest.exists() {
+            info!(dest = %dest.display(), depth, "shallow clone exists, deepening fetch");
+            run_git(
+                &["fetch", "--depth", &depth_str],
+                dest,
+                true,
+                opts.token.as_deref(),
+            )
+        } else {
+            info!(url = %url, dest = %dest.display(), depth, "cloning shallow");
+            run_git(
+                &["clone", "--mirror", "--depth", &depth_str, url, dest_str],
                 Path::new("."),
                 false,
                 opts.token.as_deref(),
@@ -117,6 +245,27 @@ impl GitRunner for ProcessGitRunner {
                 opts.token.as_deref(),
             )
         }
+    }
+
+    fn push_mirror(
+        &self,
+        src: &Path,
+        remote_url: &str,
+        opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
+        info!(
+            src = %src.display(),
+            remote = %remote_url,
+            "pushing mirror to remote"
+        );
+        // `git push --mirror` pushes all refs (branches, tags, etc.) to the remote.
+        // The remote URL is passed directly; credential injection via GIT_ASKPASS.
+        run_git(
+            &["push", "--mirror", remote_url],
+            src,
+            true,
+            opts.token.as_deref(),
+        )
     }
 }
 
@@ -242,17 +391,18 @@ pub(crate) mod test_support {
     /// A [`GitRunner`] stub that records calls but does not invoke git.
     #[derive(Debug, Clone, Default)]
     pub struct SpyGitRunner {
+        /// All recorded git operation calls.
         pub calls: Arc<Mutex<Vec<GitCall>>>,
     }
 
     /// A recorded call to a [`GitRunner`] method.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct GitCall {
-        /// Method name: `"mirror_clone"` or `"lfs_clone"`.
+        /// Method name, e.g. `"mirror_clone"`, `"full_clone"`, `"push_mirror"`.
         pub method: String,
-        /// The URL argument.
+        /// The URL or remote argument.
         pub url: String,
-        /// The destination path argument.
+        /// The destination or source path argument.
         pub dest: PathBuf,
     }
 
@@ -263,31 +413,69 @@ pub(crate) mod test_support {
             dest: &Path,
             _opts: &CloneOptions,
         ) -> Result<(), CoreError> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(GitCall {
-                    method: "mirror_clone".to_string(),
-                    url: url.to_string(),
-                    dest: dest.to_path_buf(),
-                });
+            self.record("mirror_clone", url, dest);
+            Ok(())
+        }
+
+        fn bare_clone(
+            &self,
+            url: &str,
+            dest: &Path,
+            _opts: &CloneOptions,
+        ) -> Result<(), CoreError> {
+            self.record("bare_clone", url, dest);
+            Ok(())
+        }
+
+        fn full_clone(
+            &self,
+            url: &str,
+            dest: &Path,
+            _opts: &CloneOptions,
+        ) -> Result<(), CoreError> {
+            self.record("full_clone", url, dest);
+            Ok(())
+        }
+
+        fn shallow_clone(
+            &self,
+            url: &str,
+            dest: &Path,
+            _opts: &CloneOptions,
+            _depth: u32,
+        ) -> Result<(), CoreError> {
+            self.record("shallow_clone", url, dest);
             Ok(())
         }
 
         fn lfs_clone(&self, url: &str, dest: &Path, _opts: &CloneOptions) -> Result<(), CoreError> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(GitCall {
-                    method: "lfs_clone".to_string(),
-                    url: url.to_string(),
-                    dest: dest.to_path_buf(),
-                });
+            self.record("lfs_clone", url, dest);
+            Ok(())
+        }
+
+        fn push_mirror(
+            &self,
+            src: &Path,
+            remote_url: &str,
+            _opts: &CloneOptions,
+        ) -> Result<(), CoreError> {
+            self.record("push_mirror", remote_url, src);
             Ok(())
         }
     }
 
     impl SpyGitRunner {
+        fn record(&self, method: &str, url: &str, dest: &Path) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(GitCall {
+                    method: method.to_string(),
+                    url: url.to_string(),
+                    dest: dest.to_path_buf(),
+                });
+        }
+
         /// Returns all recorded calls.
         pub fn recorded_calls(&self) -> Vec<GitCall> {
             self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
@@ -320,6 +508,50 @@ mod tests {
     }
 
     #[test]
+    fn spy_git_runner_bare_clone_records_call() {
+        let runner = SpyGitRunner::default();
+        let dest = PathBuf::from("/tmp/bare.git");
+        runner
+            .bare_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .expect("bare clone");
+
+        let calls = runner.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "bare_clone");
+    }
+
+    #[test]
+    fn spy_git_runner_full_clone_records_call() {
+        let runner = SpyGitRunner::default();
+        let dest = PathBuf::from("/tmp/full");
+        runner
+            .full_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .expect("full clone");
+
+        let calls = runner.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "full_clone");
+    }
+
+    #[test]
+    fn spy_git_runner_shallow_clone_records_call() {
+        let runner = SpyGitRunner::default();
+        let dest = PathBuf::from("/tmp/shallow.git");
+        runner
+            .shallow_clone(
+                "https://github.com/octocat/Hello-World.git",
+                &dest,
+                &opts(),
+                10,
+            )
+            .expect("shallow clone");
+
+        let calls = runner.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "shallow_clone");
+    }
+
+    #[test]
     fn spy_git_runner_lfs_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/lfs.git");
@@ -330,6 +562,19 @@ mod tests {
         let calls = runner.recorded_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].method, "lfs_clone");
+    }
+
+    #[test]
+    fn spy_git_runner_push_mirror_records_call() {
+        let runner = SpyGitRunner::default();
+        let src = PathBuf::from("/tmp/local.git");
+        runner
+            .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
+            .expect("push mirror");
+
+        let calls = runner.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "push_mirror");
     }
 
     #[test]

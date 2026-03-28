@@ -7,7 +7,10 @@ use std::path::Path;
 
 use tracing::info;
 
-use github_backup_types::{config::BackupOptions, Repository};
+use github_backup_types::{
+    config::{BackupOptions, CloneType},
+    Repository,
+};
 
 use crate::{
     error::CoreError,
@@ -16,7 +19,7 @@ use crate::{
 };
 
 /// Backs up a single repository by writing its metadata JSON and performing a
-/// bare mirror clone (or update if already cloned).
+/// git clone (using the mode selected by `opts.clone_type`).
 ///
 /// # Errors
 ///
@@ -46,23 +49,55 @@ pub async fn backup_repository(
     let meta_path = meta_dir.join("info.json");
     storage.write_json(&meta_path, repo)?;
 
-    // Clone / update the bare mirror.
+    // Clone / update the repository using the configured clone strategy.
     if opts.repositories {
-        let dest = repos_dir.join(format!("{}.git", repo.name));
-        let clone_url = if opts.prefer_ssh {
-            &repo.ssh_url
-        } else {
-            &repo.clone_url
-        };
-
-        if opts.lfs {
-            git.lfs_clone(clone_url, &dest, clone_opts)?;
-        } else {
-            git.mirror_clone(clone_url, &dest, clone_opts)?;
-        }
+        clone_repo(repo, opts, repos_dir, git, clone_opts)?;
     }
 
     Ok(())
+}
+
+/// Performs the git clone / update for a repository, dispatching on
+/// [`BackupOptions::clone_type`] and [`BackupOptions::lfs`].
+fn clone_repo(
+    repo: &Repository,
+    opts: &BackupOptions,
+    repos_dir: &Path,
+    git: &impl GitRunner,
+    clone_opts: &CloneOptions,
+) -> Result<(), CoreError> {
+    let clone_url = if opts.prefer_ssh {
+        &repo.ssh_url
+    } else {
+        &repo.clone_url
+    };
+
+    if opts.lfs {
+        // LFS cloning is independent of clone_type.
+        let dest = repos_dir.join(format!("{}.git", repo.name));
+        return git.lfs_clone(clone_url, &dest, clone_opts);
+    }
+
+    match &opts.clone_type {
+        CloneType::Mirror => {
+            let dest = repos_dir.join(format!("{}.git", repo.name));
+            git.mirror_clone(clone_url, &dest, clone_opts)
+        }
+        CloneType::Bare => {
+            let dest = repos_dir.join(format!("{}.git", repo.name));
+            git.bare_clone(clone_url, &dest, clone_opts)
+        }
+        CloneType::Full => {
+            // Full clones go in a directory without a `.git` suffix so they
+            // look like normal working trees.
+            let dest = repos_dir.join(&repo.name);
+            git.full_clone(clone_url, &dest, clone_opts)
+        }
+        CloneType::Shallow(depth) => {
+            let dest = repos_dir.join(format!("{}.git", repo.name));
+            git.shallow_clone(clone_url, &dest, clone_opts, *depth)
+        }
+    }
 }
 
 /// Returns `true` if `repo` should be included given `opts`.
@@ -147,10 +182,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backup_repository_clones_when_repositories_enabled() {
+    async fn backup_repository_mirror_clone_by_default() {
         let repo = make_repo("Hello-World", false, false);
         let opts = BackupOptions {
             repositories: true,
+            clone_type: CloneType::Mirror,
             ..Default::default()
         };
         let storage = MemStorage::default();
@@ -171,6 +207,95 @@ mod tests {
         let calls = git.recorded_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].method, "mirror_clone");
+    }
+
+    #[tokio::test]
+    async fn backup_repository_bare_clone_when_configured() {
+        let repo = make_repo("Hello-World", false, false);
+        let opts = BackupOptions {
+            repositories: true,
+            clone_type: CloneType::Bare,
+            ..Default::default()
+        };
+        let storage = MemStorage::default();
+        let git = SpyGitRunner::default();
+
+        backup_repository(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/repos"),
+            &PathBuf::from("/backup/json/repos/Hello-World"),
+            &storage,
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("backup");
+
+        let calls = git.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "bare_clone");
+    }
+
+    #[tokio::test]
+    async fn backup_repository_full_clone_uses_no_git_suffix() {
+        let repo = make_repo("Hello-World", false, false);
+        let opts = BackupOptions {
+            repositories: true,
+            clone_type: CloneType::Full,
+            ..Default::default()
+        };
+        let storage = MemStorage::default();
+        let git = SpyGitRunner::default();
+
+        backup_repository(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/repos"),
+            &PathBuf::from("/backup/json/repos/Hello-World"),
+            &storage,
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("backup");
+
+        let calls = git.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "full_clone");
+        // Full clones should NOT have the .git suffix.
+        assert!(
+            !calls[0].dest.to_string_lossy().ends_with(".git"),
+            "full clone destination should not end with .git"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_repository_shallow_clone_when_configured() {
+        let repo = make_repo("Hello-World", false, false);
+        let opts = BackupOptions {
+            repositories: true,
+            clone_type: CloneType::Shallow(5),
+            ..Default::default()
+        };
+        let storage = MemStorage::default();
+        let git = SpyGitRunner::default();
+
+        backup_repository(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/repos"),
+            &PathBuf::from("/backup/json/repos/Hello-World"),
+            &storage,
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("backup");
+
+        let calls = git.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "shallow_clone");
     }
 
     #[tokio::test]

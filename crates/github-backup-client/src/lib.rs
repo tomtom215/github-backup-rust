@@ -43,6 +43,7 @@
 mod api_client;
 mod client;
 mod error;
+pub mod oauth;
 mod pagination;
 mod rate_limit;
 
