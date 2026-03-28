@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Command-line argument definitions using [`clap`].
+//! Top-level [`Args`] struct parsed from the command line.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use clap::{ArgGroup, Parser};
+
+use super::clone_type::CliCloneType;
 
 /// Comprehensive GitHub backup tool.
 ///
@@ -17,8 +18,8 @@ use clap::{ArgGroup, Parser};
 ///
 /// Provide a personal access token (classic or fine-grained) via `--token` or
 /// the `GITHUB_TOKEN` environment variable, **or** use `--device-auth` to
-/// authenticate interactively via the GitHub OAuth device flow (requires
-/// a registered OAuth App — see `--oauth-client-id`).
+/// authenticate interactively via the GitHub OAuth device flow (requires a
+/// registered OAuth App — see `--oauth-client-id`).
 ///
 /// Fine-grained tokens are recommended for long-running or scheduled backups.
 ///
@@ -38,6 +39,11 @@ use clap::{ArgGroup, Parser};
 ///
 /// Use `--s3-bucket` (and related flags) to sync JSON metadata and release
 /// assets to any S3-compatible object store (AWS, Backblaze B2, MinIO, …).
+///
+/// # Configuration File
+///
+/// Load defaults from a TOML configuration file with `--config <FILE>`.
+/// Command-line flags override values from the config file.
 ///
 /// # Examples
 ///
@@ -65,6 +71,11 @@ use clap::{ArgGroup, Parser};
 ///   --mirror-to https://codeberg.org \
 ///   --mirror-token CODEBERG_TOKEN --mirror-owner your_username
 /// ```
+///
+/// Load settings from a config file:
+/// ```text
+/// github-backup --config /etc/github-backup/config.toml
+/// ```
 #[derive(Debug, Parser)]
 #[command(
     name = "github-backup",
@@ -74,13 +85,23 @@ use clap::{ArgGroup, Parser};
 )]
 #[command(group(
     ArgGroup::new("auth")
-        .required(true)
+        .required(false)   // relaxed: config file may supply the token
         .args(["token", "device_auth"]),
 ))]
 pub struct Args {
     /// GitHub username or organisation name to back up.
+    ///
+    /// May be omitted when a `--config` file supplies `owner`.
     #[arg(value_name = "OWNER")]
-    pub owner: String,
+    pub owner: Option<String>,
+
+    // ── Configuration file ─────────────────────────────────────────────────
+    /// Path to a TOML configuration file.
+    ///
+    /// Values in the file act as defaults; explicit CLI flags take precedence.
+    /// See the documentation for the full schema.
+    #[arg(long, short = 'c', value_name = "FILE")]
+    pub config: Option<PathBuf>,
 
     // ── Authentication ─────────────────────────────────────────────────────
     /// Personal access token (classic or fine-grained).
@@ -97,8 +118,8 @@ pub struct Args {
 
     /// Authenticate interactively using the GitHub OAuth device flow.
     ///
-    /// Opens a browser code at `github.com/login/device`.  Requires
-    /// `--oauth-client-id`.
+    /// Opens a browser code entry at `github.com/login/device`.
+    /// Requires `--oauth-client-id`.
     #[arg(long)]
     pub device_auth: bool,
 
@@ -127,8 +148,15 @@ pub struct Args {
 
     // ── Output ─────────────────────────────────────────────────────────────
     /// Root directory where backup artefacts will be written.
-    #[arg(short = 'o', long = "output", value_name = "DIR", default_value = ".")]
-    pub output: PathBuf,
+    #[arg(short = 'o', long = "output", value_name = "DIR")]
+    pub output: Option<PathBuf>,
+
+    /// Write a JSON summary report to this file after the backup completes.
+    ///
+    /// The report contains counters for every backed-up category.
+    /// Useful for monitoring and auditing.
+    #[arg(long, value_name = "FILE")]
+    pub report: Option<PathBuf>,
 
     // ── Target type ────────────────────────────────────────────────────────
     /// Treat OWNER as a GitHub organisation (uses the org repos API).
@@ -386,10 +414,84 @@ pub struct Args {
 }
 
 impl Args {
-    /// Converts the parsed CLI arguments into a [`BackupOptions`] struct.
+    /// Merges a loaded `ConfigFile` into this [`Args`], with CLI values taking
+    /// precedence over config file values.
+    ///
+    /// Call this after parsing CLI args but before calling
+    /// [`into_backup_options`][Args::into_backup_options].
+    pub fn merge_config(&mut self, cfg: &github_backup_types::config::ConfigFile) {
+        // Owner: config file wins only if CLI did not provide it.
+        if self.owner.is_none() {
+            if let Some(ref o) = cfg.owner {
+                self.owner = Some(o.clone());
+            }
+        }
+        // Token: CLI / env takes precedence.
+        if self.token.is_none() {
+            if let Some(ref t) = cfg.token {
+                self.token = Some(t.clone());
+            }
+        }
+        // Output dir.
+        if self.output.is_none() {
+            if let Some(ref p) = cfg.output {
+                self.output = Some(p.clone());
+            }
+        }
+        // Concurrency: apply config only when still at the default value.
+        if self.concurrency == 4 {
+            if let Some(c) = cfg.concurrency {
+                self.concurrency = c;
+            }
+        }
+        // Boolean categories: config activates them, CLI can also activate.
+        self.repositories |= cfg.repositories.unwrap_or(false);
+        self.issues |= cfg.issues.unwrap_or(false);
+        self.issue_comments |= cfg.issue_comments.unwrap_or(false);
+        self.issue_events |= cfg.issue_events.unwrap_or(false);
+        self.pulls |= cfg.pulls.unwrap_or(false);
+        self.pull_comments |= cfg.pull_comments.unwrap_or(false);
+        self.pull_commits |= cfg.pull_commits.unwrap_or(false);
+        self.pull_reviews |= cfg.pull_reviews.unwrap_or(false);
+        self.labels |= cfg.labels.unwrap_or(false);
+        self.milestones |= cfg.milestones.unwrap_or(false);
+        self.releases |= cfg.releases.unwrap_or(false);
+        self.release_assets |= cfg.release_assets.unwrap_or(false);
+        self.hooks |= cfg.hooks.unwrap_or(false);
+        self.security_advisories |= cfg.security_advisories.unwrap_or(false);
+        self.wikis |= cfg.wikis.unwrap_or(false);
+        self.starred |= cfg.starred.unwrap_or(false);
+        self.watched |= cfg.watched.unwrap_or(false);
+        self.followers |= cfg.followers.unwrap_or(false);
+        self.following |= cfg.following.unwrap_or(false);
+        self.gists |= cfg.gists.unwrap_or(false);
+        self.starred_gists |= cfg.starred_gists.unwrap_or(false);
+        self.forks |= cfg.forks.unwrap_or(false);
+        self.private |= cfg.private.unwrap_or(false);
+        self.all |= cfg.all.unwrap_or(false);
+    }
+
+    /// Converts the parsed (and optionally merged) CLI arguments into an owner
+    /// string, output path, and `BackupOptions`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no owner has been supplied (neither via positional arg nor
+    /// config file). Callers should validate this before calling.
     #[must_use]
-    pub fn into_backup_options(self) -> github_backup_types::config::BackupOptions {
+    pub fn into_backup_options(
+        self,
+    ) -> (
+        String,
+        std::path::PathBuf,
+        github_backup_types::config::BackupOptions,
+    ) {
         use github_backup_types::config::{BackupOptions, BackupTarget};
+
+        let owner = self
+            .owner
+            .expect("owner must be set before calling into_backup_options");
+        let output = self.output.unwrap_or_else(|| std::path::PathBuf::from("."));
 
         let target = if self.org {
             BackupTarget::Org
@@ -400,325 +502,61 @@ impl Args {
         let clone_type = self.clone_type.into_clone_type();
 
         if self.all {
-            return BackupOptions {
+            return (
+                owner,
+                output,
+                BackupOptions {
+                    target,
+                    prefer_ssh: self.prefer_ssh,
+                    clone_type,
+                    lfs: self.lfs,
+                    no_prune: self.no_prune,
+                    dry_run: self.dry_run,
+                    concurrency: self.concurrency,
+                    ..BackupOptions::all()
+                },
+            );
+        }
+
+        (
+            owner,
+            output,
+            BackupOptions {
                 target,
+                repositories: self.repositories,
+                forks: self.forks,
+                private: self.private,
                 prefer_ssh: self.prefer_ssh,
                 clone_type,
                 lfs: self.lfs,
                 no_prune: self.no_prune,
+                issues: self.issues,
+                issue_comments: self.issue_comments,
+                issue_events: self.issue_events,
+                pulls: self.pulls,
+                pull_comments: self.pull_comments,
+                pull_commits: self.pull_commits,
+                pull_reviews: self.pull_reviews,
+                labels: self.labels,
+                milestones: self.milestones,
+                releases: self.releases,
+                release_assets: self.release_assets,
+                hooks: self.hooks,
+                security_advisories: self.security_advisories,
+                wikis: self.wikis,
+                starred: self.starred,
+                watched: self.watched,
+                followers: self.followers,
+                following: self.following,
+                gists: self.gists,
+                starred_gists: self.starred_gists,
                 dry_run: self.dry_run,
                 concurrency: self.concurrency,
-                ..BackupOptions::all()
-            };
-        }
-
-        BackupOptions {
-            target,
-            repositories: self.repositories,
-            forks: self.forks,
-            private: self.private,
-            prefer_ssh: self.prefer_ssh,
-            clone_type,
-            lfs: self.lfs,
-            no_prune: self.no_prune,
-            issues: self.issues,
-            issue_comments: self.issue_comments,
-            issue_events: self.issue_events,
-            pulls: self.pulls,
-            pull_comments: self.pull_comments,
-            pull_commits: self.pull_commits,
-            pull_reviews: self.pull_reviews,
-            labels: self.labels,
-            milestones: self.milestones,
-            releases: self.releases,
-            release_assets: self.release_assets,
-            hooks: self.hooks,
-            security_advisories: self.security_advisories,
-            wikis: self.wikis,
-            starred: self.starred,
-            watched: self.watched,
-            followers: self.followers,
-            following: self.following,
-            gists: self.gists,
-            starred_gists: self.starred_gists,
-            dry_run: self.dry_run,
-            concurrency: self.concurrency,
-        }
-    }
-}
-
-// ── Clone type argument ───────────────────────────────────────────────────────
-
-/// CLI representation of `--clone-type`.
-///
-/// Parses the human-friendly strings accepted by the `--clone-type` flag.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum CliCloneType {
-    /// `git clone --mirror`
-    #[default]
-    Mirror,
-    /// `git clone --bare`
-    Bare,
-    /// `git clone` (full working tree)
-    Full,
-    /// `git clone --depth <n>`
-    Shallow(u32),
-}
-
-impl CliCloneType {
-    /// Converts to the corresponding [`github_backup_types::config::CloneType`].
-    #[must_use]
-    pub fn into_clone_type(self) -> github_backup_types::config::CloneType {
-        use github_backup_types::config::CloneType;
-        match self {
-            Self::Mirror => CloneType::Mirror,
-            Self::Bare => CloneType::Bare,
-            Self::Full => CloneType::Full,
-            Self::Shallow(d) => CloneType::Shallow(d),
-        }
-    }
-}
-
-impl FromStr for CliCloneType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "mirror" => Ok(Self::Mirror),
-            "bare" => Ok(Self::Bare),
-            "full" => Ok(Self::Full),
-            s if s.starts_with("shallow:") => {
-                let depth_str = &s["shallow:".len()..];
-                let depth: u32 = depth_str.parse().map_err(|_| {
-                    format!("invalid depth '{depth_str}' in '{s}'; expected e.g. 'shallow:10'")
-                })?;
-                if depth == 0 {
-                    return Err("shallow depth must be at least 1".to_string());
-                }
-                Ok(Self::Shallow(depth))
-            }
-            _ => Err(format!(
-                "unknown clone type '{s}'; valid values: mirror, bare, full, shallow:<depth>"
-            )),
-        }
+            },
+        )
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-    use github_backup_types::config::CloneType;
-
-    #[test]
-    fn args_parse_minimal_required_fields() {
-        let args = Args::parse_from(["github-backup", "octocat", "--token", "ghp_test"]);
-        assert_eq!(args.owner, "octocat");
-        assert_eq!(args.token.as_deref(), Some("ghp_test"));
-        assert!(!args.all);
-        assert!(!args.org);
-    }
-
-    #[test]
-    fn args_parse_all_flag() {
-        let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "--all"]);
-        assert!(args.all);
-    }
-
-    #[test]
-    fn args_parse_org_flag() {
-        let args = Args::parse_from(["github-backup", "myorg", "--token", "t", "--org", "--all"]);
-        assert!(args.org);
-        let opts = args.into_backup_options();
-        assert_eq!(opts.target, github_backup_types::config::BackupTarget::Org);
-    }
-
-    #[test]
-    fn args_into_backup_options_all_enables_repositories() {
-        let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "--all"]);
-        let opts = args.into_backup_options();
-        assert!(opts.repositories);
-        assert!(opts.issues);
-        assert!(opts.pulls);
-    }
-
-    #[test]
-    fn args_into_backup_options_individual_flags() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--repositories",
-            "--issues",
-        ]);
-        let opts = args.into_backup_options();
-        assert!(opts.repositories);
-        assert!(opts.issues);
-        assert!(!opts.pulls);
-    }
-
-    #[test]
-    fn args_release_assets_requires_releases() {
-        let result = Args::try_parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--release-assets",
-        ]);
-        assert!(
-            result.is_err(),
-            "--release-assets without --releases should fail"
-        );
-    }
-
-    #[test]
-    fn args_parse_quiet_and_verbose() {
-        let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "-q"]);
-        assert!(args.quiet);
-
-        let args = Args::parse_from(["github-backup", "octocat", "--token", "t", "-vv"]);
-        assert_eq!(args.verbose, 2);
-    }
-
-    #[test]
-    fn args_parse_concurrency_and_dry_run() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--concurrency",
-            "8",
-            "--dry-run",
-        ]);
-        assert_eq!(args.concurrency, 8);
-        assert!(args.dry_run);
-        let opts = args.into_backup_options();
-        assert_eq!(opts.concurrency, 8);
-        assert!(opts.dry_run);
-    }
-
-    #[test]
-    fn args_parse_no_prune() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--repositories",
-            "--no-prune",
-        ]);
-        assert!(args.no_prune);
-        let opts = args.into_backup_options();
-        assert!(opts.no_prune);
-    }
-
-    #[test]
-    fn cli_clone_type_parse_mirror() {
-        assert_eq!(
-            "mirror".parse::<CliCloneType>().unwrap(),
-            CliCloneType::Mirror
-        );
-    }
-
-    #[test]
-    fn cli_clone_type_parse_bare() {
-        assert_eq!("bare".parse::<CliCloneType>().unwrap(), CliCloneType::Bare);
-    }
-
-    #[test]
-    fn cli_clone_type_parse_full() {
-        assert_eq!("full".parse::<CliCloneType>().unwrap(), CliCloneType::Full);
-    }
-
-    #[test]
-    fn cli_clone_type_parse_shallow() {
-        assert_eq!(
-            "shallow:10".parse::<CliCloneType>().unwrap(),
-            CliCloneType::Shallow(10)
-        );
-    }
-
-    #[test]
-    fn cli_clone_type_parse_shallow_zero_is_error() {
-        assert!("shallow:0".parse::<CliCloneType>().is_err());
-    }
-
-    #[test]
-    fn cli_clone_type_parse_invalid_is_error() {
-        assert!("invalid".parse::<CliCloneType>().is_err());
-        assert!("shallow:abc".parse::<CliCloneType>().is_err());
-    }
-
-    #[test]
-    fn cli_clone_type_into_clone_type_mirror() {
-        assert_eq!(CliCloneType::Mirror.into_clone_type(), CloneType::Mirror);
-    }
-
-    #[test]
-    fn cli_clone_type_into_clone_type_shallow() {
-        assert_eq!(
-            CliCloneType::Shallow(5).into_clone_type(),
-            CloneType::Shallow(5)
-        );
-    }
-
-    #[test]
-    fn args_parse_clone_type_full() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--repositories",
-            "--clone-type",
-            "full",
-        ]);
-        assert_eq!(args.clone_type, CliCloneType::Full);
-        let opts = args.into_backup_options();
-        assert_eq!(opts.clone_type, CloneType::Full);
-    }
-
-    #[test]
-    fn args_parse_s3_flags() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--repositories",
-            "--s3-bucket",
-            "my-bucket",
-            "--s3-region",
-            "eu-west-1",
-            "--s3-access-key",
-            "AKID",
-            "--s3-secret-key",
-            "SECRET",
-        ]);
-        assert_eq!(args.s3_bucket.as_deref(), Some("my-bucket"));
-        assert_eq!(args.s3_region, "eu-west-1");
-    }
-
-    #[test]
-    fn args_parse_mirror_flags() {
-        let args = Args::parse_from([
-            "github-backup",
-            "octocat",
-            "--token",
-            "t",
-            "--repositories",
-            "--mirror-to",
-            "https://codeberg.org",
-            "--mirror-token",
-            "cb_token",
-            "--mirror-owner",
-            "alice",
-        ]);
-        assert_eq!(args.mirror_to.as_deref(), Some("https://codeberg.org"));
-        assert_eq!(args.mirror_token.as_deref(), Some("cb_token"));
-        assert_eq!(args.mirror_owner.as_deref(), Some("alice"));
-    }
-}
+#[path = "args_tests.rs"]
+mod tests;

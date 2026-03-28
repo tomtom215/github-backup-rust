@@ -1,0 +1,36 @@
+[book]
+title = "github-backup"
+description = "Comprehensive GitHub backup tool written in Rust"
+authors = ["Tom F"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/tomtom215/github-backup-rust"
+edit-url-template = "https://github.com/tomtom215/github-backup-rust/edit/main/docs/{path}"
+site-url = "/github-backup-rust/"
+cname = ""
+no-section-label = false
+additional-css = []
+additional-js = []
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.fold]
+enable = true
+level = 1

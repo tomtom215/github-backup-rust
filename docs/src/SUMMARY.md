@@ -1,0 +1,51 @@
+# Summary
+
+[Introduction](introduction.md)
+
+---
+
+# Getting Started
+
+- [Installation](getting-started/installation.md)
+- [Quick Start](getting-started/quick-start.md)
+- [Authentication](getting-started/authentication.md)
+
+# Backup Categories
+
+- [Repositories](backup-categories.md)
+- [Issues & Pull Requests](issues-and-prs.md)
+- [Releases & Assets](releases.md)
+- [Gists & Wikis](gists-and-wikis.md)
+- [User & Org Data](user-data.md)
+
+# Storage Backends
+
+- [Local Filesystem](storage/local.md)
+- [S3-Compatible Storage](storage/s3.md)
+
+# Mirroring
+
+- [Push to Gitea / Codeberg](mirroring.md)
+
+# Configuration
+
+- [CLI Reference](configuration/cli-reference.md)
+- [Config File (TOML)](configuration/config-file.md)
+- [Environment Variables](configuration/environment.md)
+- [Output Directory Layout](configuration/output-layout.md)
+
+# Deployment
+
+- [Docker](docker.md)
+- [Systemd Timer](deployment/systemd.md)
+- [Cron](deployment/cron.md)
+
+# Development
+
+- [Architecture](development/architecture.md)
+- [Contributing](development/contributing.md)
+- [Changelog](development/changelog.md)
+
+---
+
+[FAQ](faq.md)

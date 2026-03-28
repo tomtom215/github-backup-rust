@@ -261,6 +261,126 @@ impl BackupOptions {
     }
 }
 
+/// TOML configuration file schema.
+///
+/// Load from disk with [`ConfigFile::from_toml_str`] or
+/// [`ConfigFile::from_path`].  All fields are optional; missing fields fall
+/// back to CLI defaults.  A typical minimal config looks like:
+///
+/// ```toml
+/// owner = "octocat"
+/// output = "/var/backup/github"
+/// concurrency = 8
+///
+/// repositories = true
+/// issues = true
+/// pulls = true
+/// releases = true
+/// wikis = true
+/// ```
+///
+/// # Token security
+///
+/// Storing tokens in config files is convenient but less secure than providing
+/// them via the `GITHUB_TOKEN` environment variable.  Prefer environment
+/// variables in automated environments; restrict config file permissions to
+/// `0600` when a token must be stored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigFile {
+    /// GitHub username or organisation name to back up.
+    pub owner: Option<String>,
+
+    /// GitHub personal access token.
+    ///
+    /// Prefer the `GITHUB_TOKEN` environment variable over storing tokens here.
+    pub token: Option<String>,
+
+    /// Root directory where backup artefacts will be written.
+    pub output: Option<PathBuf>,
+
+    /// Maximum number of repositories to back up concurrently (default: 4).
+    pub concurrency: Option<usize>,
+
+    /// Treat `owner` as a GitHub organisation.
+    pub org: Option<bool>,
+
+    // ── Category flags ─────────────────────────────────────────────────────
+    /// Enable all backup categories.
+    pub all: Option<bool>,
+
+    /// Clone/mirror repositories.
+    pub repositories: Option<bool>,
+    /// Include forked repositories.
+    pub forks: Option<bool>,
+    /// Include private repositories.
+    pub private: Option<bool>,
+    /// Back up issue metadata.
+    pub issues: Option<bool>,
+    /// Back up issue comment threads.
+    pub issue_comments: Option<bool>,
+    /// Back up issue timeline events.
+    pub issue_events: Option<bool>,
+    /// Back up pull request metadata.
+    pub pulls: Option<bool>,
+    /// Back up pull request review comments.
+    pub pull_comments: Option<bool>,
+    /// Back up pull request commit lists.
+    pub pull_commits: Option<bool>,
+    /// Back up pull request reviews.
+    pub pull_reviews: Option<bool>,
+    /// Back up repository labels.
+    pub labels: Option<bool>,
+    /// Back up repository milestones.
+    pub milestones: Option<bool>,
+    /// Back up release metadata.
+    pub releases: Option<bool>,
+    /// Download release binary assets.
+    pub release_assets: Option<bool>,
+    /// Back up webhook configurations.
+    pub hooks: Option<bool>,
+    /// Back up published security advisories.
+    pub security_advisories: Option<bool>,
+    /// Clone repository wikis.
+    pub wikis: Option<bool>,
+    /// Back up starred repositories.
+    pub starred: Option<bool>,
+    /// Back up watched repositories.
+    pub watched: Option<bool>,
+    /// Back up follower list.
+    pub followers: Option<bool>,
+    /// Back up following list.
+    pub following: Option<bool>,
+    /// Back up owned gists.
+    pub gists: Option<bool>,
+    /// Back up starred gists.
+    pub starred_gists: Option<bool>,
+}
+
+impl ConfigFile {
+    /// Parses a [`ConfigFile`] from a TOML string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the TOML is malformed or contains
+    /// type-incompatible values.
+    pub fn from_toml_str(s: &str) -> Result<Self, String> {
+        toml::from_str(s).map_err(|e| e.to_string())
+    }
+
+    /// Reads and parses a [`ConfigFile`] from a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the file cannot be read or contains invalid
+    /// TOML.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read config file '{}': {e}", path.display()))?;
+        Self::from_toml_str(&content)
+            .map_err(|e| format!("invalid config file '{}': {e}", path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +473,53 @@ mod tests {
     fn backup_options_clone_type_defaults_to_mirror() {
         let opts = BackupOptions::default();
         assert_eq!(opts.clone_type, CloneType::Mirror);
+    }
+
+    #[test]
+    fn config_file_from_toml_str_parses_all_fields() {
+        let toml = r#"
+owner = "octocat"
+output = "/var/backup"
+concurrency = 8
+repositories = true
+issues = true
+pulls = true
+"#;
+        let cfg = ConfigFile::from_toml_str(toml).expect("parse");
+        assert_eq!(cfg.owner.as_deref(), Some("octocat"));
+        assert_eq!(cfg.output, Some(PathBuf::from("/var/backup")));
+        assert_eq!(cfg.concurrency, Some(8));
+        assert_eq!(cfg.repositories, Some(true));
+        assert_eq!(cfg.issues, Some(true));
+        assert_eq!(cfg.pulls, Some(true));
+    }
+
+    #[test]
+    fn config_file_from_toml_str_partial_config() {
+        let toml = r#"owner = "octocat""#;
+        let cfg = ConfigFile::from_toml_str(toml).expect("parse");
+        assert_eq!(cfg.owner.as_deref(), Some("octocat"));
+        assert!(cfg.repositories.is_none());
+    }
+
+    #[test]
+    fn config_file_from_toml_str_empty_is_valid() {
+        let cfg = ConfigFile::from_toml_str("").expect("empty config is valid");
+        assert!(cfg.owner.is_none());
+    }
+
+    #[test]
+    fn config_file_from_toml_str_invalid_returns_error() {
+        let result = ConfigFile::from_toml_str("owner = {not a string}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_file_default_has_all_none() {
+        let cfg = ConfigFile::default();
+        assert!(cfg.owner.is_none());
+        assert!(cfg.token.is_none());
+        assert!(cfg.output.is_none());
+        assert!(cfg.concurrency.is_none());
     }
 }

@@ -14,7 +14,7 @@ use github_backup_client::{oauth::device_flow, GitHubClient};
 use github_backup_core::{BackupEngine, FsStorage, ProcessGitRunner};
 use github_backup_mirror::{config::GiteaConfig, runner::push_mirrors, GiteaClient};
 use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
-use github_backup_types::config::{Credential, OutputConfig};
+use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
 
 mod cli;
 
@@ -34,10 +34,36 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
-    // Initialise structured logging.
+    // Initialise structured logging early so config-file errors are logged.
     init_tracing(args.quiet, args.verbose);
+
+    // ── Config file ────────────────────────────────────────────────────────
+    if let Some(ref config_path) = args.config.clone() {
+        match ConfigFile::from_path(config_path) {
+            Ok(cfg) => {
+                info!(path = %config_path.display(), "loaded config file");
+                args.merge_config(&cfg);
+            }
+            Err(e) => {
+                error!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // Validate that an owner was supplied (via CLI or config file).
+    if args.owner.is_none() {
+        error!("no owner specified; provide OWNER as a positional argument or via 'owner' in the config file");
+        return ExitCode::FAILURE;
+    }
+
+    // Validate that an auth method was supplied.
+    if args.token.is_none() && !args.device_auth {
+        error!("no authentication method; use --token / GITHUB_TOKEN, --device-auth, or set 'token' in the config file");
+        return ExitCode::FAILURE;
+    }
 
     // Obtain GitHub credential (PAT or OAuth device flow).
     let token = match obtain_token(&args).await {
@@ -48,14 +74,14 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Capture values needed after `args` is consumed.
-    let owner = args.owner.clone();
-    let output_path = args.output.clone();
+    // Capture values needed after `args` is (partially) consumed.
+    let report_path = args.report.clone();
     let mirror_config = build_mirror_config(&args);
     let s3_config = build_s3_config(&args);
     let s3_include_assets = args.s3_include_assets;
+
+    let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
-    let opts = args.into_backup_options();
     let cred = Credential::Token(token);
 
     // Construct the GitHub client.
@@ -94,6 +120,15 @@ async fn main() -> ExitCode {
     };
 
     info!("{stats}");
+
+    // ── Summary report ─────────────────────────────────────────────────────
+    if let Some(report_file) = report_path {
+        if let Err(e) = write_report(&report_file, &owner, &stats) {
+            error!("failed to write report: {e}");
+            return ExitCode::FAILURE;
+        }
+        info!(path = %report_file.display(), "wrote summary report");
+    }
 
     // ── Post-processing: push mirrors ──────────────────────────────────────
     if let Some(mirror_cfg) = mirror_config {
@@ -147,6 +182,29 @@ async fn obtain_token(args: &Args) -> Result<String, String> {
     }
 
     Err("no authentication method provided".to_string())
+}
+
+/// Writes a JSON summary report to `path`.
+fn write_report(
+    path: &std::path::Path,
+    owner: &str,
+    stats: &github_backup_core::BackupStats,
+) -> Result<(), String> {
+    let report = serde_json::json!({
+        "owner": owner,
+        "repos_backed_up": stats.repos_backed_up(),
+        "repos_skipped": stats.repos_skipped(),
+        "repos_errored": stats.repos_errored(),
+        "gists_backed_up": stats.gists_backed_up(),
+        "total_discovered": stats.repos_discovered(),
+    });
+    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create report directory: {e}"))?;
+    }
+    std::fs::write(path, json).map_err(|e| format!("cannot write report: {e}"))?;
+    Ok(())
 }
 
 /// Pushes all locally-cloned repositories as mirrors to the configured
@@ -226,7 +284,7 @@ fn build_mirror_config(args: &Args) -> Option<GiteaConfig> {
     let owner = args
         .mirror_owner
         .clone()
-        .unwrap_or_else(|| args.owner.clone());
+        .unwrap_or_else(|| args.owner.clone().unwrap_or_default());
 
     Some(GiteaConfig {
         base_url,
