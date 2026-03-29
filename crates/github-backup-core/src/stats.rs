@@ -37,6 +37,8 @@ struct StatsInner {
     issues_fetched: AtomicU64,
     /// Total pull requests fetched across all repositories.
     prs_fetched: AtomicU64,
+    /// Total GitHub Actions workflows fetched across all repositories.
+    workflows_fetched: AtomicU64,
 }
 
 impl Default for StatsInner {
@@ -50,6 +52,7 @@ impl Default for StatsInner {
             gists_backed_up: AtomicU64::new(0),
             issues_fetched: AtomicU64::new(0),
             prs_fetched: AtomicU64::new(0),
+            workflows_fetched: AtomicU64::new(0),
         }
     }
 }
@@ -118,6 +121,11 @@ impl BackupStats {
         self.inner.prs_fetched.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Records that `n` Actions workflows were fetched for a repository.
+    pub fn add_workflows(&self, n: u64) {
+        self.inner.workflows_fetched.fetch_add(n, Ordering::Relaxed);
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────────
 
     /// Repositories discovered in the owner listing.
@@ -162,6 +170,12 @@ impl BackupStats {
         self.inner.prs_fetched.load(Ordering::Relaxed)
     }
 
+    /// Total GitHub Actions workflows fetched across all repositories.
+    #[must_use]
+    pub fn workflows_fetched(&self) -> u64 {
+        self.inner.workflows_fetched.load(Ordering::Relaxed)
+    }
+
     /// Elapsed seconds since this [`BackupStats`] was constructed.
     ///
     /// Because every handle shares the same [`Arc`], this returns the time
@@ -179,7 +193,8 @@ impl fmt::Display for BackupStats {
             f,
             "repos: {} backed up, {} skipped, {} errored; \
              gists: {} backed up; \
-             issues: {} fetched; PRs: {} fetched \
+             issues: {} fetched; PRs: {} fetched; \
+             workflows: {} fetched \
              ({:.1}s elapsed)",
             self.repos_backed_up(),
             self.repos_skipped(),
@@ -187,6 +202,7 @@ impl fmt::Display for BackupStats {
             self.gists_backed_up(),
             self.issues_fetched(),
             self.prs_fetched(),
+            self.workflows_fetched(),
             self.elapsed_secs(),
         )
     }

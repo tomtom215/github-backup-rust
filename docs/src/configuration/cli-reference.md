@@ -108,6 +108,28 @@ github-backup myorg \
 | `--wikis` | `false` | Clone repository wikis |
 | `--topics` | `false` | Back up repository topics (tags) |
 | `--branches` | `false` | Back up branch list and protection status |
+| `--deploy-keys` | `false` | Back up deploy keys (requires admin access) |
+| `--collaborators` | `false` | Back up collaborator list with permissions (requires admin access) |
+
+## GitHub Actions
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--actions` | `false` | Back up Actions workflow metadata (id, name, path, state, badge URL) |
+| `--action-runs` | `false` | Back up workflow run history (requires `--actions`; can be very large) |
+
+## Deployment Environments
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--environments` | `false` | Back up deployment environment configs (protection rules, branch policies) |
+
+## Organisation Data
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--org-members` | `false` | Back up organisation member list (requires `--org`) |
+| `--org-teams` | `false` | Back up organisation team list (requires `--org`) |
 
 ## User / Org Data
 

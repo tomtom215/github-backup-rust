@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GitHub Actions workflow backup** (`--actions`, `--action-runs`): new
+  `Workflow` and `WorkflowRun` types added to `github-backup-types`.  Two new
+  client endpoints (`list_workflows`, `list_workflow_runs`) and a dedicated
+  backup module (`backup/actions.rs`) in `github-backup-core`.  The engine
+  writes `workflows.json` per repository when `--actions` is set, and optionally
+  `workflow_runs_<id>.json` per workflow when `--action-runs` is also set.
+  Both endpoints handle 403/404 gracefully (Actions disabled, token scope).
+  `BackupStats` now tracks `workflows_fetched` and the JSON report includes the
+  counter.  `--action-runs` is intentionally excluded from `--all` due to its
+  potentially large output.
+
+- **Deployment environment backup** (`--environments`): new `Environment`,
+  `EnvironmentProtectionRule`, and `DeploymentBranchPolicy` types added to
+  `github-backup-types`.  New client endpoint (`list_environments`) and backup
+  module (`backup/environments.rs`) write `environments.json` per repository.
+  404/403 responses (no environments or insufficient permissions) are logged
+  and skipped gracefully.
+
 - **TOML config file** (`--config` / `-c`): supply any backup option through a
   `config.toml` file; CLI flags always take precedence.  The new `ConfigFile`
   type in `github-backup-types` is parsed with the `toml` crate and merged into

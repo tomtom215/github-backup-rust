@@ -176,6 +176,7 @@ pub struct Args {
         "starred", "watched", "followers", "following",
         "gists", "starred_gists", "topics", "branches",
         "deploy_keys", "collaborators", "org_members", "org_teams",
+        "actions", "environments",
     ])]
     pub all: bool,
 
@@ -346,6 +347,30 @@ pub struct Args {
     /// Ignored when backing up a user account.
     #[arg(long)]
     pub org_teams: bool,
+
+    // ── GitHub Actions ─────────────────────────────────────────────────────
+    /// Back up GitHub Actions workflow metadata for each repository.
+    ///
+    /// Saves `workflows.json` to each repository's metadata directory.
+    /// The actual workflow YAML files are already captured by the git clone.
+    #[arg(long)]
+    pub actions: bool,
+
+    /// Back up GitHub Actions workflow run history.
+    ///
+    /// For each workflow, saves `workflow_runs_<id>.json`. Can generate very
+    /// large files for active repositories; opt in deliberately.
+    /// Requires `--actions`.
+    #[arg(long, requires = "actions")]
+    pub action_runs: bool,
+
+    // ── Deployment environments ────────────────────────────────────────────
+    /// Back up deployment environment configurations for each repository.
+    ///
+    /// Saves `environments.json` with protection rules, required reviewers,
+    /// and branch policies.
+    #[arg(long)]
+    pub environments: bool,
 
     // ── Repository name filters ────────────────────────────────────────────
     /// Only back up repositories whose names match this glob pattern.

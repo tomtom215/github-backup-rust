@@ -27,9 +27,9 @@ use std::pin::Pin;
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, Collaborator, DeployKey, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
-    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
-    SecurityAdvisory, Team, User,
+    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
+    Label, Milestone, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
+    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -252,6 +252,41 @@ pub trait BackupClient: Send + Sync {
 
     /// Lists teams in a GitHub organisation.
     fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Vec<Team>, ClientError>>;
+
+    // ── GitHub Actions ────────────────────────────────────────────────────
+
+    /// Lists GitHub Actions workflows defined in a repository.
+    ///
+    /// Callers should handle [`ClientError::ApiError`] with status 403/404
+    /// gracefully (Actions may be disabled or the token lacks the `actions`
+    /// scope).
+    fn list_workflows<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Workflow>, ClientError>>;
+
+    /// Lists workflow runs for a specific workflow.
+    ///
+    /// Returns up to the most recent runs (paginated).  Callers should handle
+    /// 403/404 gracefully.
+    fn list_workflow_runs<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        workflow_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<WorkflowRun>, ClientError>>;
+
+    // ── Deployment environments ───────────────────────────────────────────
+
+    /// Lists deployment environments configured on a repository.
+    ///
+    /// Callers should handle 403/404 gracefully.
+    fn list_environments<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>>;
 }
 
 // ── Blanket impl for the production client ────────────────────────────────
@@ -477,5 +512,35 @@ impl BackupClient for GitHubClient {
 
     fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Vec<Team>, ClientError>> {
         Box::pin(GitHubClient::list_org_teams(self, org))
+    }
+
+    fn list_workflows<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Workflow>, ClientError>> {
+        Box::pin(GitHubClient::list_workflows(self, owner, repo))
+    }
+
+    fn list_workflow_runs<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        workflow_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<WorkflowRun>, ClientError>> {
+        Box::pin(GitHubClient::list_workflow_runs(
+            self,
+            owner,
+            repo,
+            workflow_id,
+        ))
+    }
+
+    fn list_environments<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>> {
+        Box::pin(GitHubClient::list_environments(self, owner, repo))
     }
 }

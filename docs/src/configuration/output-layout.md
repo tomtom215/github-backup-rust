@@ -43,7 +43,12 @@ This page explains the directory and file structure that `github-backup` creates
                 ├── hooks.json
                 ├── security_advisories.json
                 ├── topics.json
-                └── branches.json
+                ├── branches.json
+                ├── deploy_keys.json
+                ├── collaborators.json
+                ├── workflows.json
+                ├── workflow_runs_<id>.json   ← one per workflow (--action-runs)
+                └── environments.json
 ```
 
 ## File Descriptions
@@ -80,6 +85,11 @@ This page explains the directory and file structure that `github-backup` creates
 | `repos/<name>/security_advisories.json` | `--security-advisories` |
 | `repos/<name>/topics.json` | `--topics` |
 | `repos/<name>/branches.json` | `--branches` |
+| `repos/<name>/deploy_keys.json` | `--deploy-keys` |
+| `repos/<name>/collaborators.json` | `--collaborators` |
+| `repos/<name>/workflows.json` | `--actions` |
+| `repos/<name>/workflow_runs_<id>.json` | `--action-runs` |
+| `repos/<name>/environments.json` | `--environments` |
 
 ## Design Rationale
 

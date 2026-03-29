@@ -137,12 +137,55 @@ Cloned starred repos: `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git`
 
 ---
 
+## GitHub Actions
+
+| Flag | Description |
+|------|-------------|
+| `--actions` | Workflow metadata (id, name, path, state, badge URL) |
+| `--action-runs` | Recent run history per workflow (requires `--actions`) |
+
+`--actions` saves `workflows.json` to each repository's metadata directory.
+The actual workflow YAML files are already captured by the git clone; this flag
+records the API-level metadata that is not part of the repository tree (workflow
+IDs, states, badge URLs).
+
+`--action-runs` writes one file per workflow (`workflow_runs_<id>.json`) with
+recent execution history. This can be **very large** for active repositories;
+opt in deliberately. It is omitted from `--all`.
+
+Output: `<output>/<owner>/json/repos/<repo>/workflows.json`, `workflow_runs_<id>.json`
+
+> **Token scope**: `actions:read` or a classic `repo` token is sufficient.
+> Repositories with Actions disabled return 404, which is logged and skipped.
+
+---
+
+## Deployment Environments
+
+| Flag | Description |
+|------|-------------|
+| `--environments` | Deployment environment configs (protection rules, reviewers, branch policies) |
+
+Environments model deployment targets such as `staging` or `production`.  Their
+configurations include protection rules (required reviewers, wait timers) and
+branch policies that gate automated deployments.  Backing up this metadata makes
+it possible to audit and reproduce deployment gate configurations without a live
+GitHub connection.
+
+Output: `<output>/<owner>/json/repos/<repo>/environments.json`
+
+> **Note**: Repositories without environments return 404, which is logged and skipped silently.
+
+---
+
 ## The `--all` Flag
 
 `--all` enables every category above except:
 - `--lfs` (requires git-lfs to be installed)
 - `--prefer-ssh` (requires SSH keys to be set up)
 - `--no-prune` (affects update behaviour)
+- `--action-runs` (can be very large for active repositories)
+- `--clone-starred` (can consume substantial disk space)
 - `--concurrency` (set separately)
 
 ```bash

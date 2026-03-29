@@ -240,6 +240,7 @@ fn write_report(
         "gists_backed_up": stats.gists_backed_up(),
         "issues_fetched": stats.issues_fetched(),
         "prs_fetched": stats.prs_fetched(),
+        "workflows_fetched": stats.workflows_fetched(),
         "success": stats.repos_errored() == 0,
     });
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
