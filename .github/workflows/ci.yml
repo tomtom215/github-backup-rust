@@ -75,9 +75,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: "latest"
+      - name: Install mdBook
+        run: cargo install mdbook --locked
       - run: mdbook build docs
       - uses: actions/upload-artifact@v7
         with:
