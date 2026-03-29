@@ -100,4 +100,32 @@ impl OutputConfig {
     pub fn owner_json(&self, owner: &str, filename: &str) -> PathBuf {
         self.root.join(owner).join("json").join(filename)
     }
+
+    /// Returns the path to the backup state file:
+    /// `<root>/<owner>/json/backup_state.json`.
+    ///
+    /// The state file records the timestamp of the last *successful* backup run
+    /// so that subsequent runs can auto-populate `--since` for incremental
+    /// operation without the user having to track the timestamp manually.
+    #[must_use]
+    pub fn backup_state_path(&self, owner: &str) -> PathBuf {
+        self.root
+            .join(owner)
+            .join("json")
+            .join("backup_state.json")
+    }
+
+    /// Returns the path to the backup checkpoint file:
+    /// `<root>/<owner>/json/backup_checkpoint.json`.
+    ///
+    /// The checkpoint file lists every repository that has been fully backed
+    /// up in the current run, enabling resumption after an interrupted backup
+    /// without re-processing already-completed repositories.
+    #[must_use]
+    pub fn backup_checkpoint_path(&self, owner: &str) -> PathBuf {
+        self.root
+            .join(owner)
+            .join("json")
+            .join("backup_checkpoint.json")
+    }
 }

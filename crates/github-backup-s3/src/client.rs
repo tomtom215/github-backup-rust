@@ -21,7 +21,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::config::S3Config;
 use crate::error::S3Error;
@@ -29,6 +29,12 @@ use crate::signing::Signer;
 
 const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
 const REQUEST_TIMEOUT_SECS: u64 = 120;
+/// Minimum file size (in bytes) at which multipart upload is used instead of
+/// a single `PutObject` request.  5 GiB matches the AWS S3 single-object limit.
+pub const MULTIPART_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// Size of each part for multipart uploads.  100 MiB gives a comfortable buffer
+/// below the S3 5 GiB-per-part limit while keeping part counts manageable.
+pub const MULTIPART_PART_SIZE: usize = 100 * 1024 * 1024;
 
 type HyperClient = Client<
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
@@ -177,6 +183,262 @@ impl S3Client {
         }
     }
 
+    /// Uploads `data` using S3 Multipart Upload.
+    ///
+    /// Used for large objects (>= [`MULTIPART_THRESHOLD_BYTES`]) that cannot
+    /// be uploaded in a single `PutObject` request.
+    ///
+    /// The upload is split into [`MULTIPART_PART_SIZE`]-byte chunks.  On any
+    /// part failure the upload is aborted (best-effort) to avoid orphaned
+    /// multipart uploads accruing storage charges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3Error`] on network, auth, or service errors.
+    pub async fn multipart_upload(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: &str,
+    ) -> Result<(), S3Error> {
+        let upload_id = self.create_multipart_upload(key, content_type).await?;
+        info!(key, upload_id = %upload_id, parts = (data.len() + MULTIPART_PART_SIZE - 1) / MULTIPART_PART_SIZE, "starting multipart upload");
+
+        let mut etags: Vec<(u16, String)> = Vec::new();
+        let mut part_number: u16 = 1;
+
+        for chunk in data.chunks(MULTIPART_PART_SIZE) {
+            match self
+                .upload_part(key, &upload_id, part_number, chunk, content_type)
+                .await
+            {
+                Ok(etag) => {
+                    etags.push((part_number, etag));
+                    part_number += 1;
+                }
+                Err(e) => {
+                    warn!(key, upload_id = %upload_id, "multipart upload part failed; aborting");
+                    let _ = self.abort_multipart_upload(key, &upload_id).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        self.complete_multipart_upload(key, &upload_id, &etags).await
+    }
+
+    /// Initiates a multipart upload and returns the upload ID.
+    async fn create_multipart_upload(
+        &self,
+        key: &str,
+        content_type: &str,
+    ) -> Result<String, S3Error> {
+        let url = format!("{}?uploads", self.object_url(key));
+        let host = self.host();
+        let path = self.object_path(key);
+        let signed = self
+            .signer
+            .sign_request("POST", &host, &path, "uploads", content_type, b"");
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&url)
+            .header("Host", &host)
+            .header("User-Agent", USER_AGENT)
+            .header("Content-Type", content_type)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256)
+            .header("Authorization", &signed.authorization)
+            .header("Content-Length", "0")
+            .body(Full::new(Bytes::new()))
+            .map_err(S3Error::Request)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+        let status = response.status();
+        let body = collect_body(response.into_body()).await?;
+        let body_str = String::from_utf8_lossy(&body);
+
+        if !status.is_success() {
+            return Err(S3Error::Api {
+                status: status.as_u16(),
+                body: body_str.into_owned(),
+            });
+        }
+
+        // Parse <UploadId>…</UploadId> from the XML response.
+        extract_xml_tag(&body_str, "UploadId").ok_or_else(|| S3Error::Api {
+            status: 200,
+            body: format!("CreateMultipartUpload response missing UploadId: {body_str}"),
+        })
+    }
+
+    /// Uploads a single part and returns the ETag.
+    async fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u16,
+        data: &[u8],
+        content_type: &str,
+    ) -> Result<String, S3Error> {
+        let query = format!("partNumber={part_number}&uploadId={upload_id}");
+        let url = format!("{}?{query}", self.object_url(key));
+        let host = self.host();
+        let path = self.object_path(key);
+        let signed =
+            self.signer
+                .sign_request("PUT", &host, &path, &query, content_type, data);
+
+        debug!(key, part_number, bytes = data.len(), "uploading multipart part");
+
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(&url)
+            .header("Host", &host)
+            .header("User-Agent", USER_AGENT)
+            .header("Content-Type", content_type)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256)
+            .header("Authorization", &signed.authorization)
+            .header("Content-Length", data.len().to_string())
+            .body(Full::new(Bytes::copy_from_slice(data)))
+            .map_err(S3Error::Request)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+        let status = response.status();
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim_matches('"').to_string());
+        let body = collect_body(response.into_body()).await?;
+
+        if !status.is_success() {
+            return Err(S3Error::Api {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+
+        etag.ok_or_else(|| S3Error::Api {
+            status: 200,
+            body: "UploadPart response missing ETag header".to_string(),
+        })
+    }
+
+    /// Completes a multipart upload.
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        etags: &[(u16, String)],
+    ) -> Result<(), S3Error> {
+        let query = format!("uploadId={upload_id}");
+        let url = format!("{}?{query}", self.object_url(key));
+        let host = self.host();
+        let path = self.object_path(key);
+
+        let parts_xml: String = etags
+            .iter()
+            .map(|(n, etag)| format!("<Part><PartNumber>{n}</PartNumber><ETag>\"{etag}\"</ETag></Part>"))
+            .collect();
+        let body_xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUpload>{parts_xml}</CompleteMultipartUpload>"
+        );
+        let body_bytes = body_xml.as_bytes();
+        let content_type = "application/xml";
+
+        let signed =
+            self.signer
+                .sign_request("POST", &host, &path, &query, content_type, body_bytes);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&url)
+            .header("Host", &host)
+            .header("User-Agent", USER_AGENT)
+            .header("Content-Type", content_type)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256)
+            .header("Authorization", &signed.authorization)
+            .header("Content-Length", body_bytes.len().to_string())
+            .body(Full::new(Bytes::copy_from_slice(body_bytes)))
+            .map_err(S3Error::Request)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+        let status = response.status();
+        if status.is_success() || status == StatusCode::OK {
+            info!(key, "multipart upload completed successfully");
+            return Ok(());
+        }
+
+        let body = collect_body(response.into_body()).await?;
+        Err(S3Error::Api {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
+    /// Aborts an in-progress multipart upload (best-effort cleanup on error).
+    async fn abort_multipart_upload(&self, key: &str, upload_id: &str) -> Result<(), S3Error> {
+        let query = format!("uploadId={upload_id}");
+        let url = format!("{}?{query}", self.object_url(key));
+        let host = self.host();
+        let path = self.object_path(key);
+        let signed = self
+            .signer
+            .sign_request("DELETE", &host, &path, &query, "application/octet-stream", b"");
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(&url)
+            .header("Host", &host)
+            .header("User-Agent", USER_AGENT)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256)
+            .header("Authorization", &signed.authorization)
+            .header("Content-Length", "0")
+            .body(Full::new(Bytes::new()))
+            .map_err(S3Error::Request)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+        let status = response.status();
+        // 204 No Content is the expected success response for AbortMultipartUpload.
+        if status.is_success() || status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+
+        let body = collect_body(response.into_body()).await?;
+        Err(S3Error::Api {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
     /// Builds the full URL for an object key.
     fn object_url(&self, key: &str) -> String {
         let key = key.trim_start_matches('/');
@@ -231,6 +493,17 @@ async fn collect_body(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
 ) -> Result<Bytes, S3Error> {
     Ok(body.collect().await?.to_bytes())
+}
+
+/// Extracts the text content of the first occurrence of `<tag>…</tag>` from an
+/// XML string.  This avoids pulling in an XML parser dependency for the narrow
+/// use case of parsing S3 API responses.
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
 }
 
 /// Builds an HTTPS client using the system native CA bundle.

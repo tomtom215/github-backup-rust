@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use github_backup_client::{BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
-    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
-    Label, Milestone, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
-    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
+    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
+    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
+    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -55,6 +56,12 @@ struct MockData {
     workflows: Vec<Workflow>,
     workflow_runs: Vec<WorkflowRun>,
     environments: Vec<Environment>,
+    discussions: Vec<Discussion>,
+    discussion_comments: Vec<DiscussionComment>,
+    repo_projects: Vec<ClassicProject>,
+    project_columns: Vec<ProjectColumn>,
+    packages: Vec<Package>,
+    package_versions: Vec<PackageVersion>,
 }
 
 #[allow(dead_code)]
@@ -181,6 +188,42 @@ impl MockBackupClient {
     /// Pre-loads deployment environments.
     pub fn with_environments(self, envs: Vec<Environment>) -> Self {
         self.inner.lock().unwrap().environments = envs;
+        self
+    }
+
+    /// Pre-loads discussions.
+    pub fn with_discussions(self, discussions: Vec<Discussion>) -> Self {
+        self.inner.lock().unwrap().discussions = discussions;
+        self
+    }
+
+    /// Pre-loads discussion comments.
+    pub fn with_discussion_comments(self, comments: Vec<DiscussionComment>) -> Self {
+        self.inner.lock().unwrap().discussion_comments = comments;
+        self
+    }
+
+    /// Pre-loads classic projects.
+    pub fn with_repo_projects(self, projects: Vec<ClassicProject>) -> Self {
+        self.inner.lock().unwrap().repo_projects = projects;
+        self
+    }
+
+    /// Pre-loads project columns.
+    pub fn with_project_columns(self, columns: Vec<ProjectColumn>) -> Self {
+        self.inner.lock().unwrap().project_columns = columns;
+        self
+    }
+
+    /// Pre-loads packages.
+    pub fn with_packages(self, packages: Vec<Package>) -> Self {
+        self.inner.lock().unwrap().packages = packages;
+        self
+    }
+
+    /// Pre-loads package versions.
+    pub fn with_package_versions(self, versions: Vec<PackageVersion>) -> Self {
+        self.inner.lock().unwrap().package_versions = versions;
         self
     }
 }
@@ -453,6 +496,61 @@ impl BackupClient for MockBackupClient {
         _repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>> {
         let d = self.inner.lock().unwrap().environments.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_discussions<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Discussion>, ClientError>> {
+        let d = self.inner.lock().unwrap().discussions.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_discussion_comments<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+        _discussion_number: u64,
+    ) -> BoxFuture<'a, Result<Vec<DiscussionComment>, ClientError>> {
+        let d = self.inner.lock().unwrap().discussion_comments.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_repo_projects<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ClassicProject>, ClientError>> {
+        let d = self.inner.lock().unwrap().repo_projects.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_project_columns<'a>(
+        &'a self,
+        _project_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<ProjectColumn>, ClientError>> {
+        let d = self.inner.lock().unwrap().project_columns.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_user_packages<'a>(
+        &'a self,
+        _username: &'a str,
+        _package_type: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Package>, ClientError>> {
+        let d = self.inner.lock().unwrap().packages.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_package_versions<'a>(
+        &'a self,
+        _username: &'a str,
+        _package_type: &'a str,
+        _package_name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<PackageVersion>, ClientError>> {
+        let d = self.inner.lock().unwrap().package_versions.clone();
         Box::pin(async move { Ok(d) })
     }
 }

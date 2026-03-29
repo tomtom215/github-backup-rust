@@ -3,9 +3,40 @@
 
 //! RAII guard for a temporary `GIT_ASKPASS` shell script.
 //!
-//! The script is written to a uniquely-named file in the system temp directory.
+//! The script is written to a process-private directory with mode `0700` so
+//! that no other user on the system can read the token — even during the brief
+//! window between `create` and the git subprocess completing.
+//!
 //! When the guard is dropped the file is deleted, ensuring no credentials are
 //! left on disk after the git subprocess exits — even on panic.
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Returns the path to the process-private directory used for askpass scripts.
+///
+/// The directory is created once per process with mode `0700` so only the
+/// current user can read files inside it.  All subsequent calls return a
+/// reference to the same path.
+fn askpass_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let mut path = std::env::temp_dir();
+        path.push(format!("gh-backup-{}", std::process::id()));
+
+        // Create the directory; ignore the error if it already exists.
+        let _ = std::fs::create_dir_all(&path);
+
+        // Restrict to owner-only on Unix so other users cannot read scripts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        }
+
+        path
+    })
+}
 
 /// RAII guard for a temporary `GIT_ASKPASS` shell script.
 ///
@@ -16,7 +47,7 @@
 /// routing them through a short-lived executable script that only exists for
 /// the duration of the git subprocess call.
 pub(super) struct AskpassScript {
-    path: std::path::PathBuf,
+    path: PathBuf,
 }
 
 impl AskpassScript {
@@ -29,12 +60,14 @@ impl AskpassScript {
         // shell does not interpret token characters.
         let script = format!("#!/bin/sh\necho '{}'", token.replace('\'', "'\\''"));
 
-        let mut path = std::env::temp_dir();
-        // Use PID + thread-id for a collision-resistant filename when
-        // concurrent git operations run within the same process.
+        // Use the process-private 0700 directory to prevent other users from
+        // reading the token during the git subprocess window.
+        let dir = askpass_dir();
+        let mut path = dir.clone();
+        // Use thread-id for collision-resistance when concurrent git operations
+        // run within the same process.
         path.push(format!(
-            "gh-backup-askpass-{}-{}.sh",
-            std::process::id(),
+            "askpass-{}.sh",
             format!("{:?}", std::thread::current().id())
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric())
@@ -91,9 +124,29 @@ mod tests {
     }
 
     #[test]
-    fn askpass_script_path_is_in_temp_dir() {
+    fn askpass_script_is_in_private_dir() {
         let guard = AskpassScript::create("token").expect("create");
-        let temp = std::env::temp_dir();
-        assert!(guard.path().starts_with(&temp));
+        // The script must be inside the process-private directory, NOT directly
+        // in the system temp dir where other users could read it.
+        let dir = askpass_dir();
+        assert!(
+            guard.path().starts_with(dir),
+            "script must be in the private 0700 directory, not directly in /tmp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn askpass_private_dir_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = askpass_dir();
+        let meta = std::fs::metadata(dir).expect("metadata");
+        let mode = meta.permissions().mode();
+        // Lower 9 bits: owner rwx (7), group --- (0), others --- (0) = 0o700
+        let lower = mode & 0o777;
+        assert_eq!(
+            lower, 0o700,
+            "private askpass dir must have mode 0700, got {lower:#o}"
+        );
     }
 }

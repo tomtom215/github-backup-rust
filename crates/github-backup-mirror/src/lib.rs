@@ -62,8 +62,11 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod gitlab_client;
+pub mod gitlab_runner;
 pub mod runner;
 
 pub use client::GiteaClient;
 pub use error::MirrorError;
+pub use gitlab_client::GitLabClient;
 pub use runner::MirrorStats;

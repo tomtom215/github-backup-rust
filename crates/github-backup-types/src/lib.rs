@@ -36,9 +36,13 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+pub mod backup_state;
 pub mod branch;
 pub mod collaborator;
 pub mod config;
+pub mod discussion;
+pub mod package;
+pub mod project;
 pub mod deploy_key;
 pub mod environment;
 pub mod gist;
@@ -57,7 +61,11 @@ pub mod user;
 pub mod workflow;
 
 // Convenience re-exports for the most commonly used types.
+pub use backup_state::{BackupCheckpoint, BackupState};
 pub use branch::{Branch, BranchCommit};
+pub use discussion::{Discussion, DiscussionCategory, DiscussionComment};
+pub use package::{Package, PackageVersion};
+pub use project::{ClassicProject, ProjectCard, ProjectColumn};
 pub use collaborator::{Collaborator, CollaboratorPermissions};
 pub use config::{BackupOptions, ConfigFile, OutputConfig};
 pub use deploy_key::DeployKey;

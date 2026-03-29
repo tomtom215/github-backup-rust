@@ -69,6 +69,64 @@ impl GiteaConfig {
     }
 }
 
+/// Configuration for mirroring repositories to a GitLab instance.
+///
+/// Works with GitLab.com (`https://gitlab.com`) and self-hosted GitLab CE/EE
+/// instances.  Uses the GitLab REST API v4 to create repositories and
+/// `git push --mirror` to push the bare clone contents.
+///
+/// # Example
+///
+/// Mirror to GitLab.com:
+/// ```no_run
+/// use github_backup_mirror::config::GitLabConfig;
+///
+/// let cfg = GitLabConfig {
+///     base_url: "https://gitlab.com".to_string(),
+///     token: "glpat-xxxxxxxxxxxxxxxxxxxx".to_string(),
+///     namespace: "alice".to_string(),
+///     private: true,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitLabConfig {
+    /// Base URL of the GitLab instance (e.g., `https://gitlab.com`).
+    ///
+    /// Must not have a trailing slash.
+    pub base_url: String,
+
+    /// GitLab personal access token (requires `api` scope).
+    ///
+    /// Can also be set via the `MIRROR_TOKEN` environment variable.
+    pub token: String,
+
+    /// GitLab namespace (username or group path) under which repositories are
+    /// created.
+    pub namespace: String,
+
+    /// Whether to create mirrored repositories as private.
+    pub private: bool,
+}
+
+impl GitLabConfig {
+    /// Returns the GitLab API v4 base URL.
+    #[must_use]
+    pub fn api_base(&self) -> String {
+        format!("{}/api/v4", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Returns the HTTPS clone URL for a repository at this GitLab instance.
+    #[must_use]
+    pub fn repo_clone_url(&self, repo_name: &str) -> String {
+        format!(
+            "{}/{}/{}.git",
+            self.base_url.trim_end_matches('/'),
+            self.namespace,
+            repo_name
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,6 +22,10 @@ pub struct RateLimitInfo {
     pub used: u64,
 }
 
+/// Extra seconds added on top of the `X-RateLimit-Reset` delta to absorb
+/// clock skew between our host and GitHub's servers.
+const RESET_BUFFER_SECS: u64 = 2;
+
 impl RateLimitInfo {
     /// Attempts to parse rate-limit headers from `headers`.
     ///
@@ -50,10 +54,42 @@ impl RateLimitInfo {
     /// Computes the number of seconds to wait until the window resets.
     ///
     /// Uses `now_secs` as the current Unix time so callers can inject a
-    /// deterministic clock during tests.
+    /// deterministic clock during tests.  Adds [`RESET_BUFFER_SECS`] to absorb
+    /// clock skew between the client and GitHub's servers — without the buffer,
+    /// a request made exactly at the reset instant often still gets a 429.
     #[must_use]
     pub fn seconds_until_reset(&self, now_secs: u64) -> u64 {
-        self.reset_timestamp.saturating_sub(now_secs)
+        self.reset_timestamp
+            .saturating_sub(now_secs)
+            .saturating_add(RESET_BUFFER_SECS)
+    }
+
+    /// Parses a `Retry-After` response header value (number of seconds).
+    ///
+    /// GitHub uses this header for secondary rate limits (abuse detection).
+    /// Returns `None` if the header is absent or not a valid integer.
+    #[must_use]
+    pub fn retry_after(headers: &HeaderMap) -> Option<u64> {
+        parse_u64(headers, "retry-after")
+    }
+
+    /// Parses the `X-OAuth-Scopes` header and returns the list of granted
+    /// token scopes.
+    ///
+    /// Returns an empty `Vec` if the header is absent (e.g. fine-grained PATs
+    /// which do not use this header model).
+    #[must_use]
+    pub fn oauth_scopes(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .map(|sc| sc.trim().to_string())
+                    .filter(|sc| !sc.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -112,24 +148,59 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_info_seconds_until_reset_returns_correct_delta() {
+    fn rate_limit_info_seconds_until_reset_includes_buffer() {
         let info = RateLimitInfo {
             limit: 5000,
             remaining: 0,
             reset_timestamp: 1000,
             used: 5000,
         };
-        assert_eq!(info.seconds_until_reset(800), 200);
+        // 1000 - 800 = 200, plus RESET_BUFFER_SECS = 202
+        assert_eq!(
+            info.seconds_until_reset(800),
+            200 + RESET_BUFFER_SECS,
+            "wait time must include the clock-skew buffer"
+        );
     }
 
     #[test]
-    fn rate_limit_info_seconds_until_reset_saturates_at_zero() {
+    fn rate_limit_info_seconds_until_reset_saturates_at_buffer() {
         let info = RateLimitInfo {
             limit: 5000,
             remaining: 0,
             reset_timestamp: 100,
             used: 5000,
         };
-        assert_eq!(info.seconds_until_reset(200), 0);
+        // now > reset → saturates at 0 + buffer
+        assert_eq!(
+            info.seconds_until_reset(200),
+            RESET_BUFFER_SECS,
+            "past-reset times must still apply the buffer"
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_integer_header() {
+        let headers = make_headers(&[("retry-after", "60")]);
+        assert_eq!(RateLimitInfo::retry_after(&headers), Some(60));
+    }
+
+    #[test]
+    fn retry_after_returns_none_when_absent() {
+        let headers = make_headers(&[]);
+        assert_eq!(RateLimitInfo::retry_after(&headers), None);
+    }
+
+    #[test]
+    fn oauth_scopes_parses_comma_separated_values() {
+        let headers = make_headers(&[("x-oauth-scopes", "repo, gist, read:org")]);
+        let scopes = RateLimitInfo::oauth_scopes(&headers);
+        assert_eq!(scopes, vec!["repo", "gist", "read:org"]);
+    }
+
+    #[test]
+    fn oauth_scopes_returns_empty_when_absent() {
+        let headers = make_headers(&[]);
+        assert!(RateLimitInfo::oauth_scopes(&headers).is_empty());
     }
 }

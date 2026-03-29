@@ -175,3 +175,23 @@ fn backup_options_all_enables_new_categories() {
     assert!(opts.exclude_repos.is_empty());
     assert!(opts.since.is_none());
 }
+
+#[test]
+fn config_file_rejects_unknown_fields() {
+    // Gap #11: typos in config keys must be caught, not silently ignored.
+    let toml = r#"
+owner = "octocat"
+repostiories = true
+"#;
+    let result = ConfigFile::from_toml_str(toml);
+    assert!(
+        result.is_err(),
+        "unknown field 'repostiories' must cause a parse error"
+    );
+}
+
+#[test]
+fn config_file_rejects_completely_unknown_keys() {
+    let toml = r#"unknown_option = "value""#;
+    assert!(ConfigFile::from_toml_str(toml).is_err());
+}

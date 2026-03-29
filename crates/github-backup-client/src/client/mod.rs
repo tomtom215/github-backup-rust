@@ -150,6 +150,49 @@ impl GitHubClient {
         &self.api_base
     }
 
+    /// Checks whether the current token has the required OAuth scopes.
+    ///
+    /// Makes a lightweight `GET /user` request and inspects the
+    /// `X-OAuth-Scopes` response header.  Returns the list of granted scopes.
+    ///
+    /// Fine-grained PATs do not use the `X-OAuth-Scopes` model; for those
+    /// tokens the header is absent and an empty `Vec` is returned — the caller
+    /// should not treat that as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on network or API errors.
+    pub async fn get_token_scopes(&self) -> Result<Vec<String>, ClientError> {
+        let url = format!("{}/user", self.api_base);
+        let req = self
+            .build_request(Method::GET, &url)?
+            .header("Accept", "application/vnd.github.v3+json")
+            .body(Full::new(Bytes::new()))
+            .map_err(ClientError::Http)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout {
+            url: url.clone(),
+        })??;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+
+        if !status.is_success() {
+            let body = collect_body(response.into_body()).await?;
+            return Err(ClientError::ApiError {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+
+        Ok(RateLimitInfo::oauth_scopes(&headers))
+    }
+
     /// Returns the raw token string if the credential is a [`Credential::Token`],
     /// or `None` for anonymous / other credential types.
     ///
@@ -220,23 +263,40 @@ impl GitHubClient {
             let rate_info = RateLimitInfo::from_headers(&headers);
 
             // ── Rate limiting ──────────────────────────────────────────────
-            if (status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS)
-                && rate_info.map(|r| r.is_exhausted()).unwrap_or(false)
-            {
+            //
+            // GitHub sends two kinds of rate-limit responses:
+            //   • Primary limits   (X-RateLimit-Remaining == 0, 403/429)
+            //   • Secondary limits (abuse detection, 429 with Retry-After)
+            //
+            // We handle both:
+            //   1. If Retry-After is present, sleep for that many seconds.
+            //   2. If X-RateLimit-Reset is present and remaining is 0, sleep
+            //      until the precise reset time (plus a clock-skew buffer).
+            //   3. Otherwise fall back to a 60-second sleep.
+            let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
+                || (status == StatusCode::FORBIDDEN
+                    && rate_info.map(|r| r.is_exhausted()).unwrap_or(false));
+
+            if is_rate_limited {
                 if rate_retries >= MAX_RATE_LIMIT_RETRIES {
-                    let wait = rate_info
-                        .map(|r| r.seconds_until_reset(unix_now()))
+                    let wait = RateLimitInfo::retry_after(&headers)
+                        .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
                         .unwrap_or(60);
                     return Err(ClientError::RateLimitExceeded {
                         retry_after_secs: wait,
                     });
                 }
 
-                let wait = rate_info
-                    .map(|r| r.seconds_until_reset(unix_now()).max(1))
-                    .unwrap_or(60);
+                let wait = RateLimitInfo::retry_after(&headers)
+                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
+                    .unwrap_or(60)
+                    .max(1);
 
-                warn!(wait_secs = wait, "rate limit hit, sleeping");
+                warn!(
+                    wait_secs = wait,
+                    attempt = rate_retries + 1,
+                    "rate limit hit, sleeping until reset"
+                );
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 rate_retries += 1;
                 continue;
