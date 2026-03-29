@@ -6,6 +6,7 @@ Complete reference for all `github-backup` command-line flags.
 
 ```
 github-backup [OPTIONS] [OWNER]
+github-backup [OWNER] --tui
 github-backup --config <FILE> [OPTIONS]
 github-backup --completions <SHELL>
 ```
@@ -217,6 +218,27 @@ github-backup octocat --token $TOKEN --output /backup \
 | `--verbose` | `-v` | 0 | Increase verbosity (`-v` = debug, `-vv` = trace) |
 
 ## Special Commands
+
+### Interactive TUI
+
+`--tui` launches the full-screen Ratatui interface instead of running
+non-interactively.  Any flags passed alongside `--tui` are pre-loaded into
+the Configure screen.
+
+```bash
+# Launch with pre-seeded owner and token
+github-backup octocat --token "$GITHUB_TOKEN" --tui
+
+# Launch with full pre-seed (output dir, API URL, etc.)
+github-backup octocat \
+  --token "$GITHUB_TOKEN" \
+  --output /var/backup/github \
+  --api-url https://github.example.com/api/v3 \
+  --tui
+```
+
+See the [Interactive TUI guide](../tui.md) for screen layouts and the full
+key reference.
 
 ### Shell Completions
 

@@ -9,6 +9,7 @@
 - [Installation](getting-started/installation.md)
 - [Quick Start](getting-started/quick-start.md)
 - [Authentication](getting-started/authentication.md)
+- [Interactive TUI](tui.md)
 
 # Backup Categories
 

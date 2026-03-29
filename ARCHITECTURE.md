@@ -10,6 +10,7 @@ github-backup-rust/
 │   ├── github-backup-core/     # Backup engine: orchestration, storage, git
 │   ├── github-backup-mirror/   # Push-mirror to Gitea/Codeberg/Forgejo
 │   ├── github-backup-s3/       # S3/B2/MinIO storage backend
+│   ├── github-backup-tui/      # Ratatui TUI front-end (--tui flag)
 │   └── github-backup/          # CLI binary (main entry point)
 ├── Dockerfile
 ├── docker-compose.yml
@@ -86,15 +87,33 @@ Post-processing: upload backup artefacts to S3-compatible object stores.
 - `sync::sync_to_s3` — incremental directory sync (skips already-uploaded files)
 - Supports AWS S3, Backblaze B2, MinIO, Cloudflare R2, DigitalOcean Spaces
 
+### `github-backup-tui`
+
+Full-screen terminal user interface built with [Ratatui](https://ratatui.rs) 0.30.
+
+- `run_tui(InitialConfig) -> ExitCode` — public entry point; owns the terminal
+- Five screens: Dashboard, Configure, Running, Results, Verify
+- `App` state machine: `Screen` enum drives per-screen rendering and key dispatch
+- `ConfigState` — mirrors all 50+ `BackupOptions` fields; converts to `BackupOptions`
+  via `to_backup_config()`; validates on launch
+- `TuiTracingLayer` — intercepts all `tracing` events and routes them to the log
+  panel as structured `BackupEvent::LogLine` messages, replacing the default stderr
+  logger while the TUI is active
+- `event_loop` races terminal input against the `ProgressRx` channel at 60 Hz (16 ms
+  tick) using `tokio::select!` over a backup cancellation oneshot
+- `run_backup_task` + `run_verify_task` — spawned as Tokio tasks; completion reported
+  via `ProgressTx = UnboundedSender<BackupEvent>`
+
 ### `github-backup` (CLI binary)
 
 Orchestrates all crates:
 
 1. Parse CLI args (`clap`)
-2. Obtain credential (PAT or OAuth device flow)
-3. Run `BackupEngine` (primary backup)
-4. Optional: `push_mirrors` (Gitea mirror)
-5. Optional: `sync_to_s3` (S3 upload)
+2. If `--tui`: hand off to `github_backup_tui::run_tui()` and return
+3. Obtain credential (PAT or OAuth device flow)
+4. Run `BackupEngine` (primary backup)
+5. Optional: `push_mirrors` (Gitea mirror)
+6. Optional: `sync_to_s3` (S3 upload)
 
 ## Data Flow
 
@@ -167,6 +186,7 @@ the RustCrypto project (no OpenSSL).
 | Layer | Technique |
 |-------|-----------|
 | Unit | `MockBackupClient` + `MemStorage` + `SpyGitRunner` stubs |
+| TUI unit | 74 tests in `github-backup-tui::tests` — state machine logic without a real terminal |
 | Integration | `tempfile` + real filesystem (storage tests) |
 | Property | `proptest` for type round-trip invariants |
 | CI | `cargo test --workspace` on ubuntu-latest + macos-latest |

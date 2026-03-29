@@ -40,6 +40,9 @@ mod tracing_layer;
 
 pub use app::InitialConfig;
 
+#[cfg(test)]
+mod tests;
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Launches the full-screen TUI.
