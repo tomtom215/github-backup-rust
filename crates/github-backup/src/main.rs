@@ -14,7 +14,6 @@ use github_backup_client::{oauth::device_flow, GitHubClient};
 use github_backup_core::{
     verify_manifest, write_manifest, BackupEngine, FsStorage, ProcessGitRunner,
 };
-use github_backup_tui::InitialConfig;
 use github_backup_mirror::{
     config::{GitLabConfig, GiteaConfig},
     gitlab_runner::push_mirrors_gitlab,
@@ -22,6 +21,7 @@ use github_backup_mirror::{
     GitLabClient, GiteaClient,
 };
 use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
+use github_backup_tui::InitialConfig;
 use github_backup_types::backup_state::BackupState;
 use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
 
@@ -52,9 +52,9 @@ async fn main() -> ExitCode {
     // we appear to be running in an interactive terminal), launch the TUI.
     if args.tui {
         let initial = InitialConfig {
-            token:   args.token.clone(),
-            owner:   args.owner.clone(),
-            output:  args.output.as_ref().map(|p| p.display().to_string()),
+            token: args.token.clone(),
+            owner: args.owner.clone(),
+            output: args.output.as_ref().map(|p| p.display().to_string()),
             api_url: args.api_url.clone(),
         };
         return github_backup_tui::run_tui(initial).await;
