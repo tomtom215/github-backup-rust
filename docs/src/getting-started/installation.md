@@ -16,7 +16,7 @@ curl -sSL https://github.com/tomtom215/github-backup-rust/releases/latest/downlo
 
 ## From Source (Cargo)
 
-Requires Rust 1.85 or later. Install Rust via [rustup](https://rustup.rs):
+Requires Rust 1.88 or later. Install Rust via [rustup](https://rustup.rs):
 
 ```bash
 cargo install --git https://github.com/tomtom215/github-backup-rust github-backup
@@ -114,7 +114,7 @@ Then add `use github-backup` to your `~/.config/elvish/rc.elv`.
 | Requirement | Details |
 |------------|---------|
 | **OS** | Linux, macOS, Windows (x86_64, aarch64) |
-| **Rust MSRV** | 1.85 |
+| **Rust MSRV** | 1.88 |
 | **git** | Any recent version (`git` must be on `$PATH`) |
 | **git-lfs** | Only required if using `--lfs` |
 | **Disk space** | Depends on repository sizes |

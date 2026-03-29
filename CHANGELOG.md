@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Interactive TUI** (`--tui`): full-screen terminal user interface built with
+  [Ratatui](https://ratatui.rs) 0.30.  Five screens — Dashboard, Configure, Run,
+  Verify, Results — cover every end-to-end workflow without leaving the terminal.
+  The Configure screen exposes all 50+ backup settings across 8 tabbed panels with
+  real-time validation.  The Run screen shows a live progress gauge, auto-scrolling
+  repo list, and a structured log panel fed by a custom `tracing_subscriber::Layer`.
+  The Verify screen runs an offline integrity check against the stored JSON manifest.
+  The Results screen presents a formatted statistics table after each run.  A
+  cancellation channel (`tokio::sync::oneshot`) lets users abort mid-run with
+  `Ctrl+C`.  The TUI crate (`github-backup-tui`) ships 74 unit tests covering the
+  full state machine without requiring a real terminal.
+
 - **Config file now covers S3 and mirror settings**: `s3_bucket`, `s3_region`, `s3_prefix`,
   `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_include_assets`, `mirror_to`,
   `mirror_token`, `mirror_owner`, and `mirror_private` are all new TOML config file keys.
@@ -31,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **5 new `merge_config` tests**: covering `org`, `prefer_ssh` / `no_prune`, mirror fields,
   S3 fields, and CLI-wins-over-config for S3 bucket/region.
+
+### Changed
+
+- **MSRV raised from 1.85 to 1.88**: `ratatui@0.30` and its transitive dependencies
+  (`darling@0.23`, `instability@0.3`, `time@0.3.47`) require Rust 1.88.  The workspace
+  `rust-version` in `Cargo.toml` has been updated accordingly.
+
+- **`deny.toml` allows `Zlib` licence**: `foldhash@0.2` (transitive dep via
+  `hashbrown → indexmap → ratatui-core`) uses the Zlib licence, which is OSI-approved
+  and FSF-Free.  Added to the allowed list.
 
 ### Fixed
 

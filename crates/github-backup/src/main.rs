@@ -21,6 +21,7 @@ use github_backup_mirror::{
     GitLabClient, GiteaClient,
 };
 use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
+use github_backup_tui::InitialConfig;
 use github_backup_types::backup_state::BackupState;
 use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
 
@@ -45,6 +46,19 @@ async fn main() -> ExitCode {
     }
 
     let mut args = Args::parse();
+
+    // ── TUI mode ──────────────────────────────────────────────────────────────
+    // When `--tui` is passed (or when no other meaningful flags are given and
+    // we appear to be running in an interactive terminal), launch the TUI.
+    if args.tui {
+        let initial = InitialConfig {
+            token: args.token.clone(),
+            owner: args.owner.clone(),
+            output: args.output.as_ref().map(|p| p.display().to_string()),
+            api_url: args.api_url.clone(),
+        };
+        return github_backup_tui::run_tui(initial).await;
+    }
 
     // Initialise structured logging early so config-file errors are logged.
     init_tracing(args.quiet, args.verbose);

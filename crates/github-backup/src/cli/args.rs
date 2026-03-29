@@ -694,6 +694,19 @@ pub struct Args {
     /// Increase log verbosity (`-v` = debug, `-vv` = trace).
     #[arg(long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    // ── TUI ────────────────────────────────────────────────────────────────
+    /// Launch the interactive terminal user interface (TUI).
+    ///
+    /// Opens a full-screen interactive interface for configuring and running
+    /// backups.  All options available via CLI flags are accessible through
+    /// the TUI.  Token, owner, and output directory are pre-populated from
+    /// any values supplied on the command line.
+    ///
+    /// When invoked with only `--tui` (no other flags), the TUI starts with
+    /// a blank configuration form ready for interactive input.
+    #[arg(long)]
+    pub tui: bool,
 }
 
 #[cfg(test)]

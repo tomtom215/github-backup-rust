@@ -1,6 +1,6 @@
 # github-backup
 
-**github-backup** is a comprehensive, production-ready GitHub backup tool written in Rust. It backs up repositories, issues, pull requests, releases, gists, wikis, and relationship data for any GitHub user or organisation — with zero OpenSSL dependencies, minimal transitive packages, and first-class S3 storage support.
+**github-backup** is a comprehensive, production-ready GitHub backup tool written in Rust. It backs up repositories, issues, pull requests, releases, gists, wikis, and relationship data for any GitHub user or organisation — with zero OpenSSL dependencies, minimal transitive packages, first-class S3 storage support, and a full-screen interactive TUI.
 
 ## Feature Highlights
 
@@ -26,6 +26,7 @@
 | **Concurrency** | Configurable parallel repository backup |
 | **Dry-run mode** | Preview what would be backed up |
 | **JSON report** | Machine-readable summary with counters & timestamps |
+| **Interactive TUI** | Full-screen terminal interface with live progress (`--tui`) |
 | **Docker** | Multi-stage Alpine image ≈15 MB |
 
 ## Design Principles
@@ -41,6 +42,7 @@
 
 - [Installation](getting-started/installation.md)
 - [Quick Start](getting-started/quick-start.md)
+- [Interactive TUI](tui.md)
 - [CLI Reference](configuration/cli-reference.md)
 - [Config File (TOML)](configuration/config-file.md)
 - [Docker](docker.md)

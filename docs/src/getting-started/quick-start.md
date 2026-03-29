@@ -17,7 +17,22 @@ export GITHUB_TOKEN=ghp_your_token_here
 
 ## 2. Run Your First Backup
 
-Back up everything for a user:
+### Option A — Interactive TUI (recommended)
+
+Launch the full-screen TUI and configure everything interactively:
+
+```bash
+github-backup octocat --token "$GITHUB_TOKEN" --tui
+```
+
+The TUI pre-fills the owner and token, shows all settings across eight tabbed
+panels, and lets you start the backup and watch live progress — all without
+leaving your terminal.  See the [Interactive TUI guide](../tui.md) for the
+full key reference.
+
+### Option B — Non-interactive CLI
+
+Back up everything for a user directly:
 
 ```bash
 github-backup octocat \
@@ -145,6 +160,7 @@ github-backup octocat \
 
 ## Next Steps
 
+- [Interactive TUI](../tui.md) — full-screen interface with live progress
 - [Authentication options](authentication.md) — PAT vs. OAuth device flow
 - [Backup categories](../backup-categories.md) — what each flag backs up
 - [CLI Reference](../configuration/cli-reference.md) — all flags explained

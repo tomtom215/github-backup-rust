@@ -4,14 +4,14 @@
 [![Book](https://github.com/tomtom215/github-backup-rust/actions/workflows/pages.yml/badge.svg)](https://tomtom215.github.io/github-backup-rust/)
 [![Crates.io](https://img.shields.io/crates/v/github-backup.svg)](https://crates.io/crates/github-backup)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV: 1.85](https://img.shields.io/badge/MSRV-1.85-orange.svg)](Cargo.toml)
+[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
 
 A comprehensive, production-ready GitHub backup tool written in Rust.
 
 Backs up repositories (mirror / bare / full / shallow), issues, pull requests,
 releases, gists, wikis, topics, branches, and relationship data for any GitHub
-user or organisation — with zero OpenSSL dependencies and first-class S3 storage
-support.
+user or organisation — with zero OpenSSL dependencies, first-class S3 storage
+support, and a full-screen interactive TUI.
 
 > **Full documentation** → **[tomtom215.github.io/github-backup-rust](https://tomtom215.github.io/github-backup-rust/)**
 
@@ -23,8 +23,11 @@ support.
 # Install
 cargo install --git https://github.com/tomtom215/github-backup-rust github-backup
 
-# Back up everything for a user
+# Launch the interactive TUI (recommended first-run experience)
 export GITHUB_TOKEN=ghp_your_token_here
+github-backup octocat --tui
+
+# Or run non-interactively
 github-backup octocat --output /var/backup/github --all
 
 # Or using Docker
@@ -35,10 +38,69 @@ docker run --rm \
   octocat --output /backup --all
 ```
 
+## Interactive TUI
+
+Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](https://ratatui.rs) 0.30.
+
+```
+ github-backup v0.3.1  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Owner          octocat                                                      │
+│  Output dir     /var/backup/github                                           │
+│  Token          ghp_****...****                                              │
+│  Last run       2026-03-29 08:14 UTC  (312 repos)                           │
+│                                                                              │
+│  > Start backup                                                              │
+│    Verify integrity                                                          │
+│    Configure                                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+ j/k select   Enter run   q quit
+```
+
+### TUI Screens
+
+| Screen | Key | Purpose |
+|--------|-----|---------|
+| Dashboard | `1` | Overview of last run; launch backup or verify |
+| Configure | `2` | Edit all 50+ settings across 8 tabbed panels |
+| Run | `3` | Live progress: gauge, repo list, log panel |
+| Verify | `4` | Integrity check against stored manifests |
+| Results | `5` | Post-run statistics table |
+
+### Global Keys
+
+| Key | Action |
+|-----|--------|
+| `1`–`5` | Switch screens |
+| `q` / `Ctrl+C` | Quit (cancel running backup first) |
+| `Tab` / `Shift+Tab` | Cycle focus within a screen |
+| `Enter` | Confirm / activate |
+| `Esc` | Cancel / dismiss modal |
+
+### Configure Screen Keys
+
+| Key | Action |
+|-----|--------|
+| `h` / `l` or `←` / `→` | Previous / next tab |
+| `j` / `k` or `↑` / `↓` | Move field cursor |
+| `Enter` | Edit text field / toggle boolean |
+| `Esc` | Commit field edit |
+| `A` (categories tab) | Select all / deselect all |
+| `< >` | Cycle select field options |
+
+### Run Screen Keys
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Scroll repo list |
+| `g` / `G` | Scroll log panel top / bottom |
+| `Ctrl+C` | Cancel running backup |
+
 ## Feature Summary
 
 | Feature | Details |
 |---------|---------|
+| **Interactive TUI** | Full-screen Ratatui interface with live progress (`--tui`) |
 | Repositories | Mirror, bare, full, or shallow clone |
 | Issues & PRs | Full JSON: metadata, comments, reviews, events |
 | Releases | Metadata + optional binary asset download |
@@ -77,6 +139,7 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 |-------|------|
 | Installation | [getting-started/installation](https://tomtom215.github.io/github-backup-rust/getting-started/installation.html) |
 | Quick Start | [getting-started/quick-start](https://tomtom215.github.io/github-backup-rust/getting-started/quick-start.html) |
+| TUI Guide | [tui](https://tomtom215.github.io/github-backup-rust/tui.html) |
 | Authentication | [getting-started/authentication](https://tomtom215.github.io/github-backup-rust/getting-started/authentication.html) |
 | Backup Categories | [backup-categories](https://tomtom215.github.io/github-backup-rust/backup-categories.html) |
 | CLI Reference | [configuration/cli-reference](https://tomtom215.github.io/github-backup-rust/configuration/cli-reference.html) |
@@ -170,6 +233,7 @@ crates/
 ├── github-backup-core/      Backup engine, Storage and GitRunner traits
 ├── github-backup-mirror/    Gitea push-mirror integration
 ├── github-backup-s3/        S3-compatible storage (pure-Rust SigV4)
+├── github-backup-tui/       Ratatui TUI front-end (--tui flag)
 └── github-backup/           CLI binary (clap)
 docs/                        mdBook documentation source
 ```
