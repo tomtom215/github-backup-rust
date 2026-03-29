@@ -71,8 +71,7 @@ impl BackupState {
         if !path.exists() {
             return Ok(None);
         }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("read state file: {e}"))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read state file: {e}"))?;
         let state: Self =
             serde_json::from_str(&content).map_err(|e| format!("parse state file: {e}"))?;
         Ok(Some(state))
@@ -109,11 +108,7 @@ impl BackupCheckpoint {
     /// # Errors
     ///
     /// Returns an error string on I/O or serialisation failure.
-    pub fn mark_complete_and_save(
-        &mut self,
-        full_name: &str,
-        path: &Path,
-    ) -> Result<(), String> {
+    pub fn mark_complete_and_save(&mut self, full_name: &str, path: &Path) -> Result<(), String> {
         self.completed_repos.insert(full_name.to_string());
         self.save(path)
     }
@@ -130,8 +125,7 @@ impl BackupCheckpoint {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("read checkpoint: {e}"))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read checkpoint: {e}"))?;
         serde_json::from_str(&content).map_err(|e| format!("parse checkpoint: {e}"))
     }
 
@@ -145,8 +139,8 @@ impl BackupCheckpoint {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create checkpoint dir: {e}"))?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("serialise checkpoint: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("serialise checkpoint: {e}"))?;
         // Write to a temp file then rename for atomicity.
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("write checkpoint tmp: {e}"))?;
@@ -206,7 +200,8 @@ mod tests {
             completed_repos: HashSet::new(),
             run_started_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        cp.mark_complete_and_save("owner/repo-a", &path).expect("save");
+        cp.mark_complete_and_save("owner/repo-a", &path)
+            .expect("save");
 
         let loaded = BackupCheckpoint::load(&path).expect("load");
         assert!(loaded.is_complete("owner/repo-a"));

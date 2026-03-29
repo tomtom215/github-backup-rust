@@ -109,10 +109,7 @@ impl OutputConfig {
     /// operation without the user having to track the timestamp manually.
     #[must_use]
     pub fn backup_state_path(&self, owner: &str) -> PathBuf {
-        self.root
-            .join(owner)
-            .join("json")
-            .join("backup_state.json")
+        self.root.join(owner).join("json").join("backup_state.json")
     }
 
     /// Returns the path to the backup checkpoint file:

@@ -40,8 +40,7 @@ impl GitHubClient {
         repo: &str,
     ) -> Result<Vec<Discussion>, ClientError> {
         let api = self.api();
-        let mut url =
-            format!("{api}/repos/{owner}/{repo}/discussions?per_page={PER_PAGE}");
+        let mut url = format!("{api}/repos/{owner}/{repo}/discussions?per_page={PER_PAGE}");
         let mut all: Vec<Discussion> = Vec::new();
 
         loop {
@@ -111,15 +110,11 @@ impl GitHubClient {
         repo: &str,
     ) -> Result<Vec<ClassicProject>, ClientError> {
         let api = self.api();
-        let mut url = format!(
-            "{api}/repos/{owner}/{repo}/projects?per_page={PER_PAGE}&state=all"
-        );
+        let mut url = format!("{api}/repos/{owner}/{repo}/projects?per_page={PER_PAGE}&state=all");
         let mut all: Vec<ClassicProject> = Vec::new();
 
         loop {
-            let (page, link) = self
-                .get_json_with_link::<Vec<ClassicProject>>(&url)
-                .await?;
+            let (page, link) = self.get_json_with_link::<Vec<ClassicProject>>(&url).await?;
             all.extend(page);
             match link.as_deref().and_then(crate::pagination::parse_next_link) {
                 Some(next) => url = next,
@@ -141,14 +136,11 @@ impl GitHubClient {
         project_id: u64,
     ) -> Result<Vec<ProjectColumn>, ClientError> {
         let api = self.api();
-        let mut url =
-            format!("{api}/projects/{project_id}/columns?per_page={PER_PAGE}");
+        let mut url = format!("{api}/projects/{project_id}/columns?per_page={PER_PAGE}");
         let mut all: Vec<ProjectColumn> = Vec::new();
 
         loop {
-            let (page, link) = self
-                .get_json_with_link::<Vec<ProjectColumn>>(&url)
-                .await?;
+            let (page, link) = self.get_json_with_link::<Vec<ProjectColumn>>(&url).await?;
             all.extend(page);
             match link.as_deref().and_then(crate::pagination::parse_next_link) {
                 Some(next) => url = next,
@@ -217,9 +209,7 @@ impl GitHubClient {
         let mut all: Vec<PackageVersion> = Vec::new();
 
         loop {
-            let (page, link) = self
-                .get_json_with_link::<Vec<PackageVersion>>(&url)
-                .await?;
+            let (page, link) = self.get_json_with_link::<Vec<PackageVersion>>(&url).await?;
             all.extend(page);
             match link.as_deref().and_then(crate::pagination::parse_next_link) {
                 Some(next) => url = next,

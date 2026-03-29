@@ -236,7 +236,10 @@ mod tests {
         let names: Vec<&str> = repos.iter().map(|(_, n)| n.as_str()).collect();
         assert!(names.contains(&"my-repo"), "should find my-repo");
         assert!(names.contains(&"another"), "should find another");
-        assert!(!names.contains(&"not-a-repo"), "should ignore non-.git dirs");
+        assert!(
+            !names.contains(&"not-a-repo"),
+            "should ignore non-.git dirs"
+        );
         assert_eq!(repos.len(), 2);
     }
 

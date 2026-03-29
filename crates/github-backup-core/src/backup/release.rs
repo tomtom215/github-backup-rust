@@ -82,14 +82,12 @@ pub async fn backup_releases(
             let digest = sha256_hex(&data);
             let sha_path = asset_path.with_extension(format!(
                 "{}.sha256",
-                asset_path.extension()
+                asset_path
+                    .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("bin")
             ));
-            storage.write_bytes(
-                &sha_path,
-                format!("{digest}  {}\n", asset.name).as_bytes(),
-            )?;
+            storage.write_bytes(&sha_path, format!("{digest}  {}\n", asset.name).as_bytes())?;
             info!(
                 asset = %asset.name,
                 sha256 = %&digest[..16],

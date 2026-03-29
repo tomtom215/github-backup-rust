@@ -44,7 +44,8 @@ pub async fn backup_projects(
     let projects = match client.list_repo_projects(owner, repo_name).await {
         Ok(p) => p,
         Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404 | 410, ..
+            status: 403 | 404 | 410,
+            ..
         }) => {
             info!(
                 repo = format!("{owner}/{repo_name}"),
@@ -69,7 +70,8 @@ pub async fn backup_projects(
         let columns = match client.list_project_columns(project.id).await {
             Ok(c) => c,
             Err(github_backup_client::ClientError::ApiError {
-                status: 403 | 404 | 410, ..
+                status: 403 | 404 | 410,
+                ..
             }) => {
                 info!(
                     project_id = project.id,
@@ -185,9 +187,7 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(
-            storage
-                .get(&PathBuf::from("/meta/projects.json"))
-                .is_some(),
+            storage.get(&PathBuf::from("/meta/projects.json")).is_some(),
             "projects.json should be written"
         );
         assert!(
@@ -220,9 +220,7 @@ mod tests {
 
         assert_eq!(count, 0);
         assert!(
-            storage
-                .get(&PathBuf::from("/meta/projects.json"))
-                .is_some(),
+            storage.get(&PathBuf::from("/meta/projects.json")).is_some(),
             "projects.json should still be written for empty list"
         );
     }

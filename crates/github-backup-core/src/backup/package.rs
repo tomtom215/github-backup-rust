@@ -17,8 +17,7 @@ use github_backup_types::config::BackupOptions;
 use crate::{error::CoreError, storage::Storage};
 
 /// Package types supported by GitHub Packages.
-const PACKAGE_TYPES: &[&str] =
-    &["container", "docker", "maven", "npm", "nuget", "rubygems"];
+const PACKAGE_TYPES: &[&str] = &["container", "docker", "maven", "npm", "nuget", "rubygems"];
 
 /// Backs up GitHub Packages metadata for a user.
 ///
@@ -59,8 +58,7 @@ pub async fn backup_packages(
             }) => {
                 info!(
                     username,
-                    package_type,
-                    "skipping packages (not available or insufficient permissions)"
+                    package_type, "skipping packages (not available or insufficient permissions)"
                 );
                 continue;
             }
@@ -177,15 +175,9 @@ mod tests {
         let storage = MemStorage::default();
         let opts = BackupOptions::default(); // packages: false
 
-        let count = backup_packages(
-            &client,
-            "octocat",
-            &opts,
-            &PathBuf::from("/json"),
-            &storage,
-        )
-        .await
-        .expect("backup_packages");
+        let count = backup_packages(&client, "octocat", &opts, &PathBuf::from("/json"), &storage)
+            .await
+            .expect("backup_packages");
 
         assert_eq!(count, 0);
         assert_eq!(storage.len(), 0);
@@ -204,15 +196,9 @@ mod tests {
             ..Default::default()
         };
 
-        let count = backup_packages(
-            &client,
-            "octocat",
-            &opts,
-            &PathBuf::from("/json"),
-            &storage,
-        )
-        .await
-        .expect("backup_packages");
+        let count = backup_packages(&client, "octocat", &opts, &PathBuf::from("/json"), &storage)
+            .await
+            .expect("backup_packages");
 
         // MockBackupClient returns the same packages list for every package_type,
         // so PACKAGE_TYPES.len() packages will be written.
@@ -223,7 +209,10 @@ mod tests {
                 .get(&PathBuf::from(format!("/json/packages_{t}.json")))
                 .is_some()
         });
-        assert!(has_packages_file, "at least one packages_<type>.json should be written");
+        assert!(
+            has_packages_file,
+            "at least one packages_<type>.json should be written"
+        );
     }
 
     #[tokio::test]
@@ -235,15 +224,9 @@ mod tests {
             ..Default::default()
         };
 
-        let count = backup_packages(
-            &client,
-            "octocat",
-            &opts,
-            &PathBuf::from("/json"),
-            &storage,
-        )
-        .await
-        .expect("backup_packages");
+        let count = backup_packages(&client, "octocat", &opts, &PathBuf::from("/json"), &storage)
+            .await
+            .expect("backup_packages");
 
         assert_eq!(count, 0);
         assert_eq!(

@@ -121,8 +121,8 @@ pub fn write_manifest(root: &Path, created_at: &str) -> Result<usize, String> {
 /// Returns an error string if the manifest file cannot be read or parsed.
 pub fn verify_manifest(root: &Path) -> Result<VerifyReport, String> {
     let manifest_path = root.join(MANIFEST_FILENAME);
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("read manifest: {e}"))?;
+    let content =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
     let manifest: Manifest =
         serde_json::from_str(&content).map_err(|e| format!("parse manifest: {e}"))?;
 
@@ -136,10 +136,8 @@ pub fn verify_manifest(root: &Path) -> Result<VerifyReport, String> {
     // Build a set of actual files on disk.
     let manifest_rel = MANIFEST_FILENAME.to_string();
     let actual = collect_entries(root, &root.join(MANIFEST_FILENAME))?;
-    let actual_map: HashMap<String, String> = actual
-        .into_iter()
-        .map(|e| (e.path, e.sha256))
-        .collect();
+    let actual_map: HashMap<String, String> =
+        actual.into_iter().map(|e| (e.path, e.sha256)).collect();
 
     let mut report = VerifyReport::default();
 
@@ -189,9 +187,7 @@ fn visit_dir(
             continue;
         }
 
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file type: {e}"))?;
+        let ft = entry.file_type().map_err(|e| format!("file type: {e}"))?;
 
         if ft.is_dir() {
             visit_dir(root, &path, exclude, out)?;
@@ -216,8 +212,7 @@ fn visit_dir(
 
 /// Returns the hex-encoded SHA-256 digest of the file at `path`.
 fn hash_file(path: &Path) -> Result<String, String> {
-    let data =
-        std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let digest = Sha256::digest(&data);
     Ok(format!("{digest:x}"))
 }

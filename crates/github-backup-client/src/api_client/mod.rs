@@ -35,8 +35,8 @@ use bytes::Bytes;
 use github_backup_types::{
     Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
     Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
-    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, ProjectColumn,
-    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
+    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;

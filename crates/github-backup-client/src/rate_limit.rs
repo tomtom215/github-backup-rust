@@ -54,7 +54,7 @@ impl RateLimitInfo {
     /// Computes the number of seconds to wait until the window resets.
     ///
     /// Uses `now_secs` as the current Unix time so callers can inject a
-    /// deterministic clock during tests.  Adds [`RESET_BUFFER_SECS`] to absorb
+    /// deterministic clock during tests.  Adds `RESET_BUFFER_SECS` to absorb
     /// clock skew between the client and GitHub's servers — without the buffer,
     /// a request made exactly at the reset instant often still gets a 429.
     #[must_use]

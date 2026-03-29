@@ -202,7 +202,7 @@ impl S3Client {
         content_type: &str,
     ) -> Result<(), S3Error> {
         let upload_id = self.create_multipart_upload(key, content_type).await?;
-        info!(key, upload_id = %upload_id, parts = (data.len() + MULTIPART_PART_SIZE - 1) / MULTIPART_PART_SIZE, "starting multipart upload");
+        info!(key, upload_id = %upload_id, parts = data.len().div_ceil(MULTIPART_PART_SIZE), "starting multipart upload");
 
         let mut etags: Vec<(u16, String)> = Vec::new();
         let mut part_number: u16 = 1;
@@ -224,7 +224,8 @@ impl S3Client {
             }
         }
 
-        self.complete_multipart_upload(key, &upload_id, &etags).await
+        self.complete_multipart_upload(key, &upload_id, &etags)
+            .await
     }
 
     /// Initiates a multipart upload and returns the upload ID.
@@ -291,11 +292,16 @@ impl S3Client {
         let url = format!("{}?{query}", self.object_url(key));
         let host = self.host();
         let path = self.object_path(key);
-        let signed =
-            self.signer
-                .sign_request("PUT", &host, &path, &query, content_type, data);
+        let signed = self
+            .signer
+            .sign_request("PUT", &host, &path, &query, content_type, data);
 
-        debug!(key, part_number, bytes = data.len(), "uploading multipart part");
+        debug!(
+            key,
+            part_number,
+            bytes = data.len(),
+            "uploading multipart part"
+        );
 
         let req = Request::builder()
             .method(Method::PUT)
@@ -352,7 +358,9 @@ impl S3Client {
 
         let parts_xml: String = etags
             .iter()
-            .map(|(n, etag)| format!("<Part><PartNumber>{n}</PartNumber><ETag>\"{etag}\"</ETag></Part>"))
+            .map(|(n, etag)| {
+                format!("<Part><PartNumber>{n}</PartNumber><ETag>\"{etag}\"</ETag></Part>")
+            })
             .collect();
         let body_xml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUpload>{parts_xml}</CompleteMultipartUpload>"
@@ -403,9 +411,14 @@ impl S3Client {
         let url = format!("{}?{query}", self.object_url(key));
         let host = self.host();
         let path = self.object_path(key);
-        let signed = self
-            .signer
-            .sign_request("DELETE", &host, &path, &query, "application/octet-stream", b"");
+        let signed = self.signer.sign_request(
+            "DELETE",
+            &host,
+            &path,
+            &query,
+            "application/octet-stream",
+            b"",
+        );
 
         let req = Request::builder()
             .method(Method::DELETE)

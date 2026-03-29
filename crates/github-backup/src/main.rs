@@ -11,12 +11,14 @@ use clap_complete::{generate, Shell};
 use tracing::{error, info, warn};
 
 use github_backup_client::{oauth::device_flow, GitHubClient};
-use github_backup_core::{write_manifest, verify_manifest, BackupEngine, FsStorage, ProcessGitRunner};
+use github_backup_core::{
+    verify_manifest, write_manifest, BackupEngine, FsStorage, ProcessGitRunner,
+};
 use github_backup_mirror::{
-    config::{GiteaConfig, GitLabConfig},
+    config::{GitLabConfig, GiteaConfig},
     gitlab_runner::push_mirrors_gitlab,
     runner::push_mirrors,
-    GiteaClient, GitLabClient,
+    GitLabClient, GiteaClient,
 };
 use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
 use github_backup_types::backup_state::BackupState;
@@ -173,8 +175,8 @@ async fn main() -> ExitCode {
             Ok(scopes) if !scopes.is_empty() => {
                 info!(scopes = ?scopes, "token scopes");
 
-                let needs_org =
-                    opts.org_members || opts.org_teams
+                let needs_org = opts.org_members
+                    || opts.org_teams
                     || matches!(opts.target, github_backup_types::config::BackupTarget::Org);
                 if needs_org && !scopes.iter().any(|s| s == "read:org" || s == "admin:org") {
                     warn!(
@@ -320,7 +322,15 @@ async fn main() -> ExitCode {
 
     // ── Post-processing: S3 sync ───────────────────────────────────────────
     if let Some(s3_cfg) = s3_config {
-        if let Err(e) = run_s3_sync(&s3_cfg, &output, &owner, s3_include_assets, encrypt_key.as_deref()).await {
+        if let Err(e) = run_s3_sync(
+            &s3_cfg,
+            &output,
+            &owner,
+            s3_include_assets,
+            encrypt_key.as_deref(),
+        )
+        .await
+        {
             error!("S3 sync failed: {e}");
             return ExitCode::FAILURE;
         }
@@ -414,10 +424,17 @@ async fn run_mirror_push_gitea(
         .await
         .map_err(|e| e.to_string())?;
 
-    info!(pushed = stats.pushed, errored = stats.errored, "Gitea mirror push complete");
+    info!(
+        pushed = stats.pushed,
+        errored = stats.errored,
+        "Gitea mirror push complete"
+    );
 
     if stats.errored > 0 {
-        warn!(errored = stats.errored, "some repositories failed to push to Gitea mirror");
+        warn!(
+            errored = stats.errored,
+            "some repositories failed to push to Gitea mirror"
+        );
     }
 
     Ok(())
@@ -442,10 +459,17 @@ async fn run_mirror_push_gitlab(
         .await
         .map_err(|e| e.to_string())?;
 
-    info!(pushed = stats.pushed, errored = stats.errored, "GitLab mirror push complete");
+    info!(
+        pushed = stats.pushed,
+        errored = stats.errored,
+        "GitLab mirror push complete"
+    );
 
     if stats.errored > 0 {
-        warn!(errored = stats.errored, "some repositories failed to push to GitLab mirror");
+        warn!(
+            errored = stats.errored,
+            "some repositories failed to push to GitLab mirror"
+        );
     }
 
     Ok(())
@@ -547,7 +571,6 @@ fn detect_completions_request() -> Option<Shell> {
 
 /// Runs the verify-only mode: checks the SHA-256 manifest in `json_dir`.
 fn run_verify(json_dir: &std::path::Path) -> ExitCode {
-
     info!(dir = %json_dir.display(), "verifying backup integrity");
     match verify_manifest(json_dir) {
         Err(e) => {
@@ -556,7 +579,10 @@ fn run_verify(json_dir: &std::path::Path) -> ExitCode {
         }
         Ok(report) => {
             if report.is_clean() {
-                info!(ok = report.ok, "backup integrity verified — all files match");
+                info!(
+                    ok = report.ok,
+                    "backup integrity verified — all files match"
+                );
                 ExitCode::SUCCESS
             } else {
                 if !report.tampered.is_empty() {
@@ -634,17 +660,13 @@ fn write_prometheus_metrics(
     ));
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create metrics dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
     }
     std::fs::write(path, out).map_err(|e| format!("write metrics: {e}"))
 }
 
 /// Compares two backup JSON directories and returns a human-readable summary.
-fn run_diff(
-    prev_dir: &std::path::Path,
-    curr_dir: &std::path::Path,
-) -> Result<String, String> {
+fn run_diff(prev_dir: &std::path::Path, curr_dir: &std::path::Path) -> Result<String, String> {
     // Compare the repos.json files to find added/removed repositories.
     let prev_repos_path = prev_dir.join("repos.json");
     let curr_repos_path = curr_dir.join("repos.json");
@@ -705,8 +727,7 @@ fn apply_retention(
     keep_last: Option<usize>,
     max_age_days: Option<u64>,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(output_root)
-        .map_err(|e| format!("read output dir: {e}"))?;
+    let entries = std::fs::read_dir(output_root).map_err(|e| format!("read output dir: {e}"))?;
 
     // Collect directories whose names start with a date stamp.
     let mut snapshots: Vec<std::path::PathBuf> = entries
@@ -714,10 +735,7 @@ fn apply_retention(
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
             // Match YYYY-MM-DD prefix
-            if name.len() >= 10
-                && name.as_bytes()[4] == b'-'
-                && name.as_bytes()[7] == b'-'
-            {
+            if name.len() >= 10 && name.as_bytes()[4] == b'-' && name.as_bytes()[7] == b'-' {
                 Some(e.path())
             } else {
                 None

@@ -175,9 +175,7 @@ impl GitHubClient {
             self.http.request(req),
         )
         .await
-        .map_err(|_| ClientError::Timeout {
-            url: url.clone(),
-        })??;
+        .map_err(|_| ClientError::Timeout { url: url.clone() })??;
 
         let status = response.status();
         let headers = response.headers().clone();

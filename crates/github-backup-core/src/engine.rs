@@ -19,9 +19,8 @@ use crate::{
         deploy_keys::backup_deploy_keys, discussion::backup_discussions,
         environments::backup_environments, gist::backup_gists, hooks::backup_hooks,
         issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
-        package::backup_packages, project::backup_projects,
-        pull_request::backup_pull_requests, release::backup_releases,
-        repository::backup_repository,
+        package::backup_packages, project::backup_projects, pull_request::backup_pull_requests,
+        release::backup_releases, repository::backup_repository,
         security_advisories::backup_security_advisories, starred_repos::backup_starred_repos,
         topics::backup_topics, user_data::backup_user_data, wiki::backup_wiki,
     },
@@ -126,7 +125,14 @@ where
         .await?;
 
         // ── GitHub Packages (user-level) ───────────────────────────────────
-        backup_packages(&self.client, owner, &self.opts, &owner_json_dir, &self.storage).await?;
+        backup_packages(
+            &self.client,
+            owner,
+            &self.opts,
+            &owner_json_dir,
+            &self.storage,
+        )
+        .await?;
 
         // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();
@@ -280,8 +286,7 @@ where
                             // Mark complete in the checkpoint so a future
                             // interrupted-run resume can skip this repo.
                             let mut guard = cp.lock().await;
-                            if let Err(e) =
-                                guard.mark_complete_and_save(&repo.full_name, &cp_path)
+                            if let Err(e) = guard.mark_complete_and_save(&repo.full_name, &cp_path)
                             {
                                 warn!(
                                     repo = %repo.full_name,

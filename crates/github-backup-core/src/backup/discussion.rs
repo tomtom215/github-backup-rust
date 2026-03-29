@@ -60,12 +60,7 @@ pub async fn backup_discussions(
     };
 
     let count = discussions.len() as u64;
-    info!(
-        owner,
-        repo = repo_name,
-        count,
-        "backing up discussions"
-    );
+    info!(owner, repo = repo_name, count, "backing up discussions");
     storage.write_json(&meta_dir.join("discussions.json"), &discussions)?;
 
     // Back up comments for each discussion.

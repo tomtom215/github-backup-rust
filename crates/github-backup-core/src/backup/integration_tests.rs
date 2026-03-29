@@ -12,33 +12,25 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use github_backup_types::{
-    ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Hook, Issue,
-    IssueComment, Label, Milestone, Package, PackageVersion, ProjectColumn, PullRequest,
-    Release, SecurityAdvisory, Team, User,
     config::{BackupOptions, BackupTarget},
     discussion::DiscussionCategory,
     package::PackageRepository,
     project::ProjectCard,
     pull_request::PullRequestRef,
+    ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Hook, Issue,
+    IssueComment, Label, Milestone, Package, PackageVersion, ProjectColumn, PullRequest, Release,
+    SecurityAdvisory, Team, User,
 };
 
+use crate::backup::mock_client::MockBackupClient;
 use crate::backup::{
-    collaborators::backup_collaborators,
-    deploy_keys::backup_deploy_keys,
-    discussion::backup_discussions,
-    hooks::backup_hooks,
-    issue::backup_issues,
-    labels::backup_labels,
-    milestones::backup_milestones,
-    package::backup_packages,
-    project::backup_projects,
-    pull_request::backup_pull_requests,
-    release::backup_releases,
-    security_advisories::backup_security_advisories,
-    topics::backup_topics,
+    collaborators::backup_collaborators, deploy_keys::backup_deploy_keys,
+    discussion::backup_discussions, hooks::backup_hooks, issue::backup_issues,
+    labels::backup_labels, milestones::backup_milestones, package::backup_packages,
+    project::backup_projects, pull_request::backup_pull_requests, release::backup_releases,
+    security_advisories::backup_security_advisories, topics::backup_topics,
     user_data::backup_user_data,
 };
-use crate::backup::mock_client::MockBackupClient;
 use crate::storage::test_support::MemStorage;
 
 // ── Shared test fixtures ───────────────────────────────────────────────────
@@ -354,7 +346,10 @@ async fn backup_security_advisories_writes_json() {
         .expect("backup_security_advisories");
 
     let path = meta_dir().join("security_advisories.json");
-    assert!(storage.get(&path).is_some(), "security_advisories.json written");
+    assert!(
+        storage.get(&path).is_some(),
+        "security_advisories.json written"
+    );
 }
 
 // ── Deploy keys ────────────────────────────────────────────────────────────
@@ -566,9 +561,7 @@ async fn backup_discussions_writes_json_and_comments() {
         body: "Here's how!".to_string(),
         created_at: "2024-01-02T00:00:00Z".to_string(),
         updated_at: "2024-01-02T00:00:00Z".to_string(),
-        html_url: format!(
-            "https://github.com/{OWNER}/{REPO}/discussions/1#discussioncomment-100"
-        ),
+        html_url: format!("https://github.com/{OWNER}/{REPO}/discussions/1#discussioncomment-100"),
         user: make_user(),
     };
 
@@ -587,9 +580,7 @@ async fn backup_discussions_writes_json_and_comments() {
 
     assert_eq!(count, 1, "one discussion fetched");
     assert!(
-        storage
-            .get(&meta_dir().join("discussions.json"))
-            .is_some(),
+        storage.get(&meta_dir().join("discussions.json")).is_some(),
         "discussions.json written"
     );
     let comment_path = meta_dir().join("discussion_comments_1.json");
@@ -699,10 +690,16 @@ async fn backup_packages_writes_json_and_versions() {
     assert!(count > 0, "at least one package file written");
 
     let pkg_path = owner_json_dir().join("packages_container.json");
-    assert!(storage.get(&pkg_path).is_some(), "packages_container.json written");
+    assert!(
+        storage.get(&pkg_path).is_some(),
+        "packages_container.json written"
+    );
 
     let ver_path = owner_json_dir().join("package_versions_container_my-image.json");
-    assert!(storage.get(&ver_path).is_some(), "package versions file written");
+    assert!(
+        storage.get(&ver_path).is_some(),
+        "package versions file written"
+    );
 }
 
 // ── Multi-module pipeline scenario ─────────────────────────────────────────
@@ -795,7 +792,12 @@ async fn full_repo_metadata_pipeline_smoke_test() {
         .await
         .expect("discussions");
 
-    for file in &["issues.json", "pulls.json", "labels.json", "discussions.json"] {
+    for file in &[
+        "issues.json",
+        "pulls.json",
+        "labels.json",
+        "discussions.json",
+    ] {
         let path = meta_dir().join(file);
         assert!(storage.get(&path).is_some(), "{file} should be written");
     }

@@ -78,7 +78,7 @@ impl Signer {
     /// - `host`         — Host header value
     /// - `path`         — URL path (e.g. `/key/to/object`)
     /// - `query`        — Pre-encoded query string without `?` (e.g.
-    ///                    `"partNumber=1&uploadId=abc"`)
+    ///   `"partNumber=1&uploadId=abc"`)
     /// - `content_type` — `Content-Type` header value
     /// - `body`         — Request body bytes
     #[must_use]
@@ -92,7 +92,16 @@ impl Signer {
         body: &[u8],
     ) -> SignedHeaders {
         let (datetime, date) = utc_datetime_pair();
-        self.sign(method, host, path, query, content_type, body, &datetime, &date)
+        self.sign(
+            method,
+            host,
+            path,
+            query,
+            content_type,
+            body,
+            &datetime,
+            &date,
+        )
     }
 
     /// Computes SigV4 signing headers for an S3 `HeadObject` or `GetObject`
