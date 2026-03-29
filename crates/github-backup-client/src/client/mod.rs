@@ -13,9 +13,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode};
+use hyper_http_proxy::{Intercept, Proxy, ProxyConnector};
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use github_backup_types::config::Credential;
 
@@ -33,10 +35,26 @@ const MAX_SERVER_ERROR_RETRIES: u32 = 3;
 /// Default request timeout. GitHub's API can be slow for large repos.
 pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-type HyperClient = Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
->;
+/// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
+/// proxy connection.  Both variants share the same `hyper_util::client::legacy`
+/// error type so call sites need no special casing.
+#[derive(Clone)]
+pub(super) enum HyperClientKind {
+    Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
+    Proxied(Client<ProxyConnector<HttpConnector>, Full<Bytes>>),
+}
+
+impl HyperClientKind {
+    async fn request(
+        &self,
+        req: hyper::Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
+        match self {
+            HyperClientKind::Direct(c) => c.request(req).await,
+            HyperClientKind::Proxied(c) => c.request(req).await,
+        }
+    }
+}
 
 /// Async GitHub REST API v3 client.
 ///
@@ -46,9 +64,15 @@ type HyperClient = Client<
 ///
 /// The client is cheaply cloneable — the underlying hyper connection pool is
 /// `Arc`-wrapped.
+///
+/// **Proxy support**: if `HTTPS_PROXY` (or `https_proxy`) is set in the
+/// environment the client automatically routes all connections through the
+/// proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL
+/// (`http://user:pass@host:port`) are forwarded as a `Proxy-Authorization`
+/// header.
 #[derive(Clone)]
 pub struct GitHubClient {
-    pub(super) http: HyperClient,
+    pub(super) http: HyperClientKind,
     pub(super) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(super) api_base: String,
@@ -80,20 +104,31 @@ impl GitHubClient {
     /// typically at `https://github.example.com/api/v3`.  The URL is stored
     /// verbatim and used as the prefix for all API requests.
     ///
+    /// If `HTTPS_PROXY` (or `https_proxy`) is set in the environment, the
+    /// client will route HTTPS requests through that proxy via HTTP `CONNECT`.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
-        let tls_config = build_tls_config()?;
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_only()
-            .enable_http1()
-            .build();
+        let http = if let Some(proxy_uri) = detect_proxy_from_env() {
+            info!(proxy = %proxy_uri, "routing GitHub API calls through HTTPS proxy");
+            let connector = HttpConnector::new();
+            let proxy = Proxy::new(Intercept::All, proxy_uri);
+            let proxy_connector = ProxyConnector::from_proxy(connector, proxy)
+                .map_err(|e| ClientError::Tls(e.to_string()))?;
+            HyperClientKind::Proxied(Client::builder(TokioExecutor::new()).build(proxy_connector))
+        } else {
+            let tls_config = build_tls_config()?;
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config(tls_config)
+                .https_only()
+                .enable_http1()
+                .build();
+            HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(https))
+        };
 
-        let http = Client::builder(TokioExecutor::new()).build(https);
         let api_base = api_base_url.trim_end_matches('/').to_string();
-
         Ok(Self {
             http,
             credential,
@@ -279,6 +314,15 @@ pub(super) async fn collect_body(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
 ) -> Result<Bytes, ClientError> {
     Ok(body.collect().await?.to_bytes())
+}
+
+/// Reads `HTTPS_PROXY` (or the lowercase `https_proxy`) from the environment
+/// and returns it as a parsed [`hyper::Uri`], or `None` if unset / unparseable.
+fn detect_proxy_from_env() -> Option<hyper::Uri> {
+    std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 /// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
