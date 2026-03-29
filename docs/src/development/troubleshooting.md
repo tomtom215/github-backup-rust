@@ -60,6 +60,35 @@ be absent.
 - Install `ca-certificates`: `apk add ca-certificates` / `apt-get install ca-certificates`.
 - When using Docker, use the provided `Dockerfile` which already includes `ca-certificates`.
 
+### `Connect` or `Connection refused` errors behind a proxy
+
+If `github-backup` cannot reach `api.github.com` in a network where outbound HTTPS is only permitted through a proxy:
+
+```
+ERROR backup failed: GitHub API error: HTTP transport error: client error (Connect)
+```
+
+Set `HTTPS_PROXY`:
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:3128
+github-backup octocat --output /backup --all
+```
+
+With credentials:
+
+```bash
+export HTTPS_PROXY=http://user:secret@proxy.example.com:3128
+github-backup octocat --output /backup --all
+```
+
+At startup you will see:
+```
+INFO  routing GitHub API calls through HTTPS proxy proxy=http://proxy.example.com:3128
+```
+
+> **git clone vs API calls**: `github-backup` routes API calls through the proxy automatically. For git clone operations the system `git` binary reads `HTTPS_PROXY` / `GIT_PROXY_COMMAND` independently — set those environment variables too if git clones are also failing.
+
 ### `Timeout` errors
 
 GitHub can be slow for very large repositories or under high load.  The

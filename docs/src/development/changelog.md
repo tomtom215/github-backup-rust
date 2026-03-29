@@ -8,6 +8,8 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ### Added
 
+- **Unauthenticated access**: running without `--token` or `--device-auth` is now valid. The tool backs up public data at GitHub's unauthenticated rate limit (60 req/h) and logs a clear warning rather than refusing to start.
+- **Automatic HTTPS proxy support**: `github-backup` now detects `HTTPS_PROXY` (or `https_proxy`) at startup and routes all GitHub API calls through the proxy via HTTP `CONNECT` tunnelling. Credentials embedded in the proxy URL are forwarded automatically. Powered by `hyper-http-proxy` (pure Rust, no OpenSSL).
 - **Starred-repository clone** (`--clone-starred`): mirrors every starred repo into `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git` using a crash-safe durable queue (`starred_clone_queue.json`). Features: pause/resume across runs, per-item retry with exponential backoff (5 s → 30 s → 2 min), Ctrl+C graceful shutdown, and structured progress logging (`done`, `pending`, `failed`, `rate_per_min`, `eta_secs`). Not included in `--all` due to potentially large footprint.
 - **Deploy keys backup** (`--deploy-keys`): saves `deploy_keys.json` per repository. Requires admin access; gracefully skips on 403/404.
 - **Collaborators backup** (`--collaborators`): saves `collaborators.json` per repository with per-user permissions. Requires admin access; gracefully skips on 403/404.

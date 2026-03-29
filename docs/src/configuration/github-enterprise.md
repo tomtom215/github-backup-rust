@@ -99,16 +99,18 @@ GitHub Enterprise Cloud uses `https://api.github.com` — the same endpoint as G
 
 ## Proxy Support
 
-If your environment routes HTTPS traffic through a corporate proxy, set the standard environment variables before running the tool:
+If your GHES instance (or GitHub.com) is reached through a corporate HTTP proxy, set `HTTPS_PROXY` before running the tool:
 
 ```bash
 export HTTPS_PROXY=http://proxy.example.com:3128
-export NO_PROXY=localhost,127.0.0.1
-
 github-backup octocat --token $GITHUB_TOKEN --output /backup --all
 ```
 
-The Rust HTTP stack (`hyper`) honours `HTTPS_PROXY` and `NO_PROXY` automatically.
+`github-backup` reads `HTTPS_PROXY` (or the lowercase `https_proxy`) at startup and routes all GitHub API calls through the proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL (`http://user:pass@host:port`) are forwarded automatically as a `Proxy-Authorization` header.
+
+> **Note**: git clone operations are performed by the system `git` binary, which honours `HTTPS_PROXY` / `GIT_PROXY_COMMAND` from the environment separately.  Set them together for consistent behaviour.
+
+See [Environment Variables → Proxy](environment.md#proxy) for the full variable reference.
 
 ---
 
