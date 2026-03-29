@@ -133,6 +133,34 @@ github-backup octocat --token $GITHUB_TOKEN --output /backup \
   --issues --pulls --since "2026-01-01T00:00:00Z"
 ```
 
+## Shell Completions
+
+`github-backup` ships built-in tab completion for every major shell.
+Run the one-time setup for your shell, then restart your session:
+
+```bash
+# Bash — append to the system completion file (or your own ~/.bash_completion)
+github-backup --completions bash >> ~/.bash_completion
+
+# Zsh — write to a fpath directory, then rebuild the completion cache
+mkdir -p ~/.zfunc
+github-backup --completions zsh > ~/.zfunc/_github-backup
+# Add to ~/.zshrc if not already present:
+#   fpath=(~/.zfunc $fpath)
+#   autoload -Uz compinit && compinit
+
+# Fish
+github-backup --completions fish > ~/.config/fish/completions/github-backup.fish
+
+# PowerShell — append to your profile
+github-backup --completions powershell >> $PROFILE
+
+# Elvish
+github-backup --completions elvish > ~/.config/elvish/lib/github-backup.elv
+```
+
+Once installed, `github-backup <Tab>` completes flags, sub-commands, and enum values (e.g. `--mirror-type`, `--completions <shell>`).
+
 ## Workspace Layout
 
 ```

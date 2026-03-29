@@ -218,14 +218,22 @@ github-backup octocat --token $TOKEN --output /backup \
 
 ## Special Commands
 
+### Shell Completions
+
+`--completions <SHELL>` prints a completion script and exits immediately — no token or network access required.
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
 ```bash
-# Generate shell completions (no auth required)
-github-backup --completions bash
-github-backup --completions zsh
-github-backup --completions fish
-github-backup --completions powershell
-github-backup --completions elvish
+# Quick one-liner — pipe directly into your shell's completion directory
+github-backup --completions bash >> ~/.bash_completion
+github-backup --completions zsh > ~/.zfunc/_github-backup
+github-backup --completions fish > ~/.config/fish/completions/github-backup.fish
+github-backup --completions powershell >> $PROFILE
+github-backup --completions elvish > ~/.config/elvish/lib/github-backup.elv
 ```
+
+See the [Installation guide](../getting-started/installation.md#shell-completions) for per-shell setup details (Zsh `fpath`, Elvish `rc.elv`, etc.).
 
 ## Exit Codes
 

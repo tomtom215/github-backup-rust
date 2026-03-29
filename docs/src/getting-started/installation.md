@@ -58,19 +58,56 @@ github-backup --help
 
 ## Shell Completions
 
-Generate shell completion scripts:
+`github-backup` generates tab-completion scripts for all major shells via `--completions <SHELL>`.
+Run the one-time setup below, then **open a new terminal** (or source your shell's config file) to activate completions.
+
+### Bash
 
 ```bash
-# Bash
 github-backup --completions bash >> ~/.bash_completion
+```
 
-# Zsh
+If you use a distribution-managed completions directory you can instead write to `/etc/bash_completion.d/github-backup` (requires sudo).
+
+### Zsh
+
+```zsh
+mkdir -p ~/.zfunc
 github-backup --completions zsh > ~/.zfunc/_github-backup
-# Add to .zshrc: fpath=(~/.zfunc $fpath); compinit
+```
 
-# Fish
+Add the following lines to `~/.zshrc` **once** (before any `compinit` call):
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+Then reload: `exec zsh`.
+
+### Fish
+
+```fish
 github-backup --completions fish > ~/.config/fish/completions/github-backup.fish
 ```
+
+Fish auto-loads files from `~/.config/fish/completions/` — no further configuration needed.
+
+### PowerShell
+
+```powershell
+github-backup --completions powershell >> $PROFILE
+```
+
+Reload your profile with `. $PROFILE` or start a new PowerShell session.
+
+### Elvish
+
+```elvish
+github-backup --completions elvish > ~/.config/elvish/lib/github-backup.elv
+```
+
+Then add `use github-backup` to your `~/.config/elvish/rc.elv`.
 
 ## System Requirements
 

@@ -77,6 +77,36 @@ impl MockBackupClient {
         self
     }
 
+    /// Pre-loads the issue comments list.
+    pub fn with_issue_comments(self, comments: Vec<IssueComment>) -> Self {
+        self.inner.lock().unwrap().issue_comments = comments;
+        self
+    }
+
+    /// Pre-loads the milestones list.
+    pub fn with_milestones(self, milestones: Vec<Milestone>) -> Self {
+        self.inner.lock().unwrap().milestones = milestones;
+        self
+    }
+
+    /// Pre-loads the hooks list.
+    pub fn with_hooks(self, hooks: Vec<Hook>) -> Self {
+        self.inner.lock().unwrap().hooks = hooks;
+        self
+    }
+
+    /// Pre-loads the security advisories list.
+    pub fn with_security_advisories(self, advisories: Vec<SecurityAdvisory>) -> Self {
+        self.inner.lock().unwrap().security_advisories = advisories;
+        self
+    }
+
+    /// Pre-loads the user repositories list.
+    pub fn with_user_repos(self, repos: Vec<Repository>) -> Self {
+        self.inner.lock().unwrap().user_repos = repos;
+        self
+    }
+
     /// Pre-loads the pull requests list.
     pub fn with_pull_requests(self, prs: Vec<PullRequest>) -> Self {
         self.inner.lock().unwrap().pull_requests = prs;

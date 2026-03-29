@@ -31,3 +31,6 @@ pub mod wiki;
 
 #[cfg(test)]
 pub(crate) mod mock_client;
+
+#[cfg(test)]
+mod integration_tests;
