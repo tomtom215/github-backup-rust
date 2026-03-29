@@ -7,8 +7,10 @@
 //! exposes a single async function that writes artefacts via the
 //! [`crate::storage::Storage`] and [`crate::git::GitRunner`] traits.
 
+pub mod actions;
 pub mod collaborators;
 pub mod deploy_keys;
+pub mod environments;
 pub mod gist;
 pub mod issue;
 pub mod pull_request;

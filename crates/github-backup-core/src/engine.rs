@@ -14,7 +14,8 @@ use github_backup_types::Repository;
 
 use crate::{
     backup::{
-        collaborators::backup_collaborators, deploy_keys::backup_deploy_keys, gist::backup_gists,
+        actions::backup_actions, collaborators::backup_collaborators,
+        deploy_keys::backup_deploy_keys, environments::backup_environments, gist::backup_gists,
         issue::backup_issues, pull_request::backup_pull_requests, release::backup_releases,
         repository::backup_repository, starred_repos::backup_starred_repos,
         user_data::backup_user_data, wiki::backup_wiki,
@@ -378,6 +379,11 @@ where
 
     backup_deploy_keys(client, owner, &repo.name, opts, meta_dir, storage).await?;
     backup_collaborators(client, owner, &repo.name, opts, meta_dir, storage).await?;
+
+    let actions_count = backup_actions(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    stats.add_workflows(actions_count);
+
+    backup_environments(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
     Ok(())
 }

@@ -29,6 +29,8 @@
 //! | [`collaborator`] | Repository collaborators with permission levels |
 //! | [`team`] | GitHub organisation teams |
 //! | [`starred_queue`] | Durable queue types for starred-repo clone progress |
+//! | [`workflow`] | GitHub Actions workflow and workflow-run metadata |
+//! | [`environment`] | Repository deployment environments and protection rules |
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -38,6 +40,7 @@ pub mod branch;
 pub mod collaborator;
 pub mod config;
 pub mod deploy_key;
+pub mod environment;
 pub mod gist;
 pub mod glob;
 pub mod hook;
@@ -51,12 +54,14 @@ pub mod security_advisory;
 pub mod starred_queue;
 pub mod team;
 pub mod user;
+pub mod workflow;
 
 // Convenience re-exports for the most commonly used types.
 pub use branch::{Branch, BranchCommit};
 pub use collaborator::{Collaborator, CollaboratorPermissions};
 pub use config::{BackupOptions, ConfigFile, OutputConfig};
 pub use deploy_key::DeployKey;
+pub use environment::{DeploymentBranchPolicy, Environment, EnvironmentProtectionRule};
 pub use gist::Gist;
 pub use hook::Hook;
 pub use issue::{Issue, IssueComment, IssueEvent};
@@ -68,3 +73,4 @@ pub use repository::Repository;
 pub use security_advisory::SecurityAdvisory;
 pub use team::{Team, TeamParent};
 pub use user::User;
+pub use workflow::{Workflow, WorkflowRun};

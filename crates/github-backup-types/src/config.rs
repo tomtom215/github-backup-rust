@@ -282,6 +282,30 @@ pub struct BackupOptions {
     /// [`target`]: BackupOptions::target
     pub org_teams: bool,
 
+    // ── GitHub Actions ────────────────────────────────────────────────────
+    /// Backup the list of GitHub Actions workflows defined in each repository.
+    ///
+    /// Saves `workflows.json` to each repository's metadata directory.
+    /// Workflow YAML files are already captured by the git clone; this option
+    /// additionally records the API metadata (IDs, states, badge URLs).
+    pub actions: bool,
+    /// Backup recent workflow run history for each Actions workflow.
+    ///
+    /// For each workflow, saves `workflow_runs_<id>.json`.  Requires
+    /// [`actions`] to be enabled; run history can be very large for active
+    /// repositories.
+    ///
+    /// [`actions`]: BackupOptions::actions
+    pub action_runs: bool,
+
+    // ── Deployment environments ───────────────────────────────────────────
+    /// Backup deployment environment configurations for each repository.
+    ///
+    /// Environments (e.g. `staging`, `production`) may have protection rules,
+    /// required reviewers, and branch policies.  Saves `environments.json`
+    /// to each repository's metadata directory.
+    pub environments: bool,
+
     // ── Repository name filters ───────────────────────────────────────────
     /// Only back up repositories whose names match at least one of these glob
     /// patterns.  An empty list means *all* repositories are included.
@@ -368,6 +392,9 @@ impl BackupOptions {
             collaborators: true,
             org_members: true,
             org_teams: true,
+            actions: true,
+            action_runs: false, // opt-in only; can generate very large files
+            environments: true,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
@@ -491,6 +518,13 @@ pub struct ConfigFile {
     pub org_members: Option<bool>,
     /// Back up the team list of the organisation.
     pub org_teams: Option<bool>,
+
+    /// Back up GitHub Actions workflow metadata.
+    pub actions: Option<bool>,
+    /// Back up GitHub Actions workflow run history.
+    pub action_runs: Option<bool>,
+    /// Back up repository deployment environment configurations.
+    pub environments: Option<bool>,
 
     /// Only back up repositories matching these glob patterns (comma-separated
     /// or as a TOML array).

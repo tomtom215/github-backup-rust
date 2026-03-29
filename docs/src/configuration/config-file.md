@@ -80,6 +80,17 @@ followers        = false
 following        = false
 gists            = true
 starred_gists    = false
+
+# ── GitHub Actions ─────────────────────────────────────────────────────────
+actions          = true
+# action_runs   = false  # opt-in; can be large for active repos
+
+# ── Deployment environments ─────────────────────────────────────────────────
+environments     = true
+
+# ── Organisation-specific ───────────────────────────────────────────────────
+org_members      = false
+org_teams        = false
 ```
 
 ## Minimal Config File
@@ -143,6 +154,13 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 | `starred_gists` | bool | `false` | Back up starred gists |
 | `topics` | bool | `false` | Back up repository topics |
 | `branches` | bool | `false` | Back up branch list |
+| `deploy_keys` | bool | `false` | Back up deploy keys (admin access required) |
+| `collaborators` | bool | `false` | Back up collaborator list (admin access required) |
+| `org_members` | bool | `false` | Back up org member list |
+| `org_teams` | bool | `false` | Back up org team list |
+| `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
+| `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
+| `environments` | bool | `false` | Back up deployment environment configurations |
 | `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
 | `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
 | `since` | string | — | ISO 8601 timestamp: only fetch issues/PRs updated after this |

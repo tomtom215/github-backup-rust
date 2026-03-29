@@ -34,6 +34,7 @@ github-backup octocat \
   "gists_backed_up": 5,
   "issues_fetched": 1204,
   "prs_fetched": 387,
+  "workflows_fetched": 18,
   "success": true
 }
 ```
@@ -51,6 +52,7 @@ github-backup octocat \
 | `gists_backed_up` | integer | Gists backed up |
 | `issues_fetched` | integer | Total issues fetched across all repos |
 | `prs_fetched` | integer | Total pull requests fetched across all repos |
+| `workflows_fetched` | integer | Total GitHub Actions workflows fetched across all repos |
 | `success` | bool | `true` when `repos_errored == 0` |
 
 ---

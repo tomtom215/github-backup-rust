@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use github_backup_client::{BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
-    Branch, Collaborator, DeployKey, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
-    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
-    SecurityAdvisory, Team, User,
+    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
+    Label, Milestone, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
+    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -52,6 +52,9 @@ struct MockData {
     collaborators: Vec<Collaborator>,
     org_members: Vec<User>,
     org_teams: Vec<Team>,
+    workflows: Vec<Workflow>,
+    workflow_runs: Vec<WorkflowRun>,
+    environments: Vec<Environment>,
 }
 
 #[allow(dead_code)]
@@ -160,6 +163,24 @@ impl MockBackupClient {
     /// Pre-loads org teams.
     pub fn with_org_teams(self, teams: Vec<Team>) -> Self {
         self.inner.lock().unwrap().org_teams = teams;
+        self
+    }
+
+    /// Pre-loads workflows.
+    pub fn with_workflows(self, workflows: Vec<Workflow>) -> Self {
+        self.inner.lock().unwrap().workflows = workflows;
+        self
+    }
+
+    /// Pre-loads workflow runs.
+    pub fn with_workflow_runs(self, runs: Vec<WorkflowRun>) -> Self {
+        self.inner.lock().unwrap().workflow_runs = runs;
+        self
+    }
+
+    /// Pre-loads deployment environments.
+    pub fn with_environments(self, envs: Vec<Environment>) -> Self {
+        self.inner.lock().unwrap().environments = envs;
         self
     }
 }
@@ -404,6 +425,34 @@ impl BackupClient for MockBackupClient {
         _org: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Team>, ClientError>> {
         let d = self.inner.lock().unwrap().org_teams.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_workflows<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Workflow>, ClientError>> {
+        let d = self.inner.lock().unwrap().workflows.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_workflow_runs<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+        _workflow_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<WorkflowRun>, ClientError>> {
+        let d = self.inner.lock().unwrap().workflow_runs.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_environments<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>> {
+        let d = self.inner.lock().unwrap().environments.clone();
         Box::pin(async move { Ok(d) })
     }
 }

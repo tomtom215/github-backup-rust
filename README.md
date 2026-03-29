@@ -45,7 +45,10 @@ docker run --rm \
 | Gists | Owned and starred gists |
 | Wikis | Repository wiki clones |
 | Topics & branches | Repository tags and branch list with protection status |
-| User / org data | Starred, watched, followers, following |
+| Deploy keys & collaborators | Per-repository key and permission metadata |
+| **GitHub Actions** | Workflow metadata + optional run history (`--actions`, `--action-runs`) |
+| **Environments** | Deployment environments with protection rules (`--environments`) |
+| User / org data | Starred, watched, followers, following, org members, teams |
 | **Repo filters** | `--include-repos` / `--exclude-repos` glob patterns |
 | **Incremental** | `--since` to limit issues/PR fetching by date |
 | **S3 sync** | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
