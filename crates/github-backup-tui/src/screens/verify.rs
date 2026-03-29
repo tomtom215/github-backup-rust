@@ -78,10 +78,7 @@ fn render_header(
             Span::styled("Path:   ", theme::DIM),
             Span::styled(path, theme::NORMAL),
         ]),
-        Line::from(vec![
-            Span::styled("Status: ", theme::DIM),
-            status,
-        ]),
+        Line::from(vec![Span::styled("Status: ", theme::DIM), status]),
     ];
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
@@ -104,10 +101,7 @@ fn render_results(frame: &mut Frame, verify: &VerifyState, area: ratatui::layout
     }
 
     if !verify.done {
-        let para = Paragraph::new(Line::from(Span::styled(
-            "No results yet.",
-            theme::DIM,
-        )));
+        let para = Paragraph::new(Line::from(Span::styled("No results yet.", theme::DIM)));
         frame.render_widget(para, inner);
         return;
     }
@@ -169,7 +163,10 @@ fn render_results(frame: &mut Frame, verify: &VerifyState, area: ratatui::layout
 
 fn render_hints(frame: &mut Frame, verify: &VerifyState, area: ratatui::layout::Rect) {
     let line = if verify.running {
-        Line::from(Span::styled("Verification in progress...", theme::ACCENT_STYLE))
+        Line::from(Span::styled(
+            "Verification in progress...",
+            theme::ACCENT_STYLE,
+        ))
     } else {
         Line::from(vec![
             Span::styled("v", theme::KEY_HINT),

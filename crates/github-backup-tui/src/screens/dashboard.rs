@@ -25,9 +25,9 @@ pub fn render(
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),  // info panel
-            Constraint::Min(8),     // actions
-            Constraint::Length(3),  // status / hint
+            Constraint::Length(6), // info panel
+            Constraint::Min(8),    // actions
+            Constraint::Length(3), // status / hint
         ])
         .split(area);
 
@@ -63,14 +63,15 @@ fn render_info(
     };
 
     let left_lines = vec![
-        Line::from(vec![
-            Span::styled("Owner:  ", theme::DIM),
-            owner_display,
-        ]),
+        Line::from(vec![Span::styled("Owner:  ", theme::DIM), owner_display]),
         Line::from(vec![
             Span::styled("Output: ", theme::DIM),
             Span::styled(
-                if cfg.output_dir.is_empty() { "(not set)" } else { &cfg.output_dir },
+                if cfg.output_dir.is_empty() {
+                    "(not set)"
+                } else {
+                    &cfg.output_dir
+                },
                 theme::NORMAL,
             ),
         ]),
@@ -87,10 +88,7 @@ fn render_info(
     frame.render_widget(left, cols[0]);
 
     // Right column
-    let last_run = dash
-        .last_backup_time
-        .as_deref()
-        .unwrap_or("never");
+    let last_run = dash.last_backup_time.as_deref().unwrap_or("never");
     let last_repos = dash
         .last_backup_repos
         .map(|n| n.to_string())
@@ -107,10 +105,7 @@ fn render_info(
         ]),
         Line::from(vec![
             Span::styled("Version:    ", theme::DIM),
-            Span::styled(
-                dash.last_tool_version.as_deref().unwrap_or("-"),
-                theme::DIM,
-            ),
+            Span::styled(dash.last_tool_version.as_deref().unwrap_or("-"), theme::DIM),
         ]),
     ];
     let right = Paragraph::new(right_lines);
@@ -143,7 +138,14 @@ fn render_actions(frame: &mut Frame, dash: &DashboardState, area: ratatui::layou
                 Span::styled(prefix, theme::ACCENT_STYLE),
                 Span::styled(key, theme::KEY_HINT),
                 Span::raw(" "),
-                Span::styled(*action, if is_selected { theme::ACCENT_BOLD } else { theme::NORMAL }),
+                Span::styled(
+                    *action,
+                    if is_selected {
+                        theme::ACCENT_BOLD
+                    } else {
+                        theme::NORMAL
+                    },
+                ),
             ]);
             let item = ListItem::new(line);
             if is_selected {

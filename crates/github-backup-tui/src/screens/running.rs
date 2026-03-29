@@ -55,10 +55,7 @@ fn render_progress(frame: &mut Frame, run: &RunState, area: ratatui::layout::Rec
     let gauge = Gauge::default()
         .block(
             Block::default()
-                .title(Span::styled(
-                    format!(" {} ", run.phase),
-                    theme::TITLE,
-                ))
+                .title(Span::styled(format!(" {} ", run.phase), theme::TITLE))
                 .borders(Borders::ALL)
                 .border_style(theme::ACCENT_STYLE),
         )

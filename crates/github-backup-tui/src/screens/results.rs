@@ -6,7 +6,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Table, Row, Cell, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -95,7 +95,11 @@ fn render_stats(frame: &mut Frame, res: &ResultsState, area: ratatui::layout::Re
         stat_row_styled(
             "Repositories errored",
             res.repos_errored,
-            if res.repos_errored > 0 { theme::ERR_STYLE } else { theme::OK_STYLE },
+            if res.repos_errored > 0 {
+                theme::ERR_STYLE
+            } else {
+                theme::OK_STYLE
+            },
         ),
         stat_row("Gists backed up", res.gists_backed_up),
         stat_row("Issues fetched", res.issues_fetched),
@@ -105,18 +109,14 @@ fn render_stats(frame: &mut Frame, res: &ResultsState, area: ratatui::layout::Re
     ];
 
     let widths = [Constraint::Percentage(50), Constraint::Percentage(50)];
-    let table = Table::new(rows, widths)
-        .column_spacing(2);
+    let table = Table::new(rows, widths).column_spacing(2);
     frame.render_widget(table, inner);
 }
 
 fn stat_row(label: &str, value: u64) -> Row<'static> {
     Row::new(vec![
         Cell::from(Span::styled(label.to_string(), theme::DIM)),
-        Cell::from(Span::styled(
-            format_number(value),
-            theme::NORMAL,
-        )),
+        Cell::from(Span::styled(format_number(value), theme::NORMAL)),
     ])
 }
 
@@ -152,7 +152,10 @@ fn render_hints(frame: &mut Frame, area: ratatui::layout::Rect) {
         Span::styled(" quit", theme::KEY_DESC),
     ]);
 
-    let para = Paragraph::new(line)
-        .block(Block::default().borders(Borders::TOP).border_style(theme::DIM));
+    let para = Paragraph::new(line).block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(theme::DIM),
+    );
     frame.render_widget(para, area);
 }

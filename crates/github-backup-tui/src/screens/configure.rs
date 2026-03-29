@@ -18,9 +18,9 @@ pub fn render(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect)
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // tab bar
-            Constraint::Min(0),     // tab content
-            Constraint::Length(2),  // keybinding hints
+            Constraint::Length(3), // tab bar
+            Constraint::Min(0),    // tab content
+            Constraint::Length(2), // keybinding hints
         ])
         .split(area);
 
@@ -169,11 +169,22 @@ fn render_categories_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::la
             let prefix = if is_sel { "> " } else { "  " };
             let line = Line::from(vec![
                 Span::styled(prefix, theme::ACCENT_STYLE),
-                Span::styled(check, if *enabled { theme::OK_STYLE } else { theme::DIM }),
+                Span::styled(
+                    check,
+                    if *enabled {
+                        theme::OK_STYLE
+                    } else {
+                        theme::DIM
+                    },
+                ),
                 Span::raw(" "),
                 Span::styled(
                     *label,
-                    if is_sel { theme::ACCENT_BOLD } else { theme::NORMAL },
+                    if is_sel {
+                        theme::ACCENT_BOLD
+                    } else {
+                        theme::NORMAL
+                    },
                 ),
             ]);
             let item = ListItem::new(line);
@@ -300,7 +311,13 @@ fn render_output_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout
         FieldDef::toggle(0, "Write SHA-256 Manifest", cfg.manifest, cfg),
         FieldDef::toggle(1, "Dry Run (no writes)", cfg.dry_run, cfg),
         FieldDef::text(2, "JSON Report File", &cfg.report, false, cfg),
-        FieldDef::text(3, "Prometheus Metrics File", &cfg.prometheus_metrics, false, cfg),
+        FieldDef::text(
+            3,
+            "Prometheus Metrics File",
+            &cfg.prometheus_metrics,
+            false,
+            cfg,
+        ),
         FieldDef::text(4, "Keep Last N Snapshots", &cfg.keep_last, false, cfg),
         FieldDef::text(5, "Max Age (days)", &cfg.max_age_days, false, cfg),
     ];
@@ -310,9 +327,17 @@ fn render_output_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout
 // ── Generic field list renderer ───────────────────────────────────────────────
 
 enum FieldKind {
-    Text { value: String, masked: bool },
-    Toggle { value: bool },
-    Select { options: Vec<&'static str>, selected: usize },
+    Text {
+        value: String,
+        masked: bool,
+    },
+    Toggle {
+        value: bool,
+    },
+    Select {
+        options: Vec<&'static str>,
+        selected: usize,
+    },
 }
 
 struct FieldDef {
@@ -322,7 +347,13 @@ struct FieldDef {
 }
 
 impl FieldDef {
-    fn text(index: usize, label: &'static str, value: &str, masked: bool, cfg: &ConfigState) -> Self {
+    fn text(
+        index: usize,
+        label: &'static str,
+        value: &str,
+        masked: bool,
+        cfg: &ConfigState,
+    ) -> Self {
         let display = if cfg.editing && cfg.active_field == index {
             cfg.edit_buffer.clone()
         } else {
@@ -331,12 +362,19 @@ impl FieldDef {
         Self {
             index,
             label,
-            kind: FieldKind::Text { value: display, masked },
+            kind: FieldKind::Text {
+                value: display,
+                masked,
+            },
         }
     }
 
     fn toggle(index: usize, label: &'static str, value: bool, _cfg: &ConfigState) -> Self {
-        Self { index, label, kind: FieldKind::Toggle { value } }
+        Self {
+            index,
+            label,
+            kind: FieldKind::Toggle { value },
+        }
     }
 
     fn select(
@@ -349,7 +387,10 @@ impl FieldDef {
         Self {
             index,
             label,
-            kind: FieldKind::Select { options: options.to_vec(), selected },
+            kind: FieldKind::Select {
+                options: options.to_vec(),
+                selected,
+            },
         }
     }
 }
@@ -395,8 +436,15 @@ fn render_field_list(
                     let left = if is_active { "< " } else { "  " };
                     let right = if is_active { " >" } else { "  " };
                     Span::styled(
-                        format!("{left}{}{right}", options.get(*selected).copied().unwrap_or("?")),
-                        if is_active { theme::ACCENT_STYLE } else { theme::DIM },
+                        format!(
+                            "{left}{}{right}",
+                            options.get(*selected).copied().unwrap_or("?")
+                        ),
+                        if is_active {
+                            theme::ACCENT_STYLE
+                        } else {
+                            theme::DIM
+                        },
                     )
                 }
             };
@@ -405,7 +453,11 @@ fn render_field_list(
                 Span::styled(prefix, theme::ACCENT_STYLE),
                 Span::styled(
                     format!("{:<28}", f.label),
-                    if is_active { theme::ACCENT_BOLD } else { theme::NORMAL },
+                    if is_active {
+                        theme::ACCENT_BOLD
+                    } else {
+                        theme::NORMAL
+                    },
                 ),
                 Span::raw("  "),
                 value_span,

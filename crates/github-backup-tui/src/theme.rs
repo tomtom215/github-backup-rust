@@ -32,7 +32,10 @@ pub const ACCENT_STYLE: Style = Style::new().fg(ACCENT);
 pub const ACCENT_BOLD: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
 /// Highlighted row / selection background.
-pub const SELECTED: Style = Style::new().bg(HIGHLIGHT_BG).fg(FG).add_modifier(Modifier::BOLD);
+pub const SELECTED: Style = Style::new()
+    .bg(HIGHLIGHT_BG)
+    .fg(FG)
+    .add_modifier(Modifier::BOLD);
 
 /// Success/OK indicator.
 pub const OK_STYLE: Style = Style::new().fg(SUCCESS);
@@ -71,4 +74,3 @@ pub fn log_level_style(level: &str) -> Style {
         _ => DIM,
     }
 }
-
