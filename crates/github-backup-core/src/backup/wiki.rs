@@ -10,6 +10,7 @@ use tracing::info;
 use github_backup_types::{config::BackupOptions, Repository};
 
 use crate::{
+    backup::repository::rewrite_host,
     error::CoreError,
     git::{CloneOptions, GitRunner},
 };
@@ -37,12 +38,19 @@ pub async fn backup_wiki(
         return Ok(());
     }
 
-    let wiki_url = format!("{}.wiki.git", repo.clone_url.trim_end_matches(".git"));
+    let raw_wiki_url = format!("{}.wiki.git", repo.clone_url.trim_end_matches(".git"));
+    let rewritten;
+    let wiki_url: &str = if let Some(ref host) = opts.clone_host {
+        rewritten = rewrite_host(&raw_wiki_url, host);
+        &rewritten
+    } else {
+        &raw_wiki_url
+    };
     let dest = wikis_dir.join(format!("{}.wiki.git", repo.name));
 
     info!(repo = %repo.full_name, dest = %dest.display(), "cloning wiki");
 
-    match git.mirror_clone(&wiki_url, &dest, clone_opts) {
+    match git.mirror_clone(wiki_url, &dest, clone_opts) {
         Ok(()) => Ok(()),
         Err(CoreError::GitFailed { code: 128, .. }) => {
             // Code 128 is returned when the wiki exists but is empty.

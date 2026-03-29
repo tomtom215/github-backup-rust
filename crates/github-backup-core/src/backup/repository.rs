@@ -12,6 +12,8 @@ use github_backup_types::{
     Repository,
 };
 
+use url::Url;
+
 use crate::{
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -57,6 +59,35 @@ pub async fn backup_repository(
     Ok(())
 }
 
+/// Rewrites the hostname in a URL, returning the modified URL string.
+/// Exported as `pub(crate)` so that sibling backup modules (e.g. `wiki`) can
+/// apply the same `--clone-host` override without duplicating this logic.
+///
+/// Used to support GHES deployments where the API host and clone host differ.
+/// Returns the original URL unchanged if parsing or rewriting fails.
+pub(crate) fn rewrite_host(url: &str, new_host: &str) -> String {
+    // Handle ssh:// URLs and git@ URLs differently from HTTPS.
+    // For git@host:path syntax we do a simple prefix replacement.
+    if let Some(rest) = url.strip_prefix("git@") {
+        // git@<host>:<path>  →  git@<new_host>:<path>
+        if let Some(colon_pos) = rest.find(':') {
+            return format!("git@{}:{}", new_host, &rest[colon_pos + 1..]);
+        }
+        return url.to_string();
+    }
+    // HTTPS / SSH URLs: parse and replace host.
+    match Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.set_host(Some(new_host)).is_ok() {
+                parsed.to_string()
+            } else {
+                url.to_string()
+            }
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
 /// Performs the git clone / update for a repository, dispatching on
 /// [`BackupOptions::clone_type`] and [`BackupOptions::lfs`].
 fn clone_repo(
@@ -66,10 +97,19 @@ fn clone_repo(
     git: &impl GitRunner,
     clone_opts: &CloneOptions,
 ) -> Result<(), CoreError> {
-    let clone_url = if opts.prefer_ssh {
+    let raw_clone_url = if opts.prefer_ssh {
         &repo.ssh_url
     } else {
         &repo.clone_url
+    };
+
+    // Apply --clone-host override (GHES split-hostname deployments).
+    let rewritten;
+    let clone_url: &str = if let Some(ref host) = opts.clone_host {
+        rewritten = rewrite_host(raw_clone_url, host);
+        &rewritten
+    } else {
+        raw_clone_url
     };
 
     if opts.lfs {
@@ -445,5 +485,78 @@ mod tests {
         let repo = make_repo("anything", false, false);
         let opts = BackupOptions::default();
         assert!(should_include(&repo, &opts));
+    }
+
+    // ── rewrite_host tests ────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_host_https_url() {
+        let result = rewrite_host(
+            "https://github.example.com/owner/repo.git",
+            "git.example.com",
+        );
+        assert_eq!(result, "https://git.example.com/owner/repo.git");
+    }
+
+    #[test]
+    fn rewrite_host_https_url_no_path() {
+        let result = rewrite_host("https://github.example.com/", "git.example.com");
+        assert_eq!(result, "https://git.example.com/");
+    }
+
+    #[test]
+    fn rewrite_host_ssh_git_at_syntax() {
+        let result = rewrite_host("git@github.example.com:owner/repo.git", "git.example.com");
+        assert_eq!(result, "git@git.example.com:owner/repo.git");
+    }
+
+    #[test]
+    fn rewrite_host_ssh_url_scheme() {
+        let result = rewrite_host(
+            "ssh://git@github.example.com/owner/repo.git",
+            "other.example.com",
+        );
+        assert_eq!(result, "ssh://git@other.example.com/owner/repo.git");
+    }
+
+    #[test]
+    fn rewrite_host_preserves_unknown_format() {
+        // Malformed URL — should be returned unchanged.
+        let url = "not-a-url";
+        assert_eq!(rewrite_host(url, "host.example.com"), url);
+    }
+
+    #[tokio::test]
+    async fn backup_repository_applies_clone_host_override() {
+        let repo = make_repo("Hello-World", false, false);
+        let opts = BackupOptions {
+            repositories: true,
+            clone_type: CloneType::Mirror,
+            clone_host: Some("git.example.com".to_string()),
+            ..Default::default()
+        };
+        let storage = MemStorage::default();
+        let git = SpyGitRunner::default();
+
+        backup_repository(
+            &repo,
+            &opts,
+            &PathBuf::from("/backup/git/repos"),
+            &PathBuf::from("/backup/json/repos/Hello-World"),
+            &storage,
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("backup");
+
+        let calls = git.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "mirror_clone");
+        assert!(
+            calls[0].url.contains("git.example.com"),
+            "clone URL should have overridden host, got: {}",
+            calls[0].url
+        );
     }
 }

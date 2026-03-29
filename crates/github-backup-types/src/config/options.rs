@@ -191,6 +191,19 @@ pub struct BackupOptions {
     /// previous run's start time to limit subsequent API calls.
     pub since: Option<String>,
 
+    // ── Clone URL override ────────────────────────────────────────────────
+    /// Override the hostname used in git clone URLs.
+    ///
+    /// Useful for GitHub Enterprise Server deployments where the API host
+    /// and the git clone host differ (e.g. behind separate load balancers).
+    ///
+    /// When set, the hostname component of every `clone_url` and `ssh_url`
+    /// from the API is rewritten to this value before it is passed to git.
+    ///
+    /// Example: `--api-url https://github-api.example.com/api/v3
+    ///            --clone-host github-git.example.com`
+    pub clone_host: Option<String>,
+
     // ── Execution options ─────────────────────────────────────────────────
     /// When `true`, log what would be done without writing any files or
     /// running any git commands.
@@ -254,6 +267,7 @@ impl BackupOptions {
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
+            clone_host: None,
             dry_run: false,
             concurrency: 4,
         }

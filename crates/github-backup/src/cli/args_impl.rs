@@ -30,16 +30,23 @@ impl Args {
                 self.output = Some(p.clone());
             }
         }
-        // Concurrency: apply config only when still at the default value.
-        if self.concurrency == 4 {
+        // Concurrency: CLI takes precedence; config supplies the default when
+        // the flag was not explicitly provided on the command line.
+        if self.concurrency.is_none() {
             if let Some(c) = cfg.concurrency {
-                self.concurrency = c;
+                self.concurrency = Some(c);
             }
         }
         // api_url: CLI / env takes precedence.
         if self.api_url.is_none() {
             if let Some(ref u) = cfg.api_url {
                 self.api_url = Some(u.clone());
+            }
+        }
+        // clone_host: CLI / env takes precedence.
+        if self.clone_host.is_none() {
+            if let Some(ref h) = cfg.clone_host {
+                self.clone_host = Some(h.clone());
             }
         }
         // Boolean categories: config activates them, CLI can also activate.
@@ -121,6 +128,7 @@ impl Args {
         };
 
         let clone_type = self.clone_type.into_clone_type();
+        let concurrency = self.concurrency.unwrap_or(4);
 
         if self.all {
             return (
@@ -133,10 +141,11 @@ impl Args {
                     lfs: self.lfs,
                     no_prune: self.no_prune,
                     dry_run: self.dry_run,
-                    concurrency: self.concurrency,
+                    concurrency,
                     include_repos: self.include_repos,
                     exclude_repos: self.exclude_repos,
                     since: self.since,
+                    clone_host: self.clone_host,
                     ..BackupOptions::all()
                 },
             );
@@ -187,8 +196,9 @@ impl Args {
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,
+                clone_host: self.clone_host,
                 dry_run: self.dry_run,
-                concurrency: self.concurrency,
+                concurrency,
             },
         )
     }

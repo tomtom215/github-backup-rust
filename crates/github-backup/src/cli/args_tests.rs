@@ -96,7 +96,7 @@ fn parse_concurrency_and_dry_run() {
         "8",
         "--dry-run",
     ]);
-    assert_eq!(args.concurrency, 8);
+    assert_eq!(args.concurrency, Some(8));
     assert!(args.dry_run);
     let (_, _, opts) = args.into_backup_options();
     assert_eq!(opts.concurrency, 8);

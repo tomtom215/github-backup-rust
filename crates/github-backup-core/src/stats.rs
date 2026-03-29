@@ -111,6 +111,15 @@ impl BackupStats {
         self.inner.gists_backed_up.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records that `n` gists were backed up (batch form of [`inc_gists`]).
+    ///
+    /// Prefer this over calling [`inc_gists`] in a loop for O(1) behaviour.
+    ///
+    /// [`inc_gists`]: BackupStats::inc_gists
+    pub fn add_gists(&self, n: u64) {
+        self.inner.gists_backed_up.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Records that `n` issues were fetched for a repository.
     pub fn add_issues(&self, n: u64) {
         self.inner.issues_fetched.fetch_add(n, Ordering::Relaxed);
@@ -191,12 +200,13 @@ impl fmt::Display for BackupStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "repos: {} backed up, {} skipped, {} errored; \
+            "repos: {}/{} backed up, {} skipped, {} errored; \
              gists: {} backed up; \
              issues: {} fetched; PRs: {} fetched; \
              workflows: {} fetched \
              ({:.1}s elapsed)",
             self.repos_backed_up(),
+            self.repos_discovered(),
             self.repos_skipped(),
             self.repos_errored(),
             self.gists_backed_up(),
@@ -269,14 +279,23 @@ mod tests {
     #[test]
     fn backup_stats_display_shows_all_fields() {
         let s = BackupStats::new();
+        s.add_discovered(5);
         s.inc_backed_up();
         s.inc_skipped();
         s.inc_errored();
         s.inc_gists();
         let display = format!("{s}");
+        assert!(display.contains("1/5"), "should show backed_up/discovered");
         assert!(display.contains("backed up"));
         assert!(display.contains("skipped"));
         assert!(display.contains("errored"));
         assert!(display.contains("elapsed"));
+    }
+
+    #[test]
+    fn backup_stats_add_gists_batch() {
+        let s = BackupStats::new();
+        s.add_gists(7);
+        assert_eq!(s.gists_backed_up(), 7);
     }
 }

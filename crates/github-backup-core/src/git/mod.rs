@@ -171,13 +171,12 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["remote", "update", "--prune"]
             };
-            run_git(update_args, dest, true, opts.token.as_deref())
+            run_git(update_args, dest, opts.token.as_deref())
         } else {
             info!(url = %url, dest = %dest.display(), "cloning bare mirror");
             run_git(
                 &["clone", "--mirror", url, dest_str],
                 Path::new("."),
-                false,
                 opts.token.as_deref(),
             )
         }
@@ -192,13 +191,12 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["fetch", "--all", "--prune"]
             };
-            run_git(fetch_args, dest, true, opts.token.as_deref())
+            run_git(fetch_args, dest, opts.token.as_deref())
         } else {
             info!(url = %url, dest = %dest.display(), "cloning bare");
             run_git(
                 &["clone", "--bare", url, dest_str],
                 Path::new("."),
-                false,
                 opts.token.as_deref(),
             )
         }
@@ -213,13 +211,12 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["fetch", "--all", "--prune"]
             };
-            run_git(fetch_args, dest, true, opts.token.as_deref())
+            run_git(fetch_args, dest, opts.token.as_deref())
         } else {
             info!(url = %url, dest = %dest.display(), "cloning full working tree");
             run_git(
                 &["clone", "--no-local", url, dest_str],
                 Path::new("."),
-                false,
                 opts.token.as_deref(),
             )
         }
@@ -239,7 +236,6 @@ impl GitRunner for ProcessGitRunner {
             run_git(
                 &["fetch", "--depth", &depth_str],
                 dest,
-                true,
                 opts.token.as_deref(),
             )
         } else {
@@ -247,7 +243,6 @@ impl GitRunner for ProcessGitRunner {
             run_git(
                 &["clone", "--mirror", "--depth", &depth_str, url, dest_str],
                 Path::new("."),
-                false,
                 opts.token.as_deref(),
             )
         }
@@ -257,18 +252,12 @@ impl GitRunner for ProcessGitRunner {
         let dest_str = path_to_str(dest)?;
         if dest.exists() {
             info!(dest = %dest.display(), "LFS repository exists, updating");
-            run_git(
-                &["lfs", "fetch", "--all"],
-                dest,
-                true,
-                opts.token.as_deref(),
-            )
+            run_git(&["lfs", "fetch", "--all"], dest, opts.token.as_deref())
         } else {
             info!(url = %url, dest = %dest.display(), "cloning with LFS");
             run_git(
                 &["lfs", "clone", url, dest_str],
                 Path::new("."),
-                false,
                 opts.token.as_deref(),
             )
         }
@@ -288,7 +277,6 @@ impl GitRunner for ProcessGitRunner {
         run_git(
             &["push", "--mirror", remote_url],
             src,
-            true,
             opts.token.as_deref(),
         )
     }
@@ -309,12 +297,11 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
 /// If `token` is `Some`, `GIT_TERMINAL_PROMPT` is disabled and `GIT_ASKPASS`
 /// is set to a small inline script that echoes the token.  This keeps the
 /// credential out of the command line and the process list.
-fn run_git(args: &[&str], cwd: &Path, in_cwd: bool, token: Option<&str>) -> Result<(), CoreError> {
-    let cwd_for_cmd = if in_cwd { cwd } else { Path::new(".") };
-    debug!(args = ?args, cwd = %cwd_for_cmd.display(), "running git");
+fn run_git(args: &[&str], cwd: &Path, token: Option<&str>) -> Result<(), CoreError> {
+    debug!(args = ?args, cwd = %cwd.display(), "running git");
 
     let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(cwd_for_cmd);
+    cmd.args(args).current_dir(cwd);
 
     // Inject token via GIT_ASKPASS to avoid embedding it in the URL or
     // having it appear in process listings.  The guard is kept alive until

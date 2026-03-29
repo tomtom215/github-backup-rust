@@ -137,6 +137,11 @@ pub struct ConfigFile {
 
     /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
     pub since: Option<String>,
+
+    /// Override the hostname used in git clone URLs.
+    ///
+    /// Useful for GHES deployments where the API host and git clone host differ.
+    pub clone_host: Option<String>,
 }
 
 impl ConfigFile {

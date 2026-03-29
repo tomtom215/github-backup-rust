@@ -54,7 +54,7 @@ docker run --rm \
 | **S3 sync** | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
 | **Git mirroring** | Push to Gitea, Codeberg, Forgejo |
 | **Auth** | PAT or OAuth device flow |
-| **GitHub Enterprise** | `--api-url` for GHES instances |
+| **GitHub Enterprise** | `--api-url` + `--clone-host` for GHES instances |
 | **Config file** | TOML config with CLI override |
 | **Concurrency** | Configurable parallel backup |
 | **Dry-run** | Preview without writing |
@@ -92,10 +92,16 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 ## Common Examples
 
 ```bash
-# GitHub Enterprise Server
+# GitHub Enterprise Server (standard)
 github-backup myorg --token $GITHUB_TOKEN \
   --api-url https://github.example.com/api/v3 \
   --output /backup --org --all
+
+# GitHub Enterprise Server (split API / clone hostnames)
+github-backup myorg --token $GITHUB_TOKEN \
+  --api-url https://github-api.example.com/api/v3 \
+  --clone-host github-git.example.com \
+  --output /backup --org --repositories
 ```
 
 

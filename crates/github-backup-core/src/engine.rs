@@ -147,9 +147,7 @@ where
             &clone_opts,
         )
         .await?;
-        for _ in 0..gist_count {
-            stats.inc_gists();
-        }
+        stats.add_gists(gist_count);
 
         // ── Repositories ───────────────────────────────────────────────────
         let repos = self.fetch_repos(owner).await?;

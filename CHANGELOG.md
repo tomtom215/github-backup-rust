@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — 0.3.0
+## [0.3.0] — 2026-03-29
+
+### Added (this session)
+
+- **`--clone-host <HOST>`** (`GITHUB_CLONE_HOST` env var / `clone_host` in config): overrides the
+  hostname in every git clone URL returned by the API.  Intended for GitHub Enterprise Server
+  deployments where the API endpoint and the git clone endpoint are on separate hosts (e.g.
+  behind different load balancers).  Applied consistently to repository clones, wiki clones, and
+  gist clones.  Includes unit tests for HTTPS, `git@host:path`, and `ssh://` URL forms.
+
+- **`--concurrency` now truly optional**: changed `Args::concurrency` from `usize` (with
+  `default_value = "4"`) to `Option<usize>`.  Previously, a config file value of `concurrency = 8`
+  was silently ignored when the user ran `--concurrency 4` explicitly, because the code couldn't
+  distinguish "user passed 4" from "still at default".  Now the default is applied at
+  `into_backup_options()` time so CLI always wins over the config file, regardless of the value.
+
+- **`BackupStats::add_gists(n)`**: O(1) batch increment replacing the previous `for _ in 0..n`
+  loop in the engine.
+
+- **`repos_discovered` in `BackupStats::Display`**: the summary line now shows
+  `N/M backed up` (backed-up / discovered) so users can immediately see if any repositories were
+  skipped or errored without reading individual log lines.
+
+### Fixed
+
+- **Dead code removed**: `FsStorage::write_bytes_owned` and the unused `use bytes::Bytes` import
+  in `storage.rs` have been deleted.  The method was never called outside the module.
+
+- **`run_git` signature simplified**: removed the confusing `in_cwd: bool` parameter.  All callers
+  now pass the actual working directory directly (`dest` when updating an existing repo, `.` when
+  running a fresh clone command).
 
 ### Internal — Refactoring & Tech Debt
 
@@ -190,6 +220,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo-audit`, `cargo-deny`.
 - Dependency policy in `deny.toml`: no OpenSSL, no reqwest, no native-tls.
 
-[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tomtom215/github-backup-rust/releases/tag/v0.1.0

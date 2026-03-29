@@ -164,6 +164,20 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 | `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
 | `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
 | `since` | string | — | ISO 8601 timestamp: only fetch issues/PRs updated after this |
+| `clone_host` | string | *(from API)* | Override git clone hostname (GHES split-hostname deployments) |
+
+## GitHub Enterprise Server Config
+
+```toml
+owner    = "my-org"
+org      = true
+token    = "ghp_enterprise_token"
+output   = "/var/backup/github-enterprise"
+api_url  = "https://github.example.com/api/v3"
+# Needed only when API host and clone host differ (separate load balancers)
+# clone_host = "github-git.example.com"
+all      = true
+```
 
 ## Incremental Backup Config
 

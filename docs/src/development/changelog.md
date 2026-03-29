@@ -4,7 +4,28 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
-## [0.3.0] — Unreleased
+## [0.3.0] — 2026-03-29
+
+### Added (this release)
+
+- **`--clone-host <HOST>`** (`GITHUB_CLONE_HOST` env / `clone_host` config key): overrides the
+  hostname in every git clone URL returned by the API.  Required for GHES deployments where the
+  API endpoint and the git clone endpoint are on separate hosts.  Applied to repository clones,
+  wiki clones, and gist clones.
+
+- **`--concurrency` truly optional**: `concurrency` in the config file is now honoured correctly
+  when `--concurrency` is not explicitly passed on the CLI (previously, any config value was
+  silently ignored when the default of 4 matched).
+
+- **`BackupStats::add_gists(n)`**: O(1) batch increment; internal engine uses it instead of a loop.
+
+- **`repos_discovered` in progress display**: `BackupStats::Display` now shows
+  `backed_up/discovered` so operators can immediately see the ratio.
+
+### Fixed
+
+- Removed unused `FsStorage::write_bytes_owned` dead code and `use bytes::Bytes` import.
+- Simplified `run_git` internal helper by removing the confusing `in_cwd: bool` parameter.
 
 ### Internal — Refactoring & Tech Debt
 
