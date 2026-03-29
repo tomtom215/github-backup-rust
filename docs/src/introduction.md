@@ -11,13 +11,21 @@
 | **Release backup** | Metadata + optional binary asset download |
 | **Gist backup** | Owned and starred gists |
 | **Wiki backup** | Repository wiki clones |
-| **User/org data** | Starred repos, watched repos, followers, following |
+| **Topics & branches** | Repository tags and branch list with protection status |
+| **Deploy keys & collaborators** | Per-repository key and permission metadata |
+| **GitHub Actions** | Workflow metadata + optional run history (`--actions`, `--action-runs`) |
+| **Environments** | Deployment environments with protection rules (`--environments`) |
+| **User/org data** | Starred, watched, followers, following, org members & teams |
+| **Repo filters** | `--include-repos` / `--exclude-repos` glob patterns |
+| **Incremental** | `--since` to limit issues/PR fetching by date |
 | **S3 sync** | AWS S3, Backblaze B2, MinIO, Cloudflare R2, Wasabi |
 | **Git mirroring** | Push to Gitea, Codeberg, Forgejo |
 | **Authentication** | Personal access token or OAuth device flow |
+| **GitHub Enterprise** | `--api-url` + `--clone-host` for GHES instances |
 | **Config file** | TOML config file with CLI override |
 | **Concurrency** | Configurable parallel repository backup |
 | **Dry-run mode** | Preview what would be backed up |
+| **JSON report** | Machine-readable summary with counters & timestamps |
 | **Docker** | Multi-stage Alpine image ≈15 MB |
 
 ## Design Principles
@@ -34,6 +42,7 @@
 - [Installation](getting-started/installation.md)
 - [Quick Start](getting-started/quick-start.md)
 - [CLI Reference](configuration/cli-reference.md)
+- [Config File (TOML)](configuration/config-file.md)
 - [Docker](docker.md)
 - [Architecture](development/architecture.md)
 - [GitHub Repository](https://github.com/tomtom215/github-backup-rust)

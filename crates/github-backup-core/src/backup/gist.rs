@@ -11,6 +11,7 @@ use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
 use crate::{
+    backup::repository::rewrite_host,
     error::CoreError,
     git::{CloneOptions, GitRunner},
     storage::Storage,
@@ -56,7 +57,14 @@ pub async fn backup_gists(
             storage.write_json(&meta_path, gist)?;
 
             let dest = gists_git_dir.join(format!("{}.git", gist.id));
-            git.mirror_clone(&gist.git_pull_url, &dest, clone_opts)?;
+            let rewritten;
+            let gist_url: &str = if let Some(ref host) = opts.clone_host {
+                rewritten = rewrite_host(&gist.git_pull_url, host);
+                &rewritten
+            } else {
+                &gist.git_pull_url
+            };
+            git.mirror_clone(gist_url, &dest, clone_opts)?;
             count += 1;
         }
         storage.write_json(&gists_meta_dir.join("index.json"), &gists)?;

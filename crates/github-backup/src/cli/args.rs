@@ -413,6 +413,25 @@ pub struct Args {
     )]
     pub api_url: Option<String>,
 
+    /// Override the hostname used in git clone URLs.
+    ///
+    /// For GitHub Enterprise Server instances where the API host and the git
+    /// clone host differ (e.g. behind separate load balancers).  The hostname
+    /// in every `clone_url` / `ssh_url` returned by the API is replaced with
+    /// this value before it is passed to git.
+    ///
+    /// Example: `--api-url https://github-api.example.com/api/v3
+    ///            --clone-host github-git.example.com`
+    ///
+    /// Can also be set via the `GITHUB_CLONE_HOST` environment variable.
+    #[arg(
+        long,
+        value_name = "HOST",
+        env = "GITHUB_CLONE_HOST",
+        hide_env_values = false
+    )]
+    pub clone_host: Option<String>,
+
     // ── Push-mirror options ────────────────────────────────────────────────
     /// Push repository mirrors to a Gitea-compatible instance after backup.
     ///
@@ -450,22 +469,14 @@ pub struct Args {
     pub s3_bucket: Option<String>,
 
     /// AWS region for the S3 bucket (e.g., `us-east-1`).
-    #[arg(
-        long,
-        value_name = "REGION",
-        default_value = "us-east-1",
-        requires = "s3_bucket"
-    )]
-    pub s3_region: String,
+    ///
+    /// Defaults to `us-east-1` when not specified.
+    #[arg(long, value_name = "REGION", requires = "s3_bucket")]
+    pub s3_region: Option<String>,
 
     /// Key prefix for all S3 objects (e.g., `github-backup/`).
-    #[arg(
-        long,
-        value_name = "PREFIX",
-        default_value = "",
-        requires = "s3_bucket"
-    )]
-    pub s3_prefix: String,
+    #[arg(long, value_name = "PREFIX", requires = "s3_bucket")]
+    pub s3_prefix: Option<String>,
 
     /// Custom S3-compatible endpoint (for B2, MinIO, R2, etc.).
     ///
@@ -508,8 +519,12 @@ pub struct Args {
     /// Maximum number of repositories to back up in parallel.
     ///
     /// Defaults to 4. Set to 1 for sequential operation.
-    #[arg(long, value_name = "N", default_value = "4")]
-    pub concurrency: usize,
+    ///
+    /// This explicit `Option` form lets the config file supply the value when
+    /// the CLI flag is absent, while still allowing `--concurrency 4` to
+    /// override the config file's value correctly.
+    #[arg(long, value_name = "N")]
+    pub concurrency: Option<usize>,
 
     /// Log what would be done without writing any files or running git.
     #[arg(long)]

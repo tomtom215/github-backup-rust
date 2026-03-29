@@ -7,7 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — 0.3.0
+## [Unreleased] — 0.3.1
+
+### Added
+
+- **Config file now covers S3 and mirror settings**: `s3_bucket`, `s3_region`, `s3_prefix`,
+  `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_include_assets`, `mirror_to`,
+  `mirror_token`, `mirror_owner`, and `mirror_private` are all new TOML config file keys.
+  Previously, S3 sync and mirror pushes could only be configured via CLI flags, making
+  scheduled/automated backups cumbersome.  All values are overridable from the command line.
+
+- **Config file now covers clone behaviour**: `prefer_ssh`, `clone_type`, `lfs`, `no_prune`,
+  and `report` are new config file keys, eliminating the need to re-specify them on every run.
+
+- **`org` config key now applied**: the `org = true` key in the config file was silently
+  ignored due to a missing merge step.  Fixed — `org` from the config file is now correctly
+  applied when the CLI flag is absent.
+
+- **`s3_region` / `s3_prefix` are now truly optional** in `Args`: changed from `String`
+  with hard-coded `default_value` to `Option<String>`, consistent with `concurrency`.  The
+  defaults (`us-east-1` and `""`) are applied at `build_s3_config` time, enabling the config
+  file to supply these values when the flags are absent.
+
+- **5 new `merge_config` tests**: covering `org`, `prefer_ssh` / `no_prune`, mirror fields,
+  S3 fields, and CLI-wins-over-config for S3 bucket/region.
+
+### Fixed
+
+- **`org` merge bug**: `merge_config` now applies `cfg.org` when the CLI `--org` flag was
+  not passed.
+
+### Internal — Refactoring & Tech Debt
+
+- **`repository.rs` split**: inline test module (390 lines) extracted to
+  `repository_tests.rs` via `#[path]` attribute; `repository.rs` trimmed from 562 → 175 lines.
+
+---
+
+## [0.3.0] — 2026-03-29
+
+### Added (this session)
+
+- **`--clone-host <HOST>`** (`GITHUB_CLONE_HOST` env var / `clone_host` in config): overrides the
+  hostname in every git clone URL returned by the API.  Intended for GitHub Enterprise Server
+  deployments where the API endpoint and the git clone endpoint are on separate hosts (e.g.
+  behind different load balancers).  Applied consistently to repository clones, wiki clones, and
+  gist clones.  Includes unit tests for HTTPS, `git@host:path`, and `ssh://` URL forms.
+
+- **`--concurrency` now truly optional**: changed `Args::concurrency` from `usize` (with
+  `default_value = "4"`) to `Option<usize>`.  Previously, a config file value of `concurrency = 8`
+  was silently ignored when the user ran `--concurrency 4` explicitly, because the code couldn't
+  distinguish "user passed 4" from "still at default".  Now the default is applied at
+  `into_backup_options()` time so CLI always wins over the config file, regardless of the value.
+
+- **`BackupStats::add_gists(n)`**: O(1) batch increment replacing the previous `for _ in 0..n`
+  loop in the engine.
+
+- **`repos_discovered` in `BackupStats::Display`**: the summary line now shows
+  `N/M backed up` (backed-up / discovered) so users can immediately see if any repositories were
+  skipped or errored without reading individual log lines.
+
+### Fixed
+
+- **Dead code removed**: `FsStorage::write_bytes_owned` and the unused `use bytes::Bytes` import
+  in `storage.rs` have been deleted.  The method was never called outside the module.
+
+- **`run_git` signature simplified**: removed the confusing `in_cwd: bool` parameter.  All callers
+  now pass the actual working directory directly (`dest` when updating an existing repo, `.` when
+  running a fresh clone command).
 
 ### Internal — Refactoring & Tech Debt
 
@@ -190,6 +257,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo-audit`, `cargo-deny`.
 - Dependency policy in `deny.toml`: no OpenSSL, no reqwest, no native-tls.
 
-[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tomtom215/github-backup-rust/releases/tag/v0.1.0

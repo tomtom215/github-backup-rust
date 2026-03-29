@@ -5,7 +5,6 @@
 
 use std::path::Path;
 
-use bytes::Bytes;
 use serde::Serialize;
 
 use crate::error::CoreError;
@@ -126,14 +125,6 @@ pub(crate) mod test_support {
         fn exists(&self, path: &Path) -> bool {
             self.inner.lock().unwrap().contains_key(path)
         }
-    }
-}
-
-// Allow Bytes to be used via write_bytes without an extra copy in the engine.
-impl FsStorage {
-    /// Convenience wrapper that accepts [`Bytes`] directly.
-    pub fn write_bytes_owned(&self, path: &Path, data: Bytes) -> Result<(), CoreError> {
-        self.write_bytes(path, &data)
     }
 }
 

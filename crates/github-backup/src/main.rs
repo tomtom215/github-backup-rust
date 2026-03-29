@@ -305,13 +305,18 @@ fn build_mirror_config(args: &Args) -> Option<GiteaConfig> {
 /// is configured.
 fn build_s3_config(args: &Args) -> Option<S3Config> {
     let bucket = args.s3_bucket.clone()?;
+    let region = args
+        .s3_region
+        .clone()
+        .unwrap_or_else(|| "us-east-1".to_string());
+    let prefix = args.s3_prefix.clone().unwrap_or_default();
     let access_key_id = args.s3_access_key.clone().unwrap_or_default();
     let secret_access_key = args.s3_secret_key.clone().unwrap_or_default();
 
     Some(S3Config {
         bucket,
-        region: args.s3_region.clone(),
-        prefix: args.s3_prefix.clone(),
+        region,
+        prefix,
         endpoint: args.s3_endpoint.clone(),
         access_key_id,
         secret_access_key,

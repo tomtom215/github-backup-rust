@@ -30,10 +30,11 @@ impl Args {
                 self.output = Some(p.clone());
             }
         }
-        // Concurrency: apply config only when still at the default value.
-        if self.concurrency == 4 {
+        // Concurrency: CLI takes precedence; config supplies the default when
+        // the flag was not explicitly provided on the command line.
+        if self.concurrency.is_none() {
             if let Some(c) = cfg.concurrency {
-                self.concurrency = c;
+                self.concurrency = Some(c);
             }
         }
         // api_url: CLI / env takes precedence.
@@ -42,6 +43,85 @@ impl Args {
                 self.api_url = Some(u.clone());
             }
         }
+        // clone_host: CLI / env takes precedence.
+        if self.clone_host.is_none() {
+            if let Some(ref h) = cfg.clone_host {
+                self.clone_host = Some(h.clone());
+            }
+        }
+        // org: config activates it; CLI `--org` also activates it.
+        self.org |= cfg.org.unwrap_or(false);
+        // Clone behaviour flags.
+        self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
+        self.lfs |= cfg.lfs.unwrap_or(false);
+        self.no_prune |= cfg.no_prune.unwrap_or(false);
+        // Clone type: config supplies default only when CLI left it at Mirror.
+        if self.clone_type == crate::cli::clone_type::CliCloneType::Mirror {
+            if let Some(ref ct) = cfg.clone_type {
+                use github_backup_types::config::CloneType;
+                self.clone_type = match ct {
+                    CloneType::Mirror => crate::cli::clone_type::CliCloneType::Mirror,
+                    CloneType::Bare => crate::cli::clone_type::CliCloneType::Bare,
+                    CloneType::Full => crate::cli::clone_type::CliCloneType::Full,
+                    CloneType::Shallow(d) => crate::cli::clone_type::CliCloneType::Shallow(*d),
+                };
+            }
+        }
+        // Report path: CLI takes precedence.
+        if self.report.is_none() {
+            if let Some(ref p) = cfg.report {
+                self.report = Some(p.clone());
+            }
+        }
+        // Mirror destination: CLI takes precedence.
+        if self.mirror_to.is_none() {
+            if let Some(ref u) = cfg.mirror_to {
+                self.mirror_to = Some(u.clone());
+            }
+        }
+        if self.mirror_token.is_none() {
+            if let Some(ref t) = cfg.mirror_token {
+                self.mirror_token = Some(t.clone());
+            }
+        }
+        if self.mirror_owner.is_none() {
+            if let Some(ref o) = cfg.mirror_owner {
+                self.mirror_owner = Some(o.clone());
+            }
+        }
+        self.mirror_private |= cfg.mirror_private.unwrap_or(false);
+        // S3 storage: CLI takes precedence.
+        if self.s3_bucket.is_none() {
+            if let Some(ref b) = cfg.s3_bucket {
+                self.s3_bucket = Some(b.clone());
+            }
+        }
+        if self.s3_region.is_none() {
+            if let Some(ref r) = cfg.s3_region {
+                self.s3_region = Some(r.clone());
+            }
+        }
+        if self.s3_prefix.is_none() {
+            if let Some(ref p) = cfg.s3_prefix {
+                self.s3_prefix = Some(p.clone());
+            }
+        }
+        if self.s3_endpoint.is_none() {
+            if let Some(ref e) = cfg.s3_endpoint {
+                self.s3_endpoint = Some(e.clone());
+            }
+        }
+        if self.s3_access_key.is_none() {
+            if let Some(ref k) = cfg.s3_access_key {
+                self.s3_access_key = Some(k.clone());
+            }
+        }
+        if self.s3_secret_key.is_none() {
+            if let Some(ref s) = cfg.s3_secret_key {
+                self.s3_secret_key = Some(s.clone());
+            }
+        }
+        self.s3_include_assets |= cfg.s3_include_assets.unwrap_or(false);
         // Boolean categories: config activates them, CLI can also activate.
         self.repositories |= cfg.repositories.unwrap_or(false);
         self.issues |= cfg.issues.unwrap_or(false);
@@ -121,6 +201,7 @@ impl Args {
         };
 
         let clone_type = self.clone_type.into_clone_type();
+        let concurrency = self.concurrency.unwrap_or(4);
 
         if self.all {
             return (
@@ -133,10 +214,11 @@ impl Args {
                     lfs: self.lfs,
                     no_prune: self.no_prune,
                     dry_run: self.dry_run,
-                    concurrency: self.concurrency,
+                    concurrency,
                     include_repos: self.include_repos,
                     exclude_repos: self.exclude_repos,
                     since: self.since,
+                    clone_host: self.clone_host,
                     ..BackupOptions::all()
                 },
             );
@@ -187,8 +269,9 @@ impl Args {
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,
+                clone_host: self.clone_host,
                 dry_run: self.dry_run,
-                concurrency: self.concurrency,
+                concurrency,
             },
         )
     }

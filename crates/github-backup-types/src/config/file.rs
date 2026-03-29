@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::CloneType;
+
 /// TOML configuration file schema.
 ///
 /// Load from disk with [`ConfigFile::from_toml_str`] or
@@ -137,6 +139,75 @@ pub struct ConfigFile {
 
     /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
     pub since: Option<String>,
+
+    /// Override the hostname used in git clone URLs.
+    ///
+    /// Useful for GHES deployments where the API host and git clone host differ.
+    pub clone_host: Option<String>,
+
+    // ── Clone behaviour ────────────────────────────────────────────────────
+    /// Clone using SSH URLs instead of HTTPS.
+    pub prefer_ssh: Option<bool>,
+
+    /// How to clone repositories (`mirror`, `bare`, `full`, `shallow:<depth>`).
+    ///
+    /// Defaults to `mirror` when absent.
+    pub clone_type: Option<CloneType>,
+
+    /// Enable Git LFS when cloning.
+    pub lfs: Option<bool>,
+
+    /// Do not prune deleted remote refs during git remote updates.
+    pub no_prune: Option<bool>,
+
+    // ── Report ────────────────────────────────────────────────────────────
+    /// Write a JSON summary report to this file after the backup completes.
+    pub report: Option<PathBuf>,
+
+    // ── Mirror destination ─────────────────────────────────────────────────
+    /// Push repository mirrors to this Gitea-compatible base URL after backup.
+    ///
+    /// Supported hosts: Gitea, Codeberg, Forgejo.
+    pub mirror_to: Option<String>,
+
+    /// API token for the mirror destination.
+    ///
+    /// Prefer the `MIRROR_TOKEN` environment variable over storing tokens here.
+    pub mirror_token: Option<String>,
+
+    /// Owner name at the mirror destination (username or org).
+    pub mirror_owner: Option<String>,
+
+    /// Create repositories as private at the mirror destination.
+    pub mirror_private: Option<bool>,
+
+    // ── S3 storage ─────────────────────────────────────────────────────────
+    /// S3 bucket to sync backup metadata to.
+    ///
+    /// Works with AWS S3, Backblaze B2, MinIO, Cloudflare R2, Spaces, Wasabi.
+    pub s3_bucket: Option<String>,
+
+    /// AWS region for the S3 bucket (default: `us-east-1`).
+    pub s3_region: Option<String>,
+
+    /// Key prefix for all S3 objects (default: empty).
+    pub s3_prefix: Option<String>,
+
+    /// Custom S3-compatible endpoint URL (for B2, MinIO, R2, etc.).
+    pub s3_endpoint: Option<String>,
+
+    /// AWS access key ID.
+    ///
+    /// Prefer the `AWS_ACCESS_KEY_ID` environment variable over storing here.
+    pub s3_access_key: Option<String>,
+
+    /// AWS secret access key.
+    ///
+    /// Prefer the `AWS_SECRET_ACCESS_KEY` environment variable over storing here.
+    pub s3_secret_key: Option<String>,
+
+    /// Also upload binary release assets to S3 (can be very large).
+    pub s3_include_assets: Option<bool>,
 }
 
 impl ConfigFile {

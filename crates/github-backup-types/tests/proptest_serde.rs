@@ -656,6 +656,7 @@ proptest! {
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
+            clone_host: None,
             dry_run, concurrency,
         };
         let json = serde_json::to_string(&opts).expect("serialise");

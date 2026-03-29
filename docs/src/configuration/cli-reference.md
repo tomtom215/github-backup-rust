@@ -30,6 +30,7 @@ github-backup --completions <SHELL>
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `--api-url <URL>` | `GITHUB_API_URL` | `https://api.github.com` | Override the GitHub API base URL for GitHub Enterprise Server |
+| `--clone-host <HOST>` | `GITHUB_CLONE_HOST` | *(from API)* | Override the hostname used in git clone URLs |
 
 For GHES instances the API is typically at `https://github.example.com/api/v3`.
 
@@ -39,6 +40,13 @@ github-backup myorg \
   --token $GITHUB_TOKEN \
   --api-url https://github.example.com/api/v3 \
   --output /backup --org --all
+
+# Split API / clone hostnames (separate load balancers)
+github-backup myorg \
+  --token $GITHUB_TOKEN \
+  --api-url https://github-api.example.com/api/v3 \
+  --clone-host github-git.example.com \
+  --output /backup --org --repositories
 ```
 
 ## Configuration
@@ -198,7 +206,7 @@ github-backup octocat --token $TOKEN --output /backup \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--concurrency <N>` | `4` | Max repositories backed up in parallel |
+| `--concurrency <N>` | `4` | Max repositories backed up in parallel (config file can set this; CLI always wins) |
 | `--dry-run` | `false` | Log actions without writing files or running git |
 
 ## Logging
