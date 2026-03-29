@@ -70,20 +70,20 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Validate that an auth method was supplied.
-    if args.token.is_none() && !args.device_auth {
-        error!("no authentication method; use --token / GITHUB_TOKEN, --device-auth, or set 'token' in the config file");
-        return ExitCode::FAILURE;
-    }
-
-    // Obtain GitHub credential (PAT or OAuth device flow).
-    let token = match obtain_token(&args).await {
-        Ok(t) => t,
+    // Obtain GitHub credential — token, device flow, or anonymous.
+    let credential = match obtain_credential(&args).await {
+        Ok(c) => c,
         Err(e) => {
             error!("authentication failed: {e}");
             return ExitCode::FAILURE;
         }
     };
+
+    if matches!(credential, Credential::Anonymous) {
+        warn!(
+            "no token provided — running unauthenticated (public data only, 60 req/h rate limit)"
+        );
+    }
 
     // Capture values needed after `args` is (partially) consumed.
     let report_path = args.report.clone();
@@ -95,7 +95,7 @@ async fn main() -> ExitCode {
 
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
-    let cred = Credential::Token(token);
+    let cred = credential;
 
     // Construct the GitHub client (with optional GHE base URL).
     let client = match api_url.as_deref() {
@@ -174,10 +174,13 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Obtains a GitHub access token, either from the CLI arg or via OAuth.
-async fn obtain_token(args: &Args) -> Result<String, String> {
+/// Resolves the GitHub credential from CLI args.
+///
+/// Returns a [`Credential::Token`] (PAT or OAuth), or
+/// [`Credential::Anonymous`] when no auth method is provided.
+async fn obtain_credential(args: &Args) -> Result<Credential, String> {
     if let Some(token) = &args.token {
-        return Ok(token.clone());
+        return Ok(Credential::Token(token.clone()));
     }
 
     if args.device_auth {
@@ -203,10 +206,10 @@ async fn obtain_token(args: &Args) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-        return Ok(token);
+        return Ok(Credential::Token(token));
     }
 
-    Err("no authentication method provided".to_string())
+    Ok(Credential::Anonymous)
 }
 
 /// Writes a JSON summary report to `path`.

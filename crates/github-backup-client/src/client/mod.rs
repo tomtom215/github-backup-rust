@@ -110,7 +110,7 @@ impl GitHubClient {
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
-    /// or `None` for other credential types.
+    /// or `None` for anonymous / other credential types.
     ///
     /// Used by the backup engine to inject the token into git clone commands
     /// for HTTPS authentication on private repositories.
@@ -118,6 +118,7 @@ impl GitHubClient {
     pub fn token(&self) -> Option<String> {
         match &self.credential {
             Credential::Token(t) => Some(t.clone()),
+            Credential::Anonymous => None,
         }
     }
 
@@ -244,16 +245,24 @@ impl GitHubClient {
 
     /// Builds a [`hyper::http::request::Builder`] pre-populated with auth
     /// and user-agent headers.
+    ///
+    /// The `Authorization` header is omitted for [`Credential::Anonymous`]
+    /// so that GitHub's unauthenticated rate-limit bucket applies.
     pub(super) fn build_request(
         &self,
         method: Method,
         url: &str,
     ) -> Result<hyper::http::request::Builder, ClientError> {
-        Ok(Request::builder()
+        let mut builder = Request::builder()
             .method(method)
             .uri(url)
-            .header("Authorization", self.credential.authorization_header())
-            .header("User-Agent", USER_AGENT))
+            .header("User-Agent", USER_AGENT);
+
+        if let Some(auth) = self.credential.authorization_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        Ok(builder)
     }
 }
 
