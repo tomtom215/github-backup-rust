@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 0.3.0
 
+### Internal — Refactoring & Tech Debt
+
+- **Module extraction**: all inline metadata backup blocks in `engine.rs`
+  (`labels`, `milestones`, `hooks`, `security_advisories`, `topics`, `branches`)
+  extracted into dedicated modules under `backup/` — each with unit tests.
+  All 18 source files in `backup/` now follow a single consistent pattern.
+- **`endpoints/` directory**: `client/endpoints.rs` (649 lines) split into eight
+  focused submodules (`actions`, `issues`, `keys`, `org`, `pulls`, `repo_meta`,
+  `repos`, `social`).
+- **`api_client/` directory**: `api_client.rs` (546 lines) split into `mod.rs`
+  (trait definition) + `impl_github.rs` (blanket `impl BackupClient for GitHubClient`).
+- **`config/` directory**: `config.rs` (566 lines) split into `credential`,
+  `output`, `clone_type`, `options`, and `file` submodules with a separate
+  `tests` module.
+- **`report.rs`**: `write_report`, `unix_to_iso8601`, and `is_valid_iso8601`
+  extracted from `main.rs` into a dedicated module with 13 unit tests; fixed
+  wrong Unix timestamp in `known_timestamp_formats_correctly`.
+- **Test extraction**: `starred_repos.rs` tests moved to `starred_repos_tests.rs`
+  via `#[path]` attribute; source file trimmed from 564 → 318 lines.
+- **Broken intra-doc link** fixed in `api_client/mod.rs`.
+- All 326+ tests pass; zero clippy warnings; rustdoc builds cleanly.
+
 ### Added
 
 - **GitHub Actions workflow backup** (`--actions`, `--action-runs`): new
