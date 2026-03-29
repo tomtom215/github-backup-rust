@@ -155,7 +155,7 @@ fn parse_s3_flags() {
         "SECRET",
     ]);
     assert_eq!(args.s3_bucket.as_deref(), Some("my-bucket"));
-    assert_eq!(args.s3_region, "eu-west-1");
+    assert_eq!(args.s3_region.as_deref(), Some("eu-west-1"));
 }
 
 #[test]
@@ -249,4 +249,94 @@ fn merge_config_enables_categories() {
     args.merge_config(&cfg);
     assert!(args.issues);
     assert!(args.repositories);
+}
+
+#[test]
+fn merge_config_sets_org_from_config() {
+    let mut args = parse(&["github-backup", "myorg", "--token", "t"]);
+    assert!(!args.org);
+
+    let cfg = github_backup_types::config::ConfigFile {
+        org: Some(true),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    assert!(args.org);
+}
+
+#[test]
+fn merge_config_sets_prefer_ssh_and_no_prune() {
+    let mut args = parse(&["github-backup", "octocat", "--token", "t"]);
+    assert!(!args.prefer_ssh);
+    assert!(!args.no_prune);
+
+    let cfg = github_backup_types::config::ConfigFile {
+        prefer_ssh: Some(true),
+        no_prune: Some(true),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    assert!(args.prefer_ssh);
+    assert!(args.no_prune);
+}
+
+#[test]
+fn merge_config_sets_mirror_fields() {
+    let mut args = parse(&["github-backup", "octocat", "--token", "t"]);
+    assert!(args.mirror_to.is_none());
+
+    let cfg = github_backup_types::config::ConfigFile {
+        mirror_to: Some("https://codeberg.org".to_string()),
+        mirror_token: Some("cb_token".to_string()),
+        mirror_owner: Some("alice".to_string()),
+        mirror_private: Some(true),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    assert_eq!(args.mirror_to.as_deref(), Some("https://codeberg.org"));
+    assert_eq!(args.mirror_token.as_deref(), Some("cb_token"));
+    assert_eq!(args.mirror_owner.as_deref(), Some("alice"));
+    assert!(args.mirror_private);
+}
+
+#[test]
+fn merge_config_sets_s3_fields() {
+    let mut args = parse(&["github-backup", "octocat", "--token", "t"]);
+    assert!(args.s3_bucket.is_none());
+
+    let cfg = github_backup_types::config::ConfigFile {
+        s3_bucket: Some("my-bucket".to_string()),
+        s3_region: Some("eu-west-1".to_string()),
+        s3_prefix: Some("backups/".to_string()),
+        s3_access_key: Some("AKID".to_string()),
+        s3_secret_key: Some("SECRET".to_string()),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    assert_eq!(args.s3_bucket.as_deref(), Some("my-bucket"));
+    assert_eq!(args.s3_region.as_deref(), Some("eu-west-1"));
+    assert_eq!(args.s3_prefix.as_deref(), Some("backups/"));
+}
+
+#[test]
+fn merge_config_cli_s3_bucket_wins() {
+    let mut args = parse(&[
+        "github-backup",
+        "octocat",
+        "--token",
+        "t",
+        "--s3-bucket",
+        "cli-bucket",
+        "--s3-region",
+        "us-west-2",
+    ]);
+    let cfg = github_backup_types::config::ConfigFile {
+        s3_bucket: Some("config-bucket".to_string()),
+        s3_region: Some("eu-west-1".to_string()),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    // CLI wins for both bucket and region.
+    assert_eq!(args.s3_bucket.as_deref(), Some("cli-bucket"));
+    assert_eq!(args.s3_region.as_deref(), Some("us-west-2"));
 }

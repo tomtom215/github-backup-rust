@@ -469,22 +469,14 @@ pub struct Args {
     pub s3_bucket: Option<String>,
 
     /// AWS region for the S3 bucket (e.g., `us-east-1`).
-    #[arg(
-        long,
-        value_name = "REGION",
-        default_value = "us-east-1",
-        requires = "s3_bucket"
-    )]
-    pub s3_region: String,
+    ///
+    /// Defaults to `us-east-1` when not specified.
+    #[arg(long, value_name = "REGION", requires = "s3_bucket")]
+    pub s3_region: Option<String>,
 
     /// Key prefix for all S3 objects (e.g., `github-backup/`).
-    #[arg(
-        long,
-        value_name = "PREFIX",
-        default_value = "",
-        requires = "s3_bucket"
-    )]
-    pub s3_prefix: String,
+    #[arg(long, value_name = "PREFIX", requires = "s3_bucket")]
+    pub s3_prefix: Option<String>,
 
     /// Custom S3-compatible endpoint (for B2, MinIO, R2, etc.).
     ///

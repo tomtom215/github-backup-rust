@@ -4,6 +4,32 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
+## [Unreleased] — 0.3.1
+
+### Added
+
+- **S3 and mirror settings in config file**: `s3_bucket`, `s3_region`, `s3_prefix`,
+  `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_include_assets`, `mirror_to`,
+  `mirror_token`, `mirror_owner`, `mirror_private` are now valid TOML config keys.
+  Scheduled backups no longer need to pass all S3/mirror flags on every run.
+
+- **Clone behaviour in config file**: `prefer_ssh`, `clone_type`, `lfs`, `no_prune`,
+  and `report` are new config file keys.
+
+- **`org` config key now honoured**: `org = true` in the config file was silently ignored
+  due to a missing merge step — fixed.
+
+### Fixed
+
+- `Args::s3_region` and `Args::s3_prefix` changed to `Option<String>` so the config file
+  can supply these values when the CLI flags are absent.
+
+### Internal
+
+- `repository.rs` tests split into `repository_tests.rs` (562 → 175 lines).
+
+---
+
 ## [0.3.0] — 2026-03-29
 
 ### Added (this release)

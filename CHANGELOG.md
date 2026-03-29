@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — 0.3.1
+
+### Added
+
+- **Config file now covers S3 and mirror settings**: `s3_bucket`, `s3_region`, `s3_prefix`,
+  `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_include_assets`, `mirror_to`,
+  `mirror_token`, `mirror_owner`, and `mirror_private` are all new TOML config file keys.
+  Previously, S3 sync and mirror pushes could only be configured via CLI flags, making
+  scheduled/automated backups cumbersome.  All values are overridable from the command line.
+
+- **Config file now covers clone behaviour**: `prefer_ssh`, `clone_type`, `lfs`, `no_prune`,
+  and `report` are new config file keys, eliminating the need to re-specify them on every run.
+
+- **`org` config key now applied**: the `org = true` key in the config file was silently
+  ignored due to a missing merge step.  Fixed — `org` from the config file is now correctly
+  applied when the CLI flag is absent.
+
+- **`s3_region` / `s3_prefix` are now truly optional** in `Args`: changed from `String`
+  with hard-coded `default_value` to `Option<String>`, consistent with `concurrency`.  The
+  defaults (`us-east-1` and `""`) are applied at `build_s3_config` time, enabling the config
+  file to supply these values when the flags are absent.
+
+- **5 new `merge_config` tests**: covering `org`, `prefer_ssh` / `no_prune`, mirror fields,
+  S3 fields, and CLI-wins-over-config for S3 bucket/region.
+
+### Fixed
+
+- **`org` merge bug**: `merge_config` now applies `cfg.org` when the CLI `--org` flag was
+  not passed.
+
+### Internal — Refactoring & Tech Debt
+
+- **`repository.rs` split**: inline test module (390 lines) extracted to
+  `repository_tests.rs` via `#[path]` attribute; `repository.rs` trimmed from 562 → 175 lines.
+
+---
+
 ## [0.3.0] — 2026-03-29
 
 ### Added (this session)
