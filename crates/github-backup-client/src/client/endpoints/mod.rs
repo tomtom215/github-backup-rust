@@ -17,6 +17,7 @@
 //! | [`actions`]   | workflows, workflow runs, deployment environments    |
 
 mod actions;
+mod community;
 mod issues;
 mod keys;
 mod org;

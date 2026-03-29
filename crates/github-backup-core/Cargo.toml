@@ -19,6 +19,7 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

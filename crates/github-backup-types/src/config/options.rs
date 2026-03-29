@@ -159,6 +159,30 @@ pub struct BackupOptions {
     /// to each repository's metadata directory.
     pub environments: bool,
 
+    // ── GitHub Discussions ────────────────────────────────────────────────
+    /// Backup GitHub Discussions threads and their comments.
+    ///
+    /// Requires the Discussions feature to be enabled on the repository.
+    /// Saves `discussions.json` and per-discussion `discussion_comments_<n>.json`
+    /// to each repository's metadata directory.
+    pub discussions: bool,
+
+    // ── Classic Projects ──────────────────────────────────────────────────
+    /// Backup Classic Projects (v1) and their column structure.
+    ///
+    /// Requires Classic Projects to be enabled on the repository.
+    /// Saves `projects.json` and per-project `project_columns_<id>.json`
+    /// to each repository's metadata directory.
+    pub projects: bool,
+
+    // ── GitHub Packages ───────────────────────────────────────────────────
+    /// Backup GitHub Packages metadata for the target user.
+    ///
+    /// Requires the `read:packages` OAuth scope.  Iterates over all supported
+    /// package ecosystems (container, npm, maven, etc.) and saves
+    /// `packages_<type>.json` and version files to the owner's JSON directory.
+    pub packages: bool,
+
     // ── Repository name filters ───────────────────────────────────────────
     /// Only back up repositories whose names match at least one of these glob
     /// patterns.  An empty list means *all* repositories are included.
@@ -264,6 +288,9 @@ impl BackupOptions {
             actions: true,
             action_runs: false, // opt-in only; can generate very large files
             environments: true,
+            discussions: true,
+            projects: true,
+            packages: true,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,

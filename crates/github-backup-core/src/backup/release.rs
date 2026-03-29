@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{error::CoreError, manifest::sha256_hex, storage::Storage};
 
 /// Backs up all releases for a repository, optionally downloading binary assets.
 ///
@@ -65,7 +65,34 @@ pub async fn backup_releases(
 
             info!(asset = %asset.name, size = asset.size, "downloading release asset");
             let data = client.download_release_asset(&asset.url).await?;
+
+            // Verify the download is non-empty before persisting.
+            if data.is_empty() {
+                warn!(
+                    asset = %asset.name,
+                    "downloaded asset is empty; skipping"
+                );
+                continue;
+            }
+
             storage.write_bytes(&asset_path, &data)?;
+
+            // Write a SHA-256 sidecar so the download can be verified later
+            // without re-downloading.
+            let digest = sha256_hex(&data);
+            let sha_path = asset_path.with_extension(format!(
+                "{}.sha256",
+                asset_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("bin")
+            ));
+            storage.write_bytes(&sha_path, format!("{digest}  {}\n", asset.name).as_bytes())?;
+            info!(
+                asset = %asset.name,
+                sha256 = %&digest[..16],
+                "asset downloaded and checksum recorded"
+            );
         }
     }
 

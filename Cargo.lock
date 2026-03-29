@@ -480,6 +480,7 @@ dependencies = [
  "github-backup-types",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -539,6 +540,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 

@@ -33,9 +33,10 @@ use std::pin::Pin;
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
-    Label, Milestone, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
-    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
+    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
+    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
+    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -292,4 +293,61 @@ pub trait BackupClient: Send + Sync {
         owner: &'a str,
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>>;
+
+    // ── Discussions ───────────────────────────────────────────────────────
+
+    /// Lists discussions for a repository.
+    ///
+    /// GitHub Discussions are only available for repositories that have the
+    /// feature enabled.  Callers should handle 404 gracefully.
+    fn list_discussions<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Discussion>, ClientError>>;
+
+    /// Lists comments on a specific discussion.
+    fn list_discussion_comments<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        discussion_number: u64,
+    ) -> BoxFuture<'a, Result<Vec<DiscussionComment>, ClientError>>;
+
+    // ── Classic Projects ──────────────────────────────────────────────────
+
+    /// Lists classic (v1) projects for a repository.
+    ///
+    /// Callers should handle 404 gracefully (project feature may be disabled).
+    fn list_repo_projects<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ClassicProject>, ClientError>>;
+
+    /// Lists columns in a classic project.
+    fn list_project_columns<'a>(
+        &'a self,
+        project_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<ProjectColumn>, ClientError>>;
+
+    // ── GitHub Packages ───────────────────────────────────────────────────
+
+    /// Lists packages published by a user.
+    ///
+    /// Requires the `read:packages` scope.  Callers should handle 403/404
+    /// gracefully.
+    fn list_user_packages<'a>(
+        &'a self,
+        username: &'a str,
+        package_type: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Package>, ClientError>>;
+
+    /// Lists versions of a specific package.
+    fn list_package_versions<'a>(
+        &'a self,
+        username: &'a str,
+        package_type: &'a str,
+        package_name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<PackageVersion>, ClientError>>;
 }

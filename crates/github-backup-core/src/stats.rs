@@ -39,6 +39,8 @@ struct StatsInner {
     prs_fetched: AtomicU64,
     /// Total GitHub Actions workflows fetched across all repositories.
     workflows_fetched: AtomicU64,
+    /// Total GitHub Discussions fetched across all repositories.
+    discussions_fetched: AtomicU64,
 }
 
 impl Default for StatsInner {
@@ -53,6 +55,7 @@ impl Default for StatsInner {
             issues_fetched: AtomicU64::new(0),
             prs_fetched: AtomicU64::new(0),
             workflows_fetched: AtomicU64::new(0),
+            discussions_fetched: AtomicU64::new(0),
         }
     }
 }
@@ -133,6 +136,13 @@ impl BackupStats {
     /// Records that `n` Actions workflows were fetched for a repository.
     pub fn add_workflows(&self, n: u64) {
         self.inner.workflows_fetched.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Records that `n` Discussions were fetched for a repository.
+    pub fn add_discussions(&self, n: u64) {
+        self.inner
+            .discussions_fetched
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────

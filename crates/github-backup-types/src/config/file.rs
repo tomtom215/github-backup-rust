@@ -34,6 +34,7 @@ use super::CloneType;
 /// variables in automated environments; restrict config file permissions to
 /// `0600` when a token must be stored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// GitHub username or organisation name to back up.
     pub owner: Option<String>,
@@ -130,6 +131,12 @@ pub struct ConfigFile {
     pub action_runs: Option<bool>,
     /// Back up repository deployment environment configurations.
     pub environments: Option<bool>,
+    /// Back up GitHub Discussions threads and comments.
+    pub discussions: Option<bool>,
+    /// Back up Classic Projects (v1) and their columns.
+    pub projects: Option<bool>,
+    /// Back up GitHub Packages metadata for the target user.
+    pub packages: Option<bool>,
 
     /// Only back up repositories matching these glob patterns (comma-separated
     /// or as a TOML array).

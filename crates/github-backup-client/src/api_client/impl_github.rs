@@ -10,9 +10,10 @@
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
-    Label, Milestone, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
-    Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
+    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
+    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
+    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -271,5 +272,68 @@ impl BackupClient for GitHubClient {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>> {
         Box::pin(GitHubClient::list_environments(self, owner, repo))
+    }
+
+    fn list_discussions<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Discussion>, ClientError>> {
+        Box::pin(GitHubClient::list_discussions(self, owner, repo))
+    }
+
+    fn list_discussion_comments<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        discussion_number: u64,
+    ) -> BoxFuture<'a, Result<Vec<DiscussionComment>, ClientError>> {
+        Box::pin(GitHubClient::list_discussion_comments(
+            self,
+            owner,
+            repo,
+            discussion_number,
+        ))
+    }
+
+    fn list_repo_projects<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ClassicProject>, ClientError>> {
+        Box::pin(GitHubClient::list_repo_projects(self, owner, repo))
+    }
+
+    fn list_project_columns<'a>(
+        &'a self,
+        project_id: u64,
+    ) -> BoxFuture<'a, Result<Vec<ProjectColumn>, ClientError>> {
+        Box::pin(GitHubClient::list_project_columns(self, project_id))
+    }
+
+    fn list_user_packages<'a>(
+        &'a self,
+        username: &'a str,
+        package_type: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Package>, ClientError>> {
+        Box::pin(GitHubClient::list_user_packages(
+            self,
+            username,
+            package_type,
+        ))
+    }
+
+    fn list_package_versions<'a>(
+        &'a self,
+        username: &'a str,
+        package_type: &'a str,
+        package_name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<PackageVersion>, ClientError>> {
+        Box::pin(GitHubClient::list_package_versions(
+            self,
+            username,
+            package_type,
+            package_name,
+        ))
     }
 }

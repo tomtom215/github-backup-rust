@@ -9,15 +9,17 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 use github_backup_client::GitHubClient;
+use github_backup_types::backup_state::BackupCheckpoint;
 use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
 use github_backup_types::Repository;
 
 use crate::{
     backup::{
         actions::backup_actions, branches::backup_branches, collaborators::backup_collaborators,
-        deploy_keys::backup_deploy_keys, environments::backup_environments, gist::backup_gists,
-        hooks::backup_hooks, issue::backup_issues, labels::backup_labels,
-        milestones::backup_milestones, pull_request::backup_pull_requests,
+        deploy_keys::backup_deploy_keys, discussion::backup_discussions,
+        environments::backup_environments, gist::backup_gists, hooks::backup_hooks,
+        issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
+        package::backup_packages, project::backup_projects, pull_request::backup_pull_requests,
         release::backup_releases, repository::backup_repository,
         security_advisories::backup_security_advisories, starred_repos::backup_starred_repos,
         topics::backup_topics, user_data::backup_user_data, wiki::backup_wiki,
@@ -122,6 +124,16 @@ where
         )
         .await?;
 
+        // ── GitHub Packages (user-level) ───────────────────────────────────
+        backup_packages(
+            &self.client,
+            owner,
+            &self.opts,
+            &owner_json_dir,
+            &self.storage,
+        )
+        .await?;
+
         // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();
         backup_starred_repos(
@@ -156,6 +168,14 @@ where
 
         self.backup_repos_concurrent(owner, repos, &stats).await;
 
+        // Delete the checkpoint file — the run completed successfully so there
+        // is nothing to resume.  A failed run leaves the checkpoint in place
+        // so the next invocation can continue from where it stopped.
+        let checkpoint_path = self.output.backup_checkpoint_path(owner);
+        if let Err(e) = BackupCheckpoint::delete(&checkpoint_path) {
+            warn!(error = %e, "failed to delete checkpoint file after successful run");
+        }
+
         info!(owner, %stats, "backup complete");
         Ok(stats)
     }
@@ -169,18 +189,56 @@ where
     }
 
     /// Backs up repositories concurrently, honouring `opts.concurrency`.
+    ///
+    /// Supports **resumption**: loads the checkpoint file (if any) and skips
+    /// repositories already completed in a previous interrupted run.  After
+    /// each repository completes the checkpoint is updated atomically.
     async fn backup_repos_concurrent(
         &self,
         owner: &str,
         repos: Vec<Repository>,
         stats: &BackupStats,
     ) {
+        let total = repos.len();
+        let checkpoint_path = self.output.backup_checkpoint_path(owner);
+
+        // Load any existing checkpoint from an interrupted prior run.
+        let checkpoint = match BackupCheckpoint::load(&checkpoint_path) {
+            Ok(cp) => {
+                let resumed = cp.completed_repos.len();
+                if resumed > 0 {
+                    info!(
+                        owner,
+                        resumed,
+                        total,
+                        "resuming interrupted backup — skipping already-completed repositories"
+                    );
+                }
+                Arc::new(tokio::sync::Mutex::new(cp))
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load checkpoint; starting fresh");
+                Arc::new(tokio::sync::Mutex::new(BackupCheckpoint::default()))
+            }
+        };
+
         let concurrency = self.opts.concurrency.max(1);
         let sem = Arc::new(Semaphore::new(concurrency));
+        let completed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut handles = Vec::with_capacity(repos.len());
 
         for repo in repos {
+            // Skip repositories already completed in a prior interrupted run.
+            {
+                let cp = checkpoint.lock().await;
+                if cp.is_complete(&repo.full_name) {
+                    stats.inc_skipped();
+                    completed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+            }
+
             let permit = Arc::clone(&sem)
                 .acquire_owned()
                 .await
@@ -192,9 +250,12 @@ where
             let git = self.git.clone();
             let output = self.output.clone();
             let opts = self.opts.clone();
-            let owner = owner.to_string();
+            let owner_str = owner.to_string();
             let clone_opts = self.make_clone_opts();
             let task_stats = stats.handle();
+            let cp = Arc::clone(&checkpoint);
+            let cp_path = checkpoint_path.clone();
+            let done_count = Arc::clone(&completed_count);
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
@@ -204,16 +265,35 @@ where
                     &git,
                     &output,
                     &opts,
-                    &owner,
+                    &owner_str,
                     &repo,
                     &clone_opts,
                     &task_stats,
                 )
                 .await;
+
+                let current = done_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                info!(
+                    repo = %repo.full_name,
+                    progress = format!("{current}/{total}"),
+                    "repository processed"
+                );
+
                 match result {
                     Ok(backed_up) => {
                         if backed_up {
                             task_stats.inc_backed_up();
+                            // Mark complete in the checkpoint so a future
+                            // interrupted-run resume can skip this repo.
+                            let mut guard = cp.lock().await;
+                            if let Err(e) = guard.mark_complete_and_save(&repo.full_name, &cp_path)
+                            {
+                                warn!(
+                                    repo = %repo.full_name,
+                                    error = %e,
+                                    "failed to update checkpoint"
+                                );
+                            }
                         } else {
                             task_stats.inc_skipped();
                         }
@@ -335,6 +415,12 @@ where
     stats.add_workflows(actions_count);
 
     backup_environments(client, owner, &repo.name, opts, meta_dir, storage).await?;
+
+    let discussions_count =
+        backup_discussions(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    stats.add_discussions(discussions_count);
+
+    backup_projects(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
     Ok(())
 }

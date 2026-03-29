@@ -157,6 +157,9 @@ impl Args {
         self.actions |= cfg.actions.unwrap_or(false);
         self.action_runs |= cfg.action_runs.unwrap_or(false);
         self.environments |= cfg.environments.unwrap_or(false);
+        self.discussions |= cfg.discussions.unwrap_or(false);
+        self.projects |= cfg.projects.unwrap_or(false);
+        self.packages |= cfg.packages.unwrap_or(false);
         // Repo filter lists: extend (union) rather than replace.
         if let Some(ref patterns) = cfg.include_repos {
             self.include_repos.extend(patterns.iter().cloned());
@@ -266,6 +269,9 @@ impl Args {
                 actions: self.actions,
                 action_runs: self.action_runs,
                 environments: self.environments,
+                discussions: self.discussions,
+                projects: self.projects,
+                packages: self.packages,
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,

@@ -166,8 +166,36 @@ pub struct Args {
     pub org: bool,
 
     // ── Broad selectors ────────────────────────────────────────────────────
-    /// Enable all backup categories (equivalent to every individual flag,
-    /// except `--lfs`, `--prefer-ssh`, `--no-prune`, and `--concurrency`).
+    /// Enable every backup category in a single flag.
+    ///
+    /// Equivalent to combining **all** of the following flags:
+    ///
+    /// Repositories & git:
+    ///   `--repositories` `--forks` `--private` `--wikis`
+    ///
+    /// Issues & pull requests:
+    ///   `--issues` `--issue-comments` `--issue-events`
+    ///   `--pulls` `--pull-comments` `--pull-commits` `--pull-reviews`
+    ///
+    /// Repository metadata:
+    ///   `--labels` `--milestones` `--releases` `--release-assets`
+    ///   `--hooks` `--security-advisories` `--topics` `--branches`
+    ///   `--deploy-keys` `--collaborators`
+    ///
+    /// User / org data:
+    ///   `--starred` `--watched` `--followers` `--following`
+    ///   `--gists` `--starred-gists`
+    ///   `--org-members` `--org-teams`
+    ///
+    /// GitHub Actions & environments:
+    ///   `--actions` `--environments`
+    ///
+    /// **Not included** (opt-in only, can generate very large output):
+    ///   `--action-runs`  — full workflow run history
+    ///   `--clone-starred` — clone every starred repository
+    ///
+    /// **Not controlled by `--all`** (output/behaviour flags):
+    ///   `--lfs` `--prefer-ssh` `--no-prune` `--clone-type` `--concurrency`
     #[arg(long, conflicts_with_all = [
         "repositories", "issues", "issue_comments", "issue_events",
         "pulls", "pull_comments", "pull_commits", "pull_reviews",
@@ -176,7 +204,7 @@ pub struct Args {
         "starred", "watched", "followers", "following",
         "gists", "starred_gists", "topics", "branches",
         "deploy_keys", "collaborators", "org_members", "org_teams",
-        "actions", "environments",
+        "actions", "environments", "discussions", "projects", "packages",
     ])]
     pub all: bool,
 
@@ -372,6 +400,31 @@ pub struct Args {
     #[arg(long)]
     pub environments: bool,
 
+    // ── GitHub Discussions ─────────────────────────────────────────────────
+    /// Back up GitHub Discussions threads and their comments.
+    ///
+    /// Requires the Discussions feature to be enabled on the repository.
+    /// Saves `discussions.json` and per-discussion comment files.
+    #[arg(long)]
+    pub discussions: bool,
+
+    // ── Classic Projects ───────────────────────────────────────────────────
+    /// Back up Classic Projects (v1) and their column structure.
+    ///
+    /// Requires Classic Projects to be enabled on the repository.
+    /// Saves `projects.json` and per-project column files.
+    #[arg(long)]
+    pub projects: bool,
+
+    // ── GitHub Packages ────────────────────────────────────────────────────
+    /// Back up GitHub Packages metadata for the target user.
+    ///
+    /// Requires the `read:packages` OAuth scope.  Iterates over all supported
+    /// package ecosystems (container, npm, maven, rubygems, nuget, docker) and
+    /// saves package list and version metadata to the owner's JSON directory.
+    #[arg(long)]
+    pub packages: bool,
+
     // ── Repository name filters ────────────────────────────────────────────
     /// Only back up repositories whose names match this glob pattern.
     ///
@@ -433,12 +486,30 @@ pub struct Args {
     pub clone_host: Option<String>,
 
     // ── Push-mirror options ────────────────────────────────────────────────
-    /// Push repository mirrors to a Gitea-compatible instance after backup.
+    /// Push repository mirrors to a remote Git hosting instance after backup.
     ///
-    /// Supported hosts: Gitea, Codeberg (<https://codeberg.org>), Forgejo.
-    /// Provide the base URL, e.g. `https://codeberg.org`.
+    /// Supported destinations depend on `--mirror-type`:
+    ///
+    /// - `gitea` (default): Gitea, Codeberg (<https://codeberg.org>), Forgejo.
+    /// - `gitlab`: GitLab.com or any self-hosted GitLab CE/EE instance.
+    ///
+    /// Provide the base URL, e.g. `https://codeberg.org` or
+    /// `https://gitlab.com`.
     #[arg(long, value_name = "URL")]
     pub mirror_to: Option<String>,
+
+    /// Mirror destination type.
+    ///
+    /// Accepted values:
+    /// - `gitea` (default) — Gitea, Codeberg, Forgejo (Gitea REST API v1)
+    /// - `gitlab`          — GitLab.com or self-hosted GitLab CE/EE (REST API v4)
+    #[arg(
+        long,
+        value_name = "TYPE",
+        default_value = "gitea",
+        requires = "mirror_to"
+    )]
+    pub mirror_type: String,
 
     /// API token for the mirror destination.
     ///
@@ -452,7 +523,7 @@ pub struct Args {
     )]
     pub mirror_token: Option<String>,
 
-    /// Owner name at the mirror destination (username or org).
+    /// Owner name at the mirror destination (username or org/namespace).
     #[arg(long, value_name = "OWNER", requires = "mirror_to")]
     pub mirror_owner: Option<String>,
 
@@ -529,6 +600,91 @@ pub struct Args {
     /// Log what would be done without writing any files or running git.
     #[arg(long)]
     pub dry_run: bool,
+
+    // ── Manifest & integrity ───────────────────────────────────────────────
+    /// Write a SHA-256 hash manifest after the backup completes.
+    ///
+    /// Writes `<output>/<owner>/json/backup_manifest.json` containing the
+    /// SHA-256 digest of every backed-up JSON file.  Use `--verify` on a
+    /// subsequent run to confirm the backup has not been tampered with.
+    #[arg(long)]
+    pub manifest: bool,
+
+    /// Verify the integrity of an existing backup instead of running a backup.
+    ///
+    /// Reads `<output>/<owner>/json/backup_manifest.json` and checks that
+    /// every file's SHA-256 digest matches.  Exits with an error if any
+    /// file is missing, changed, or unexpected.
+    ///
+    /// Requires `--output` and OWNER.  Does not contact the GitHub API.
+    #[arg(long, conflicts_with = "all")]
+    pub verify: bool,
+
+    // ── Retention / pruning ────────────────────────────────────────────────
+    /// Keep only the N most recent backup snapshot directories and delete
+    /// older ones.
+    ///
+    /// Backup snapshots are detected as date-stamped subdirectories under
+    /// `<output>` matching the pattern `YYYY-MM-DD*`.  Requires `--output`.
+    #[arg(long, value_name = "N")]
+    pub keep_last: Option<usize>,
+
+    /// Delete backup snapshot directories older than N days.
+    ///
+    /// Combined with `--keep-last`, both constraints are applied and
+    /// whichever removes more snapshots wins.
+    #[arg(long, value_name = "DAYS")]
+    pub max_age_days: Option<u64>,
+
+    // ── Prometheus metrics ─────────────────────────────────────────────────
+    /// Write Prometheus-compatible metrics to this file after the backup.
+    ///
+    /// Emits counters for repositories backed up, issues fetched, etc. in the
+    /// Prometheus text exposition format.  Useful for push-gateway or node
+    /// exporter textfile collector integration.
+    #[arg(long, value_name = "FILE")]
+    pub prometheus_metrics: Option<std::path::PathBuf>,
+
+    // ── Diff ──────────────────────────────────────────────────────────────
+    /// Compare the current backup with a previous backup directory and print
+    /// a summary of what changed (repos added/removed, issue counts, etc.).
+    ///
+    /// Provide the path to the *previous* backup's owner JSON directory
+    /// (e.g. `/var/backup/2025-12-01/octocat/json`).  Does not contact the
+    /// GitHub API.
+    #[arg(long, value_name = "PREV_JSON_DIR")]
+    pub diff_with: Option<std::path::PathBuf>,
+
+    // ── Restore ───────────────────────────────────────────────────────────
+    /// Restore backed-up data to a GitHub organisation.
+    ///
+    /// Re-creates issues, labels, and milestones from the JSON backup in
+    /// `<output>/<owner>/json` to the target organisation.  Requires
+    /// `--restore-target-org` and a token with write access.
+    ///
+    /// **Warning:** This modifies GitHub data.  Use with care.
+    #[arg(long)]
+    pub restore: bool,
+
+    /// Target organisation for `--restore`.
+    #[arg(long, value_name = "ORG", requires = "restore")]
+    pub restore_target_org: Option<String>,
+
+    // ── Encryption ────────────────────────────────────────────────────────
+    /// Encrypt backup data before writing to S3 using AES-256-GCM.
+    ///
+    /// Provide a 32-byte hex-encoded encryption key (64 hex characters).
+    /// Can also be set via the `BACKUP_ENCRYPT_KEY` environment variable.
+    ///
+    /// The key is never written to disk or logged.
+    #[arg(
+        long,
+        value_name = "HEX_KEY",
+        env = "BACKUP_ENCRYPT_KEY",
+        hide_env_values = true,
+        requires = "s3_bucket"
+    )]
+    pub encrypt_key: Option<String>,
 
     // ── Logging ────────────────────────────────────────────────────────────
     /// Suppress all non-error output.

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
 
-use crate::client::S3Client;
+use crate::client::{S3Client, MULTIPART_THRESHOLD_BYTES};
 use crate::config::S3Config;
 use crate::error::S3Error;
 
@@ -125,6 +125,7 @@ async fn upload_file(
         return Ok(UploadOutcome::Skipped);
     }
 
+    let file_size = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
     let data = std::fs::read(local_path)?;
     let content_type = guess_content_type(local_path);
 
@@ -134,7 +135,12 @@ async fn upload_file(
         bytes = data.len(),
         "uploading to S3"
     );
-    client.put_object(s3_key, &data, content_type).await?;
+
+    if file_size >= MULTIPART_THRESHOLD_BYTES {
+        client.multipart_upload(s3_key, &data, content_type).await?;
+    } else {
+        client.put_object(s3_key, &data, content_type).await?;
+    }
 
     Ok(UploadOutcome::Uploaded)
 }

@@ -72,6 +72,38 @@ impl Signer {
         self.sign("PUT", host, path, "", content_type, body, &datetime, &date)
     }
 
+    /// Computes SigV4 signing headers for an arbitrary request.
+    ///
+    /// - `method`       — HTTP method (`"POST"`, `"DELETE"`, etc.)
+    /// - `host`         — Host header value
+    /// - `path`         — URL path (e.g. `/key/to/object`)
+    /// - `query`        — Pre-encoded query string without `?` (e.g.
+    ///   `"partNumber=1&uploadId=abc"`)
+    /// - `content_type` — `Content-Type` header value
+    /// - `body`         — Request body bytes
+    #[must_use]
+    pub fn sign_request(
+        &self,
+        method: &str,
+        host: &str,
+        path: &str,
+        query: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> SignedHeaders {
+        let (datetime, date) = utc_datetime_pair();
+        self.sign(
+            method,
+            host,
+            path,
+            query,
+            content_type,
+            body,
+            &datetime,
+            &date,
+        )
+    }
+
     /// Computes SigV4 signing headers for an S3 `HeadObject` or `GetObject`
     /// request (empty body).
     #[must_use]
