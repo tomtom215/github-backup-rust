@@ -4,7 +4,8 @@
 //! [`GitHubClient`] — async HTTP client core: construction, TLS, and HTTP
 //! machinery.
 //!
-//! API endpoint methods live in the [`endpoints`] submodule.
+//! API endpoint methods live in the [`endpoints`] submodule, which is split
+//! by resource category into smaller focused files.
 
 mod endpoints;
 mod proxy;
@@ -27,21 +28,22 @@ use crate::error::ClientError;
 use crate::pagination::parse_next_link;
 use crate::rate_limit::RateLimitInfo;
 
-pub(super) const GITHUB_API_BASE: &str = "https://api.github.com";
-pub(super) const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
-pub(super) const PER_PAGE: u32 = 100;
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
+/// Default page size for all paginated GitHub API endpoints.
+pub(crate) const PER_PAGE: u32 = 100;
 /// Maximum number of times to retry a rate-limited request.
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 /// Maximum number of times to retry a transient 5xx response.
 const MAX_SERVER_ERROR_RETRIES: u32 = 3;
-/// Default request timeout. GitHub's API can be slow for large repos.
-pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// Default request timeout in seconds. GitHub's API can be slow for large repos.
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
 /// proxy connection.  Both variants share the same `hyper_util::client::legacy`
 /// error type so call sites need no special casing.
 #[derive(Clone)]
-pub(super) enum HyperClientKind {
+pub(crate) enum HyperClientKind {
     Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
     Proxied(Client<ProxyConnector, Full<Bytes>>),
 }
@@ -74,10 +76,10 @@ impl HyperClientKind {
 /// header.
 #[derive(Clone)]
 pub struct GitHubClient {
-    pub(super) http: HyperClientKind,
-    pub(super) credential: Credential,
+    pub(crate) http: HyperClientKind,
+    pub(crate) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
-    pub(super) api_base: String,
+    pub(crate) api_base: String,
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -144,7 +146,7 @@ impl GitHubClient {
     ///
     /// Used by endpoint methods to build request URLs.
     #[must_use]
-    pub(super) fn api(&self) -> &str {
+    pub(crate) fn api(&self) -> &str {
         &self.api_base
     }
 
@@ -165,7 +167,7 @@ impl GitHubClient {
 
     /// Fetches all pages of a paginated endpoint, collecting results into
     /// a single `Vec<T>`.
-    pub(super) async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Vec<T>, ClientError>
+    pub(crate) async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Vec<T>, ClientError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -187,7 +189,7 @@ impl GitHubClient {
     ///
     /// Handles rate limiting (403/429) with exponential back-off and retries
     /// transient 5xx server errors up to [`MAX_SERVER_ERROR_RETRIES`] times.
-    pub(super) async fn get_json_with_link<T>(
+    pub(crate) async fn get_json_with_link<T>(
         &self,
         url: &str,
     ) -> Result<(T, Option<String>), ClientError>
@@ -287,7 +289,7 @@ impl GitHubClient {
     ///
     /// The `Authorization` header is omitted for [`Credential::Anonymous`]
     /// so that GitHub's unauthenticated rate-limit bucket applies.
-    pub(super) fn build_request(
+    pub(crate) fn build_request(
         &self,
         method: Method,
         url: &str,
@@ -306,7 +308,7 @@ impl GitHubClient {
 }
 
 /// Returns the current time as a Unix timestamp in seconds.
-pub(super) fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -314,7 +316,7 @@ pub(super) fn unix_now() -> u64 {
 }
 
 /// Collects a hyper body into a [`Bytes`] buffer.
-pub(super) async fn collect_body(
+pub(crate) async fn collect_body(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
 ) -> Result<Bytes, ClientError> {
     Ok(body.collect().await?.to_bytes())

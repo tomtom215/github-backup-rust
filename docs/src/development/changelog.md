@@ -6,6 +6,17 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ## [0.3.0] — Unreleased
 
+### Internal — Refactoring & Tech Debt
+
+- **Module extraction**: the five inline metadata backup blocks in `engine.rs` (`labels`, `milestones`, `hooks`, `security_advisories`, `topics`, `branches`) have been extracted into dedicated modules under `backup/`, each with three unit tests (disabled / dry-run / enabled). All 18 source files in `backup/` now follow a single consistent pattern.
+- **`endpoints/` directory**: `client/endpoints.rs` (649 lines) split into eight focused submodules (`actions`, `issues`, `keys`, `org`, `pulls`, `repo_meta`, `repos`, `social`).
+- **`api_client/` directory**: `api_client.rs` (546 lines) split into `mod.rs` (trait definition) + `impl_github.rs` (blanket `impl BackupClient for GitHubClient`).
+- **`config/` directory**: `config.rs` (566 lines) split into `credential`, `output`, `clone_type`, `options`, and `file` submodules with a dedicated `tests` module.
+- **`report.rs`**: `write_report`, `unix_to_iso8601`, and `is_valid_iso8601` extracted from `main.rs` into a separate module with 13 unit tests; corrected wrong Unix timestamp in `known_timestamp_formats_correctly`.
+- **Test extraction**: `starred_repos.rs` tests moved to `starred_repos_tests.rs` via `#[path]` attribute; source file trimmed from 564 → 318 lines.
+- **Broken intra-doc link** in `api_client/mod.rs` fixed (`GitHubClient` → `crate::GitHubClient`).
+- All 300+ tests pass; zero clippy warnings (`-D warnings`); rustdoc builds cleanly (`RUSTDOCFLAGS="-D warnings"`).
+
 ### Added
 
 - **Unauthenticated access**: running without `--token` or `--device-auth` is now valid. The tool backs up public data at GitHub's unauthenticated rate limit (60 req/h) and logs a clear warning rather than refusing to start.

@@ -56,11 +56,17 @@ Key traits:
 Both traits have test stubs (`MemStorage`, `SpyGitRunner`) enabling full
 coverage without network or filesystem access.
 
-Backup modules (`crates/github-backup-core/src/backup/`):
+Backup modules (`crates/github-backup-core/src/backup/`), one file per category:
 - `repository.rs` — git clone dispatching on `CloneType`
 - `issue.rs`, `pull_request.rs`, `release.rs` — JSON metadata
 - `gist.rs`, `wiki.rs` — secondary git clones
 - `user_data.rs` — starred, watched, followers, following
+- `labels.rs`, `milestones.rs` — repository metadata
+- `hooks.rs`, `security_advisories.rs` — admin metadata (graceful 403/404)
+- `topics.rs`, `branches.rs` — repository topology
+- `deploy_keys.rs`, `collaborators.rs` — access control metadata
+- `actions.rs`, `environments.rs` — GitHub Actions and deployments
+- `starred_repos.rs` — durable-queue starred-repo cloning
 
 ### `github-backup-mirror`
 

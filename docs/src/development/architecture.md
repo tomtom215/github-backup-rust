@@ -43,7 +43,13 @@ The backup orchestration engine and key abstractions.
 - `BackupEngine<S, G>` — generic over `Storage` and `GitRunner`; orchestrates all backup categories
 - `Storage` trait — `write_json()`, `write_bytes()`, `exists()`; `FsStorage` is the production implementation; `MemStorage` is the test stub
 - `GitRunner` trait — `mirror_clone()`, `bare_clone()`, `full_clone()`, `shallow_clone()`, `lfs_clone()`, `push_mirror()`; `ProcessGitRunner` shells out to git; `SpyGitRunner` is the test stub
-- Per-category modules: `backup/repository`, `backup/issue`, `backup/pull_request`, `backup/release`, `backup/gist`, `backup/wiki`, `backup/user_data`
+- Per-category modules (one file, one responsibility each):
+  `backup/repository`, `backup/issue`, `backup/pull_request`, `backup/release`,
+  `backup/gist`, `backup/wiki`, `backup/user_data`, `backup/labels`,
+  `backup/milestones`, `backup/hooks`, `backup/security_advisories`,
+  `backup/topics`, `backup/branches`, `backup/deploy_keys`,
+  `backup/collaborators`, `backup/actions`, `backup/environments`,
+  `backup/starred_repos`
 - `BackupStats` — lock-free `AtomicU64` counters shared across spawned tasks; tracks repos, gists, issues, and PRs; includes wall-clock elapsed time
 - `CoreError` — all error variants for the backup engine
 
