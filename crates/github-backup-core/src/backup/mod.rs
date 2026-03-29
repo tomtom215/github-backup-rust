@@ -8,15 +8,21 @@
 //! [`crate::storage::Storage`] and [`crate::git::GitRunner`] traits.
 
 pub mod actions;
+pub mod branches;
 pub mod collaborators;
 pub mod deploy_keys;
 pub mod environments;
 pub mod gist;
+pub mod hooks;
 pub mod issue;
+pub mod labels;
+pub mod milestones;
 pub mod pull_request;
 pub mod release;
 pub mod repository;
+pub mod security_advisories;
 pub mod starred_repos;
+pub mod topics;
 pub mod user_data;
 pub mod wiki;
 

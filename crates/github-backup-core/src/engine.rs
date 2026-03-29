@@ -14,11 +14,13 @@ use github_backup_types::Repository;
 
 use crate::{
     backup::{
-        actions::backup_actions, collaborators::backup_collaborators,
+        actions::backup_actions, branches::backup_branches, collaborators::backup_collaborators,
         deploy_keys::backup_deploy_keys, environments::backup_environments, gist::backup_gists,
-        issue::backup_issues, pull_request::backup_pull_requests, release::backup_releases,
-        repository::backup_repository, starred_repos::backup_starred_repos,
-        user_data::backup_user_data, wiki::backup_wiki,
+        hooks::backup_hooks, issue::backup_issues, labels::backup_labels,
+        milestones::backup_milestones, pull_request::backup_pull_requests,
+        release::backup_releases, repository::backup_repository,
+        security_advisories::backup_security_advisories, starred_repos::backup_starred_repos,
+        topics::backup_topics, user_data::backup_user_data, wiki::backup_wiki,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -320,63 +322,14 @@ where
     let prs_count =
         backup_pull_requests(client, owner, &repo.name, opts, meta_dir, storage).await?;
     stats.add_prs(prs_count);
+
     backup_releases(client, owner, &repo.name, opts, meta_dir, storage).await?;
-
-    if opts.labels {
-        let labels = client.list_labels(owner, &repo.name).await?;
-        storage.write_json(&meta_dir.join("labels.json"), &labels)?;
-    }
-
-    if opts.milestones {
-        let milestones = client.list_milestones(owner, &repo.name).await?;
-        storage.write_json(&meta_dir.join("milestones.json"), &milestones)?;
-    }
-
-    if opts.hooks {
-        match client.list_hooks(owner, &repo.name).await {
-            Ok(hooks) => {
-                storage.write_json(&meta_dir.join("hooks.json"), &hooks)?;
-            }
-            Err(github_backup_client::ClientError::ApiError { status: 404, .. }) => {
-                info!(repo = %repo.full_name, "skipping hooks (no admin access)");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    if opts.security_advisories {
-        match client.list_security_advisories(owner, &repo.name).await {
-            Ok(advisories) => {
-                storage.write_json(&meta_dir.join("security_advisories.json"), &advisories)?;
-            }
-            Err(github_backup_client::ClientError::ApiError {
-                status: 404 | 403, ..
-            }) => {
-                info!(repo = %repo.full_name, "skipping security advisories (not available)");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    if opts.topics {
-        match client.list_repo_topics(owner, &repo.name).await {
-            Ok(topics) => {
-                storage.write_json(&meta_dir.join("topics.json"), &topics)?;
-            }
-            Err(github_backup_client::ClientError::ApiError {
-                status: 404 | 403, ..
-            }) => {
-                info!(repo = %repo.full_name, "skipping topics (not available)");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    if opts.branches {
-        let branches = client.list_branches(owner, &repo.name).await?;
-        storage.write_json(&meta_dir.join("branches.json"), &branches)?;
-    }
-
+    backup_labels(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_milestones(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_hooks(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_security_advisories(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_topics(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_branches(client, owner, &repo.name, opts, meta_dir, storage).await?;
     backup_deploy_keys(client, owner, &repo.name, opts, meta_dir, storage).await?;
     backup_collaborators(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
