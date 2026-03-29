@@ -77,19 +77,11 @@ pub async fn run_tui(initial: InitialConfig) -> ExitCode {
 
     // Install the TUI tracing layer so log output goes to the log panel.
     let tui_layer = tracing_layer::TuiTracingLayer::new(progress_tx.clone());
-    let _ = tracing_subscriber::registry()
-        .with(tui_layer)
-        .try_init();
+    let _ = tracing_subscriber::registry().with(tui_layer).try_init();
 
     let mut app = app::App::new(initial);
 
-    let result = event_loop(
-        &mut terminal,
-        &mut app,
-        &mut progress_rx,
-        progress_tx,
-    )
-    .await;
+    let result = event_loop(&mut terminal, &mut app, &mut progress_rx, progress_tx).await;
 
     // Restore terminal regardless of outcome.
     let _ = disable_raw_mode();
@@ -209,9 +201,9 @@ fn render_title_bar(frame: &mut Frame, app: &app::App, area: ratatui::layout::Re
         Span::styled(concat!("v", env!("CARGO_PKG_VERSION"), "  "), theme::DIM),
         nav_tab("1", "Dashboard", *cur == state::Screen::Dashboard),
         nav_tab("2", "Configure", *cur == state::Screen::Configure),
-        nav_tab("3", "Run",       *cur == state::Screen::Running),
-        nav_tab("4", "Verify",    *cur == state::Screen::Verify),
-        nav_tab("5", "Results",   *cur == state::Screen::Results),
+        nav_tab("3", "Run", *cur == state::Screen::Running),
+        nav_tab("4", "Verify", *cur == state::Screen::Verify),
+        nav_tab("5", "Results", *cur == state::Screen::Results),
     ]);
     frame.render_widget(
         Paragraph::new(line).block(Block::default().borders(Borders::NONE)),
@@ -253,7 +245,7 @@ fn render_screen_content(frame: &mut Frame, app: &app::App, area: ratatui::layou
 fn render_error_modal(frame: &mut Frame, app: &app::App, area: ratatui::layout::Rect) {
     let err = app.modal_error.as_deref().unwrap_or("");
     let h = 7u16;
-    let w = (area.width * 2 / 3).max(40).min(70);
+    let w = (area.width * 2 / 3).clamp(40, 70);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = ratatui::layout::Rect::new(x, y, w, h);
@@ -302,11 +294,11 @@ async fn run_backup_task(
 
     let client_result = match api_url.as_deref() {
         Some(url) => GitHubClient::with_api_url(credential, url),
-        None      => GitHubClient::new(credential),
+        None => GitHubClient::new(credential),
     };
 
     let client = match client_result {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             let _ = tx.send(event::BackupEvent::BackupFailed {
                 error: format!("GitHub client init failed: {e}"),
@@ -382,22 +374,22 @@ async fn run_verify_task(owner: String, output_dir: String, tx: progress::Progre
     let output = OutputConfig::new(&output_dir);
     let json_dir = output.owner_json_dir(&owner);
 
-    let result = tokio::task::spawn_blocking(move || {
-        github_backup_core::verify_manifest(&json_dir)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || github_backup_core::verify_manifest(&json_dir)).await;
 
     match result {
         Ok(Ok(report)) => {
             let _ = tx.send(event::BackupEvent::VerifyDone {
-                ok: report.ok as u64,
+                ok: report.ok,
                 tampered: report.tampered,
                 missing: report.missing,
                 unexpected: report.unexpected,
             });
         }
         Ok(Err(e)) => {
-            let _ = tx.send(event::BackupEvent::VerifyFailed { error: e.to_string() });
+            let _ = tx.send(event::BackupEvent::VerifyFailed {
+                error: e.to_string(),
+            });
         }
         Err(e) => {
             let _ = tx.send(event::BackupEvent::VerifyFailed {

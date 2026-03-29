@@ -2,7 +2,7 @@
 // Copyright 2026 Tom F
 
 //! One module per screen.  Each module exposes a `render_*` free function that
-//! borrows the relevant slice of [`App`] state and draws into a [`Frame`].
+//! borrows the relevant slice of `App` state and draws into a `Frame`.
 
 pub mod configure;
 pub mod dashboard;

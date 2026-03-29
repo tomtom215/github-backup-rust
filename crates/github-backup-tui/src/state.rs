@@ -255,7 +255,14 @@ impl ConfigState {
     pub const TAB_COUNT: usize = 8;
 
     pub const TAB_NAMES: &'static [&'static str] = &[
-        "Auth", "Target", "Categories", "Clone", "Filter", "Mirror", "S3", "Output",
+        "Auth",
+        "Target",
+        "Categories",
+        "Clone",
+        "Filter",
+        "Mirror",
+        "S3",
+        "Output",
     ];
 
     /// Count of fields per tab (for navigation wrapping).
@@ -268,16 +275,14 @@ impl ConfigState {
             4 => 2,  // Filter: include, exclude
             5 => 5,  // Mirror: mirror_to, mirror_type, mirror_token, mirror_owner, mirror_private
             6 => 7,  // S3: bucket, region, prefix, endpoint, access_key, secret_key, include_assets
-            7 => 6,  // Output: manifest, dry_run, report, prometheus_metrics, keep_last, max_age_days
+            7 => 6, // Output: manifest, dry_run, report, prometheus_metrics, keep_last, max_age_days
             _ => 1,
         }
     }
 
     /// Converts form state into the types needed by the backup engine.
     /// Returns `(owner, output_path, BackupOptions, token_opt)`.
-    pub fn to_backup_config(
-        &self,
-    ) -> (String, PathBuf, BackupOptions, Option<String>) {
+    pub fn to_backup_config(&self) -> (String, PathBuf, BackupOptions, Option<String>) {
         let owner = self.owner.trim().to_string();
         let output = PathBuf::from(self.output_dir.trim());
         let token = if self.token.trim().is_empty() {
@@ -485,7 +490,12 @@ impl RunState {
     pub fn elapsed_str(&self) -> String {
         if let Some(start) = self.started_at {
             let secs = start.elapsed().as_secs();
-            format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+            format!(
+                "{:02}:{:02}:{:02}",
+                secs / 3600,
+                (secs % 3600) / 60,
+                secs % 60
+            )
         } else {
             "00:00:00".into()
         }
@@ -506,7 +516,7 @@ impl RunState {
         }
         self.log_lines.push(line);
         // Auto-scroll: always show newest if user hasn't scrolled up.
-        if self.log_lines.len() > 0 {
+        if !self.log_lines.is_empty() {
             self.log_offset = self.log_lines.len().saturating_sub(1);
         }
     }
@@ -535,7 +545,12 @@ pub struct ResultsState {
 impl ResultsState {
     pub fn elapsed_str(&self) -> String {
         let secs = self.elapsed_secs as u64;
-        format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     }
 }
 
@@ -576,10 +591,6 @@ pub struct DashboardState {
 }
 
 impl DashboardState {
-    pub const ACTIONS: &'static [&'static str] = &[
-        "Run Backup",
-        "Configure",
-        "Verify Integrity",
-        "Quit",
-    ];
+    pub const ACTIONS: &'static [&'static str] =
+        &["Run Backup", "Configure", "Verify Integrity", "Quit"];
 }

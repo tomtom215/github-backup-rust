@@ -11,9 +11,7 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::{handle_backup_event, handle_key_dispatch, App, InitialConfig};
 use crate::event::BackupEvent;
-use crate::state::{
-    CloneTypeForm, MirrorTypeForm, RepoStatus, ResultsState, RunState, Screen,
-};
+use crate::state::{CloneTypeForm, MirrorTypeForm, RepoStatus, ResultsState, RunState, Screen};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,15 +32,15 @@ fn ctrl(app: &mut App, ch: char) {
 #[test]
 fn initial_config_populates_fields() {
     let app = App::new(InitialConfig {
-        token:   Some("ghp_abc".into()),
-        owner:   Some("octocat".into()),
-        output:  Some("/var/backup".into()),
+        token: Some("ghp_abc".into()),
+        owner: Some("octocat".into()),
+        output: Some("/var/backup".into()),
         api_url: Some("https://ghe.example.com/api/v3".into()),
     });
-    assert_eq!(app.config.token,      "ghp_abc");
-    assert_eq!(app.config.owner,      "octocat");
+    assert_eq!(app.config.token, "ghp_abc");
+    assert_eq!(app.config.owner, "octocat");
     assert_eq!(app.config.output_dir, "/var/backup");
-    assert_eq!(app.config.api_url,    "https://ghe.example.com/api/v3");
+    assert_eq!(app.config.api_url, "https://ghe.example.com/api/v3");
 }
 
 #[test]
@@ -103,7 +101,7 @@ fn modal_blocks_screen_switch() {
     let mut app = make_app();
     app.modal_error = Some("error".into());
     press(&mut app, KeyCode::Char('2')); // would normally go to Configure
-    // The modal should have been dismissed but screen unchanged
+                                         // The modal should have been dismissed but screen unchanged
     assert!(app.modal_error.is_none());
     assert_eq!(app.screen, Screen::Dashboard); // still Dashboard
 }
@@ -188,7 +186,10 @@ fn configure_backtab_cycles_backward() {
     let mut app = make_app();
     app.screen = Screen::Configure;
     press(&mut app, KeyCode::BackTab);
-    assert_eq!(app.config.active_tab, crate::state::ConfigState::TAB_COUNT - 1);
+    assert_eq!(
+        app.config.active_tab,
+        crate::state::ConfigState::TAB_COUNT - 1
+    );
 }
 
 #[test]
@@ -341,7 +342,7 @@ fn configure_categories_space_toggles() {
 }
 
 #[test]
-fn configure_A_selects_all_categories() {
+fn configure_a_selects_all_categories() {
     let mut app = make_app();
     app.screen = Screen::Configure;
     app.config.active_tab = 2;
@@ -526,11 +527,14 @@ fn to_backup_config_since_trimmed() {
 #[test]
 fn backup_event_log_line_appended() {
     let mut app = make_app();
-    handle_backup_event(&mut app, BackupEvent::LogLine {
-        timestamp: "12:00:00".into(),
-        level: "INFO".into(),
-        message: "starting backup".into(),
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::LogLine {
+            timestamp: "12:00:00".into(),
+            level: "INFO".into(),
+            message: "starting backup".into(),
+        },
+    );
     assert_eq!(app.run.log_lines.len(), 1);
     assert_eq!(app.run.log_lines[0].message, "starting backup");
 }
@@ -546,9 +550,12 @@ fn backup_event_repos_discovered() {
 #[test]
 fn backup_event_repo_started_adds_entry() {
     let mut app = make_app();
-    handle_backup_event(&mut app, BackupEvent::RepoStarted {
-        name: "octocat/hello-world".into(),
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoStarted {
+            name: "octocat/hello-world".into(),
+        },
+    );
     assert_eq!(app.run.repos.len(), 1);
     assert_eq!(app.run.repos[0].status, RepoStatus::Running);
 }
@@ -556,25 +563,37 @@ fn backup_event_repo_started_adds_entry() {
 #[test]
 fn backup_event_repo_started_updates_existing() {
     let mut app = make_app();
-    handle_backup_event(&mut app, BackupEvent::RepoStarted {
-        name: "octocat/hello-world".into(),
-    });
-    handle_backup_event(&mut app, BackupEvent::RepoStarted {
-        name: "octocat/hello-world".into(),
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoStarted {
+            name: "octocat/hello-world".into(),
+        },
+    );
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoStarted {
+            name: "octocat/hello-world".into(),
+        },
+    );
     assert_eq!(app.run.repos.len(), 1); // no duplicate
 }
 
 #[test]
 fn backup_event_repo_completed_success() {
     let mut app = make_app();
-    handle_backup_event(&mut app, BackupEvent::RepoStarted {
-        name: "octocat/hello-world".into(),
-    });
-    handle_backup_event(&mut app, BackupEvent::RepoCompleted {
-        name: "octocat/hello-world".into(),
-        success: true,
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoStarted {
+            name: "octocat/hello-world".into(),
+        },
+    );
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoCompleted {
+            name: "octocat/hello-world".into(),
+            success: true,
+        },
+    );
     assert_eq!(app.run.repos[0].status, RepoStatus::Done);
     assert_eq!(app.run.repos_done, 1);
     assert_eq!(app.run.repos_errored, 0);
@@ -584,9 +603,13 @@ fn backup_event_repo_completed_success() {
 fn backup_event_repo_completed_failure() {
     let mut app = make_app();
     handle_backup_event(&mut app, BackupEvent::RepoStarted { name: "r".into() });
-    handle_backup_event(&mut app, BackupEvent::RepoCompleted {
-        name: "r".into(), success: false,
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::RepoCompleted {
+            name: "r".into(),
+            success: false,
+        },
+    );
     assert_eq!(app.run.repos[0].status, RepoStatus::Error);
     assert_eq!(app.run.repos_errored, 1);
     assert_eq!(app.run.repos_done, 0);
@@ -602,18 +625,21 @@ fn backup_event_done_transitions_to_results() {
     });
     app.screen = Screen::Running;
 
-    handle_backup_event(&mut app, BackupEvent::BackupDone {
-        repos_backed_up: 10,
-        repos_discovered: 12,
-        repos_skipped: 2,
-        repos_errored: 0,
-        gists_backed_up: 3,
-        issues_fetched: 100,
-        prs_fetched: 50,
-        workflows_fetched: 20,
-        discussions_fetched: 0,
-        elapsed_secs: 42.5,
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::BackupDone {
+            repos_backed_up: 10,
+            repos_discovered: 12,
+            repos_skipped: 2,
+            repos_errored: 0,
+            gists_backed_up: 3,
+            issues_fetched: 100,
+            prs_fetched: 50,
+            workflows_fetched: 20,
+            discussions_fetched: 0,
+            elapsed_secs: 42.5,
+        },
+    );
 
     assert_eq!(app.screen, Screen::Results);
     assert!(app.results.success);
@@ -628,9 +654,12 @@ fn backup_event_done_transitions_to_results() {
 fn backup_event_failed_transitions_to_results() {
     let mut app = make_app();
     app.screen = Screen::Running;
-    handle_backup_event(&mut app, BackupEvent::BackupFailed {
-        error: "rate limit exceeded".into(),
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::BackupFailed {
+            error: "rate limit exceeded".into(),
+        },
+    );
     assert_eq!(app.screen, Screen::Results);
     assert!(!app.results.success);
     assert_eq!(
@@ -643,31 +672,34 @@ fn backup_event_failed_transitions_to_results() {
 fn backup_event_verify_done() {
     let mut app = make_app();
     app.verify.running = true;
-    handle_backup_event(&mut app, BackupEvent::VerifyDone {
-        ok: 123,
-        tampered: vec!["file.json".into()],
-        missing: vec![],
-        unexpected: vec![],
-    });
+    handle_backup_event(
+        &mut app,
+        BackupEvent::VerifyDone {
+            ok: 123,
+            tampered: vec!["file.json".into()],
+            missing: vec![],
+            unexpected: vec![],
+        },
+    );
     assert!(!app.verify.running);
     assert!(app.verify.done);
     assert_eq!(app.verify.ok, 123);
     assert_eq!(app.verify.tampered, vec!["file.json"]);
-    assert!(app.verify.is_clean() == false);
+    assert!(!app.verify.is_clean());
 }
 
 #[test]
 fn backup_event_verify_failed() {
     let mut app = make_app();
     app.verify.running = true;
-    handle_backup_event(&mut app, BackupEvent::VerifyFailed {
-        error: "manifest not found".into(),
-    });
-    assert!(!app.verify.running);
-    assert_eq!(
-        app.verify.error.as_deref(),
-        Some("manifest not found")
+    handle_backup_event(
+        &mut app,
+        BackupEvent::VerifyFailed {
+            error: "manifest not found".into(),
+        },
     );
+    assert!(!app.verify.running);
+    assert_eq!(app.verify.error.as_deref(), Some("manifest not found"));
 }
 
 // ── Running screen controls ───────────────────────────────────────────────────
@@ -782,17 +814,21 @@ fn run_state_progress_pct_zero_when_no_total() {
 
 #[test]
 fn run_state_progress_pct_correct() {
-    let mut run = RunState::default();
-    run.total_repos = 10;
-    run.repos_done = 5;
+    let run = RunState {
+        total_repos: 10,
+        repos_done: 5,
+        ..Default::default()
+    };
     assert_eq!(run.progress_pct(), 50);
 }
 
 #[test]
 fn run_state_progress_pct_clamps_at_100() {
-    let mut run = RunState::default();
-    run.total_repos = 10;
-    run.repos_done = 15; // over
+    let run = RunState {
+        total_repos: 10,
+        repos_done: 15,
+        ..Default::default()
+    }; // over
     assert_eq!(run.progress_pct(), 100);
 }
 
@@ -822,8 +858,10 @@ fn run_state_push_log_caps_at_2000() {
 
 #[test]
 fn results_elapsed_str() {
-    let mut res = ResultsState::default();
-    res.elapsed_secs = 3723.0; // 1h 2m 3s
+    let res = ResultsState {
+        elapsed_secs: 3723.0,
+        ..Default::default()
+    }; // 1h 2m 3s
     assert_eq!(res.elapsed_str(), "01:02:03");
 }
 
@@ -831,17 +869,21 @@ fn results_elapsed_str() {
 
 #[test]
 fn verify_state_is_clean_when_no_issues() {
-    let mut v = crate::state::VerifyState::default();
-    v.done = true;
-    v.ok = 10;
+    let v = crate::state::VerifyState {
+        done: true,
+        ok: 10,
+        ..Default::default()
+    };
     assert!(v.is_clean());
 }
 
 #[test]
 fn verify_state_not_clean_with_tampered() {
-    let mut v = crate::state::VerifyState::default();
-    v.done = true;
-    v.tampered = vec!["file.json".into()];
+    let v = crate::state::VerifyState {
+        done: true,
+        tampered: vec!["file.json".into()],
+        ..Default::default()
+    };
     assert!(!v.is_clean());
 }
 

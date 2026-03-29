@@ -128,11 +128,26 @@ pub fn handle_key_dispatch(app: &mut App, code: KeyCode, modifiers: KeyModifiers
     // Global number shortcuts when not editing text.
     if !app.config.editing && app.screen != Screen::Running {
         match code {
-            KeyCode::Char('1') => { app.screen = Screen::Dashboard; return; }
-            KeyCode::Char('2') => { app.screen = Screen::Configure; return; }
-            KeyCode::Char('3') => { app.screen = Screen::Running; return; }
-            KeyCode::Char('4') => { app.screen = Screen::Verify; return; }
-            KeyCode::Char('5') => { app.screen = Screen::Results; return; }
+            KeyCode::Char('1') => {
+                app.screen = Screen::Dashboard;
+                return;
+            }
+            KeyCode::Char('2') => {
+                app.screen = Screen::Configure;
+                return;
+            }
+            KeyCode::Char('3') => {
+                app.screen = Screen::Running;
+                return;
+            }
+            KeyCode::Char('4') => {
+                app.screen = Screen::Verify;
+                return;
+            }
+            KeyCode::Char('5') => {
+                app.screen = Screen::Results;
+                return;
+            }
             _ => {}
         }
     }
@@ -140,27 +155,42 @@ pub fn handle_key_dispatch(app: &mut App, code: KeyCode, modifiers: KeyModifiers
     match app.screen {
         Screen::Dashboard => handle_dashboard(app, code),
         Screen::Configure => handle_configure(app, code),
-        Screen::Running   => handle_running(app, code),
-        Screen::Results   => handle_results(app, code),
-        Screen::Verify    => handle_verify(app, code),
+        Screen::Running => handle_running(app, code),
+        Screen::Results => handle_results(app, code),
+        Screen::Verify => handle_verify(app, code),
     }
 }
 
 /// Called by `lib.rs` whenever a [`BackupEvent`] arrives on the channel.
 pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
     match ev {
-        BackupEvent::LogLine { timestamp, level, message } => {
-            app.run.push_log(LogLine { timestamp, level, message });
+        BackupEvent::LogLine {
+            timestamp,
+            level,
+            message,
+        } => {
+            app.run.push_log(LogLine {
+                timestamp,
+                level,
+                message,
+            });
         }
         BackupEvent::RepoStarted { name } => {
             if let Some(e) = app.run.repos.iter_mut().find(|r| r.name == name) {
                 e.status = RepoStatus::Running;
             } else {
-                app.run.repos.push(RepoEntry { name, status: RepoStatus::Running });
+                app.run.repos.push(RepoEntry {
+                    name,
+                    status: RepoStatus::Running,
+                });
             }
         }
         BackupEvent::RepoCompleted { name, success } => {
-            let status = if success { RepoStatus::Done } else { RepoStatus::Error };
+            let status = if success {
+                RepoStatus::Done
+            } else {
+                RepoStatus::Error
+            };
             if let Some(e) = app.run.repos.iter_mut().find(|r| r.name == name) {
                 e.status = status;
             } else {
@@ -177,9 +207,16 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             app.run.phase = format!("Backing up {total} repos");
         }
         BackupEvent::BackupDone {
-            repos_backed_up, repos_discovered, repos_skipped, repos_errored,
-            gists_backed_up, issues_fetched, prs_fetched, workflows_fetched,
-            discussions_fetched, elapsed_secs,
+            repos_backed_up,
+            repos_discovered,
+            repos_skipped,
+            repos_errored,
+            gists_backed_up,
+            issues_fetched,
+            prs_fetched,
+            workflows_fetched,
+            discussions_fetched,
+            elapsed_secs,
         } => {
             app.results = ResultsState {
                 success: true,
@@ -207,7 +244,9 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 error_message: Some(error),
                 owner: app.config.owner.clone(),
                 output_dir: app.config.output_dir.clone(),
-                elapsed_secs: app.run.started_at
+                elapsed_secs: app
+                    .run
+                    .started_at
                     .map(|s| s.elapsed().as_secs_f64())
                     .unwrap_or(0.0),
                 ..Default::default()
@@ -215,7 +254,12 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             app.run.phase = "Failed".into();
             app.screen = Screen::Results;
         }
-        BackupEvent::VerifyDone { ok, tampered, missing, unexpected } => {
+        BackupEvent::VerifyDone {
+            ok,
+            tampered,
+            missing,
+            unexpected,
+        } => {
             app.verify.running = false;
             app.verify.done = true;
             app.verify.ok = ok;
@@ -250,13 +294,15 @@ fn handle_dashboard(app: &mut App, code: KeyCode) {
         }
         KeyCode::Up | KeyCode::Char('k') => {
             let n = DashboardState::ACTIONS.len();
-            app.dashboard.selected_action =
-                (app.dashboard.selected_action + n - 1) % n;
+            app.dashboard.selected_action = (app.dashboard.selected_action + n - 1) % n;
         }
         KeyCode::Enter => match app.dashboard.selected_action {
             0 => request_backup(app),
             1 => app.screen = Screen::Configure,
-            2 => { app.screen = Screen::Verify; app.verify.reset(); }
+            2 => {
+                app.screen = Screen::Verify;
+                app.verify.reset();
+            }
             3 => app.should_quit = true,
             _ => {}
         },
@@ -291,7 +337,7 @@ fn handle_configure(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char(' ') => toggle_field(app),
         KeyCode::Enter => enter_field(app),
-        KeyCode::Left  => cycle_select(app, -1),
+        KeyCode::Left => cycle_select(app, -1),
         KeyCode::Right => cycle_select(app, 1),
         KeyCode::Char('A') if app.config.active_tab == 2 => {
             let all = !app.config.repositories;
@@ -305,7 +351,9 @@ fn handle_configure(app: &mut App, code: KeyCode) {
 fn handle_configure_editing(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter | KeyCode::Esc => commit_edit(app),
-        KeyCode::Backspace => { app.config.edit_buffer.pop(); }
+        KeyCode::Backspace => {
+            app.config.edit_buffer.pop();
+        }
         KeyCode::Char(c) => app.config.edit_buffer.push(c),
         _ => {}
     }
@@ -344,8 +392,7 @@ fn handle_verify(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('v') | KeyCode::Char('V') if !app.verify.running => {
             if app.config.owner.is_empty() || app.config.output_dir.is_empty() {
-                app.modal_error =
-                    Some("Configure owner and output directory first.".into());
+                app.modal_error = Some("Configure owner and output directory first.".into());
             } else {
                 app.verify.reset();
                 app.verify.running = true;
@@ -455,58 +502,58 @@ fn toggle_field(app: &mut App) {
     let (tab, f) = (app.config.active_tab, app.config.active_field);
     match (tab, f) {
         (0, 2) => app.config.device_auth = !app.config.device_auth,
-        (1, 2) => app.config.org_mode    = !app.config.org_mode,
+        (1, 2) => app.config.org_mode = !app.config.org_mode,
         (2, _) => toggle_category(app, f),
-        (3, 1) => app.config.forks        = !app.config.forks,
-        (3, 2) => app.config.private      = !app.config.private,
-        (3, 3) => app.config.lfs          = !app.config.lfs,
-        (3, 4) => app.config.prefer_ssh   = !app.config.prefer_ssh,
-        (3, 5) => app.config.no_prune     = !app.config.no_prune,
-        (5, 4) => app.config.mirror_private   = !app.config.mirror_private,
+        (3, 1) => app.config.forks = !app.config.forks,
+        (3, 2) => app.config.private = !app.config.private,
+        (3, 3) => app.config.lfs = !app.config.lfs,
+        (3, 4) => app.config.prefer_ssh = !app.config.prefer_ssh,
+        (3, 5) => app.config.no_prune = !app.config.no_prune,
+        (5, 4) => app.config.mirror_private = !app.config.mirror_private,
         (6, 6) => app.config.s3_include_assets = !app.config.s3_include_assets,
-        (7, 0) => app.config.manifest     = !app.config.manifest,
-        (7, 1) => app.config.dry_run      = !app.config.dry_run,
+        (7, 0) => app.config.manifest = !app.config.manifest,
+        (7, 1) => app.config.dry_run = !app.config.dry_run,
         _ => {}
     }
 }
 
 fn toggle_category(app: &mut App, idx: usize) {
     match idx {
-        0  => app.config.repositories        = !app.config.repositories,
-        1  => app.config.issues              = !app.config.issues,
-        2  => app.config.issue_comments      = !app.config.issue_comments,
-        3  => app.config.issue_events        = !app.config.issue_events,
-        4  => app.config.pulls               = !app.config.pulls,
-        5  => app.config.pull_comments       = !app.config.pull_comments,
-        6  => app.config.pull_commits        = !app.config.pull_commits,
-        7  => app.config.pull_reviews        = !app.config.pull_reviews,
-        8  => app.config.labels              = !app.config.labels,
-        9  => app.config.milestones          = !app.config.milestones,
-        10 => app.config.releases            = !app.config.releases,
-        11 => app.config.release_assets      = !app.config.release_assets,
-        12 => app.config.hooks               = !app.config.hooks,
+        0 => app.config.repositories = !app.config.repositories,
+        1 => app.config.issues = !app.config.issues,
+        2 => app.config.issue_comments = !app.config.issue_comments,
+        3 => app.config.issue_events = !app.config.issue_events,
+        4 => app.config.pulls = !app.config.pulls,
+        5 => app.config.pull_comments = !app.config.pull_comments,
+        6 => app.config.pull_commits = !app.config.pull_commits,
+        7 => app.config.pull_reviews = !app.config.pull_reviews,
+        8 => app.config.labels = !app.config.labels,
+        9 => app.config.milestones = !app.config.milestones,
+        10 => app.config.releases = !app.config.releases,
+        11 => app.config.release_assets = !app.config.release_assets,
+        12 => app.config.hooks = !app.config.hooks,
         13 => app.config.security_advisories = !app.config.security_advisories,
-        14 => app.config.wikis               = !app.config.wikis,
-        15 => app.config.starred             = !app.config.starred,
-        16 => app.config.clone_starred       = !app.config.clone_starred,
-        17 => app.config.watched             = !app.config.watched,
-        18 => app.config.followers           = !app.config.followers,
-        19 => app.config.following           = !app.config.following,
-        20 => app.config.gists               = !app.config.gists,
-        21 => app.config.starred_gists       = !app.config.starred_gists,
-        22 => app.config.topics              = !app.config.topics,
-        23 => app.config.branches            = !app.config.branches,
-        24 => app.config.deploy_keys         = !app.config.deploy_keys,
-        25 => app.config.collaborators       = !app.config.collaborators,
-        26 => app.config.org_members         = !app.config.org_members,
-        27 => app.config.org_teams           = !app.config.org_teams,
-        28 => app.config.actions             = !app.config.actions,
-        29 => app.config.action_runs         = !app.config.action_runs,
-        30 => app.config.environments        = !app.config.environments,
-        31 => app.config.discussions         = !app.config.discussions,
-        32 => app.config.projects            = !app.config.projects,
-        33 => app.config.packages            = !app.config.packages,
-        _  => {}
+        14 => app.config.wikis = !app.config.wikis,
+        15 => app.config.starred = !app.config.starred,
+        16 => app.config.clone_starred = !app.config.clone_starred,
+        17 => app.config.watched = !app.config.watched,
+        18 => app.config.followers = !app.config.followers,
+        19 => app.config.following = !app.config.following,
+        20 => app.config.gists = !app.config.gists,
+        21 => app.config.starred_gists = !app.config.starred_gists,
+        22 => app.config.topics = !app.config.topics,
+        23 => app.config.branches = !app.config.branches,
+        24 => app.config.deploy_keys = !app.config.deploy_keys,
+        25 => app.config.collaborators = !app.config.collaborators,
+        26 => app.config.org_members = !app.config.org_members,
+        27 => app.config.org_teams = !app.config.org_teams,
+        28 => app.config.actions = !app.config.actions,
+        29 => app.config.action_runs = !app.config.action_runs,
+        30 => app.config.environments = !app.config.environments,
+        31 => app.config.discussions = !app.config.discussions,
+        32 => app.config.projects = !app.config.projects,
+        33 => app.config.packages = !app.config.packages,
+        _ => {}
     }
 }
 
