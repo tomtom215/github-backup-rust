@@ -10,7 +10,7 @@ repository.workspace = true
 
 [dependencies]
 # TUI framework
-ratatui = "0.29"
+ratatui = "0.30"
 
 # Workspace dependencies
 github-backup-types  = { workspace = true }
