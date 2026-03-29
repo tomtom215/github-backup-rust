@@ -6,7 +6,7 @@ Contributions are welcome!  Please follow these guidelines.
 
 ### Prerequisites
 
-- Rust 1.85+ (install via [rustup](https://rustup.rs))
+- Rust 1.88+ (install via [rustup](https://rustup.rs))
 - `git` on `$PATH`
 - Optional: `cargo-deny` for licence checking
 
@@ -39,7 +39,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # MSRV check
-cargo +1.85 build --workspace
+cargo +1.88 build --workspace
 
 # Documentation
 cargo doc --workspace --no-deps

@@ -4,7 +4,7 @@
 [![Book](https://github.com/tomtom215/github-backup-rust/actions/workflows/pages.yml/badge.svg)](https://tomtom215.github.io/github-backup-rust/)
 [![Crates.io](https://img.shields.io/crates/v/github-backup.svg)](https://crates.io/crates/github-backup)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV: 1.85](https://img.shields.io/badge/MSRV-1.85-orange.svg)](Cargo.toml)
+[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
 
 A comprehensive, production-ready GitHub backup tool written in Rust.
 

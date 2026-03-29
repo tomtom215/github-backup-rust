@@ -131,4 +131,4 @@ All notable changes are documented here.  This project follows [Semantic Version
 - **Concurrent backup**: semaphore-based, configurable with `--concurrency`.
 - **Dry-run mode**: `--dry-run` previews actions without executing them.
 - **Shell completions**: bash, zsh, fish, powershell, elvish.
-- CI: rustfmt, clippy (`-D warnings`), tests (Ubuntu + macOS), MSRV 1.85, `cargo-audit`, `cargo-deny`.
+- CI: rustfmt, clippy (`-D warnings`), tests (Ubuntu + macOS), MSRV 1.88, `cargo-audit`, `cargo-deny`.

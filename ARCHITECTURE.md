@@ -193,4 +193,4 @@ the RustCrypto project (no OpenSSL).
 | Linting | `cargo clippy -D warnings` |
 | Formatting | `cargo fmt --check` |
 | Security | `cargo audit` + `cargo deny` |
-| MSRV | `cargo build` with Rust 1.85 |
+| MSRV | `cargo build` with Rust 1.88 |

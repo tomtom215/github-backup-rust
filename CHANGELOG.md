@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **5 new `merge_config` tests**: covering `org`, `prefer_ssh` / `no_prune`, mirror fields,
   S3 fields, and CLI-wins-over-config for S3 bucket/region.
 
+### Changed
+
+- **MSRV raised from 1.85 to 1.88**: `ratatui@0.30` and its transitive dependencies
+  (`darling@0.23`, `instability@0.3`, `time@0.3.47`) require Rust 1.88.  The workspace
+  `rust-version` in `Cargo.toml` has been updated accordingly.
+
+- **`deny.toml` allows `Zlib` licence**: `foldhash@0.2` (transitive dep via
+  `hashbrown → indexmap → ratatui-core`) uses the Zlib licence, which is OSI-approved
+  and FSF-Free.  Added to the allowed list.
+
 ### Fixed
 
 - **`org` merge bug**: `merge_config` now applies `cfg.org` when the CLI `--org` flag was
