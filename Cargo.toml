@@ -7,6 +7,7 @@ members = [
     "crates/github-backup",
     "crates/github-backup-mirror",
     "crates/github-backup-s3",
+    "crates/github-backup-tui",
 ]
 
 [workspace.package]
@@ -64,6 +65,7 @@ github-backup-client = { path = "crates/github-backup-client" }
 github-backup-core = { path = "crates/github-backup-core" }
 github-backup-mirror = { path = "crates/github-backup-mirror" }
 github-backup-s3 = { path = "crates/github-backup-s3" }
+github-backup-tui = { path = "crates/github-backup-tui" }
 
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse"] }

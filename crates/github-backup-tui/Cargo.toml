@@ -1,0 +1,26 @@
+[package]
+name = "github-backup-tui"
+description = "Ratatui TUI interface for github-backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# TUI framework
+ratatui = "0.29"
+
+# Workspace dependencies
+github-backup-types  = { workspace = true }
+github-backup-client = { workspace = true }
+github-backup-core   = { workspace = true }
+github-backup-mirror = { workspace = true }
+github-backup-s3     = { workspace = true }
+tokio        = { workspace = true }
+serde_json   = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror    = { workspace = true }
