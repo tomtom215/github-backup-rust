@@ -8,7 +8,10 @@ use super::*;
 #[test]
 fn credential_token_authorization_header_has_bearer_prefix() {
     let cred = Credential::Token("ghp_test123".to_string());
-    assert_eq!(cred.authorization_header(), "Bearer ghp_test123");
+    assert_eq!(
+        cred.authorization_header(),
+        Some("Bearer ghp_test123".to_string())
+    );
 }
 
 #[test]
@@ -155,6 +158,12 @@ fn config_file_default_has_all_none() {
     assert!(cfg.output.is_none());
     assert!(cfg.concurrency.is_none());
     assert!(cfg.api_url.is_none());
+}
+
+#[test]
+fn credential_anonymous_has_no_authorization_header() {
+    let cred = Credential::Anonymous;
+    assert_eq!(cred.authorization_header(), None);
 }
 
 #[test]

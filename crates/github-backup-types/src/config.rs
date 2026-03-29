@@ -16,14 +16,22 @@ pub enum Credential {
     ///
     /// Used as `Authorization: Bearer <token>` on every API request.
     Token(String),
+    /// No authentication — unauthenticated requests only.
+    ///
+    /// GitHub allows unauthenticated access to **public** data with a rate
+    /// limit of 60 requests per hour.  Use a token for higher limits and
+    /// access to private resources.
+    Anonymous,
 }
 
 impl Credential {
-    /// Returns the `Authorization` header value for this credential.
+    /// Returns the `Authorization` header value for this credential, or
+    /// `None` for [`Credential::Anonymous`] (no header should be sent).
     #[must_use]
-    pub fn authorization_header(&self) -> String {
+    pub fn authorization_header(&self) -> Option<String> {
         match self {
-            Credential::Token(t) => format!("Bearer {t}"),
+            Credential::Token(t) => Some(format!("Bearer {t}")),
+            Credential::Anonymous => None,
         }
     }
 }
@@ -118,6 +126,26 @@ impl OutputConfig {
         self.root.join(owner).join("json")
     }
 
+    /// Returns the root directory for starred-repository git clones:
+    /// `<root>/<owner>/git/starred/`.
+    ///
+    /// Individual repos are cloned into subdirectories:
+    /// `<root>/<owner>/git/starred/<upstream-owner>/<repo>.git`.
+    #[must_use]
+    pub fn starred_repos_dir(&self, owner: &str) -> PathBuf {
+        self.root.join(owner).join("git").join("starred")
+    }
+
+    /// Returns the path to the starred-repos clone queue file:
+    /// `<root>/<owner>/json/starred_clone_queue.json`.
+    #[must_use]
+    pub fn starred_queue_path(&self, owner: &str) -> PathBuf {
+        self.root
+            .join(owner)
+            .join("json")
+            .join("starred_clone_queue.json")
+    }
+
     /// Returns the path for a top-level owner JSON file (followers, starred…):
     /// `<root>/<owner>/json/<filename>`.
     #[must_use]
@@ -199,8 +227,18 @@ pub struct BackupOptions {
     pub wikis: bool,
 
     // ── User / organisation data ──────────────────────────────────────────
-    /// Backup the list of repositories starred by the target user.
+    /// Backup the list of repositories starred by the target user (JSON list).
     pub starred: bool,
+    /// Clone every starred repository as a bare mirror.
+    ///
+    /// Uses a durable queue at
+    /// `<output>/<owner>/json/starred_clone_queue.json` that persists across
+    /// runs, enabling pause and resume.  Re-running with this flag set will
+    /// continue from where the previous run stopped.
+    ///
+    /// Not included in [`BackupOptions::all`] because it can consume
+    /// substantial disk space and time for users with many starred repos.
+    pub clone_starred: bool,
     /// Backup the list of repositories watched by the target user.
     pub watched: bool,
     /// Backup the target user's follower list.
@@ -217,6 +255,32 @@ pub struct BackupOptions {
     pub topics: bool,
     /// Backup the list of repository branches and their protection status.
     pub branches: bool,
+    /// Backup the deploy keys configured on each repository.
+    ///
+    /// Requires admin access to the repository; non-admin repos are skipped
+    /// with an informational log message (not an error).
+    pub deploy_keys: bool,
+    /// Backup the list of repository collaborators and their permissions.
+    ///
+    /// Requires admin access to the repository; non-admin repos are skipped
+    /// with an informational log message.
+    pub collaborators: bool,
+
+    // ── Organisation data ─────────────────────────────────────────────────
+    /// Backup the member list of the organisation.
+    ///
+    /// Only meaningful when [`target`] is [`BackupTarget::Org`]; ignored for
+    /// user targets.
+    ///
+    /// [`target`]: BackupOptions::target
+    pub org_members: bool,
+    /// Backup the team list of the organisation.
+    ///
+    /// Only meaningful when [`target`] is [`BackupTarget::Org`]; ignored for
+    /// user targets.
+    ///
+    /// [`target`]: BackupOptions::target
+    pub org_teams: bool,
 
     // ── Repository name filters ───────────────────────────────────────────
     /// Only back up repositories whose names match at least one of these glob
@@ -292,6 +356,7 @@ impl BackupOptions {
             security_advisories: true,
             wikis: true,
             starred: true,
+            clone_starred: false, // opt-in only; can be very large
             watched: true,
             followers: true,
             following: true,
@@ -299,6 +364,10 @@ impl BackupOptions {
             starred_gists: true,
             topics: true,
             branches: true,
+            deploy_keys: true,
+            collaborators: true,
+            org_members: true,
+            org_teams: true,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
@@ -395,8 +464,10 @@ pub struct ConfigFile {
     pub security_advisories: Option<bool>,
     /// Clone repository wikis.
     pub wikis: Option<bool>,
-    /// Back up starred repositories.
+    /// Back up starred repositories (JSON list).
     pub starred: Option<bool>,
+    /// Clone every starred repository as a git mirror.
+    pub clone_starred: Option<bool>,
     /// Back up watched repositories.
     pub watched: Option<bool>,
     /// Back up follower list.
@@ -412,6 +483,14 @@ pub struct ConfigFile {
     pub topics: Option<bool>,
     /// Back up the list of repository branches.
     pub branches: Option<bool>,
+    /// Back up deploy keys for each repository.
+    pub deploy_keys: Option<bool>,
+    /// Back up the list of repository collaborators.
+    pub collaborators: Option<bool>,
+    /// Back up the member list of the organisation.
+    pub org_members: Option<bool>,
+    /// Back up the team list of the organisation.
+    pub org_teams: Option<bool>,
 
     /// Only back up repositories matching these glob patterns (comma-separated
     /// or as a TOML array).

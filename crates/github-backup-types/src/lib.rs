@@ -25,13 +25,19 @@
 //! | [`hook`] | Repository webhooks |
 //! | [`security_advisory`] | Published security advisories |
 //! | [`user`] | User / actor summaries |
+//! | [`deploy_key`] | Repository deploy keys |
+//! | [`collaborator`] | Repository collaborators with permission levels |
+//! | [`team`] | GitHub organisation teams |
+//! | [`starred_queue`] | Durable queue types for starred-repo clone progress |
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
 pub mod branch;
+pub mod collaborator;
 pub mod config;
+pub mod deploy_key;
 pub mod gist;
 pub mod glob;
 pub mod hook;
@@ -42,11 +48,15 @@ pub mod pull_request;
 pub mod release;
 pub mod repository;
 pub mod security_advisory;
+pub mod starred_queue;
+pub mod team;
 pub mod user;
 
 // Convenience re-exports for the most commonly used types.
 pub use branch::{Branch, BranchCommit};
+pub use collaborator::{Collaborator, CollaboratorPermissions};
 pub use config::{BackupOptions, ConfigFile, OutputConfig};
+pub use deploy_key::DeployKey;
 pub use gist::Gist;
 pub use hook::Hook;
 pub use issue::{Issue, IssueComment, IssueEvent};
@@ -56,4 +66,5 @@ pub use pull_request::{PullRequest, PullRequestComment, PullRequestCommit, PullR
 pub use release::{Release, ReleaseAsset};
 pub use repository::Repository;
 pub use security_advisory::SecurityAdvisory;
+pub use team::{Team, TeamParent};
 pub use user::User;

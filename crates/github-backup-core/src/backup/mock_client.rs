@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use github_backup_client::{BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
-    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
-    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
-    SecurityAdvisory, User,
+    Branch, Collaborator, DeployKey, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, Team, User,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -48,6 +48,10 @@ struct MockData {
     asset_bytes: Vec<u8>,
     topics: Vec<String>,
     branches: Vec<Branch>,
+    deploy_keys: Vec<DeployKey>,
+    collaborators: Vec<Collaborator>,
+    org_members: Vec<User>,
+    org_teams: Vec<Team>,
 }
 
 #[allow(dead_code)]
@@ -132,6 +136,30 @@ impl MockBackupClient {
     /// Pre-loads branches.
     pub fn with_branches(self, branches: Vec<Branch>) -> Self {
         self.inner.lock().unwrap().branches = branches;
+        self
+    }
+
+    /// Pre-loads deploy keys.
+    pub fn with_deploy_keys(self, keys: Vec<DeployKey>) -> Self {
+        self.inner.lock().unwrap().deploy_keys = keys;
+        self
+    }
+
+    /// Pre-loads collaborators.
+    pub fn with_collaborators(self, collaborators: Vec<Collaborator>) -> Self {
+        self.inner.lock().unwrap().collaborators = collaborators;
+        self
+    }
+
+    /// Pre-loads org members.
+    pub fn with_org_members(self, members: Vec<User>) -> Self {
+        self.inner.lock().unwrap().org_members = members;
+        self
+    }
+
+    /// Pre-loads org teams.
+    pub fn with_org_teams(self, teams: Vec<Team>) -> Self {
+        self.inner.lock().unwrap().org_teams = teams;
         self
     }
 }
@@ -343,5 +371,39 @@ impl BackupClient for MockBackupClient {
     ) -> BoxFuture<'a, Result<Bytes, ClientError>> {
         let d = self.inner.lock().unwrap().asset_bytes.clone();
         Box::pin(async move { Ok(Bytes::from(d)) })
+    }
+
+    fn list_deploy_keys<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<DeployKey>, ClientError>> {
+        let d = self.inner.lock().unwrap().deploy_keys.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_collaborators<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Collaborator>, ClientError>> {
+        let d = self.inner.lock().unwrap().collaborators.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_org_members<'a>(
+        &'a self,
+        _org: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>> {
+        let d = self.inner.lock().unwrap().org_members.clone();
+        Box::pin(async move { Ok(d) })
+    }
+
+    fn list_org_teams<'a>(
+        &'a self,
+        _org: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Team>, ClientError>> {
+        let d = self.inner.lock().unwrap().org_teams.clone();
+        Box::pin(async move { Ok(d) })
     }
 }

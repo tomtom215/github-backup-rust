@@ -7,15 +7,19 @@
 //! API endpoint methods live in the [`endpoints`] submodule.
 
 mod endpoints;
+mod proxy;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, StatusCode};
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use proxy::ProxyConnector;
 
 use github_backup_types::config::Credential;
 
@@ -33,10 +37,26 @@ const MAX_SERVER_ERROR_RETRIES: u32 = 3;
 /// Default request timeout. GitHub's API can be slow for large repos.
 pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-type HyperClient = Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
->;
+/// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
+/// proxy connection.  Both variants share the same `hyper_util::client::legacy`
+/// error type so call sites need no special casing.
+#[derive(Clone)]
+pub(super) enum HyperClientKind {
+    Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
+    Proxied(Client<ProxyConnector, Full<Bytes>>),
+}
+
+impl HyperClientKind {
+    async fn request(
+        &self,
+        req: hyper::Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
+        match self {
+            HyperClientKind::Direct(c) => c.request(req).await,
+            HyperClientKind::Proxied(c) => c.request(req).await,
+        }
+    }
+}
 
 /// Async GitHub REST API v3 client.
 ///
@@ -46,9 +66,15 @@ type HyperClient = Client<
 ///
 /// The client is cheaply cloneable — the underlying hyper connection pool is
 /// `Arc`-wrapped.
+///
+/// **Proxy support**: if `HTTPS_PROXY` (or `https_proxy`) is set in the
+/// environment the client automatically routes all connections through the
+/// proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL
+/// (`http://user:pass@host:port`) are forwarded as a `Proxy-Authorization`
+/// header.
 #[derive(Clone)]
 pub struct GitHubClient {
-    pub(super) http: HyperClient,
+    pub(super) http: HyperClientKind,
     pub(super) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(super) api_base: String,
@@ -80,20 +106,33 @@ impl GitHubClient {
     /// typically at `https://github.example.com/api/v3`.  The URL is stored
     /// verbatim and used as the prefix for all API requests.
     ///
+    /// If `HTTPS_PROXY` (or `https_proxy`) is set in the environment, the
+    /// client will route HTTPS requests through that proxy via HTTP `CONNECT`.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
-        let tls_config = build_tls_config()?;
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_only()
-            .enable_http1()
-            .build();
+        let http = if let Some(proxy_config) = proxy::proxy_config_from_env() {
+            info!(
+                host = %proxy_config.host,
+                port = proxy_config.port,
+                "routing GitHub API calls through HTTPS proxy"
+            );
+            let tls_config = build_tls_config()?;
+            let connector = ProxyConnector::new(proxy_config, tls_config);
+            HyperClientKind::Proxied(Client::builder(TokioExecutor::new()).build(connector))
+        } else {
+            let tls_config = build_tls_config()?;
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config(tls_config)
+                .https_only()
+                .enable_http1()
+                .build();
+            HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(https))
+        };
 
-        let http = Client::builder(TokioExecutor::new()).build(https);
         let api_base = api_base_url.trim_end_matches('/').to_string();
-
         Ok(Self {
             http,
             credential,
@@ -110,7 +149,7 @@ impl GitHubClient {
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
-    /// or `None` for other credential types.
+    /// or `None` for anonymous / other credential types.
     ///
     /// Used by the backup engine to inject the token into git clone commands
     /// for HTTPS authentication on private repositories.
@@ -118,6 +157,7 @@ impl GitHubClient {
     pub fn token(&self) -> Option<String> {
         match &self.credential {
             Credential::Token(t) => Some(t.clone()),
+            Credential::Anonymous => None,
         }
     }
 
@@ -244,16 +284,24 @@ impl GitHubClient {
 
     /// Builds a [`hyper::http::request::Builder`] pre-populated with auth
     /// and user-agent headers.
+    ///
+    /// The `Authorization` header is omitted for [`Credential::Anonymous`]
+    /// so that GitHub's unauthenticated rate-limit bucket applies.
     pub(super) fn build_request(
         &self,
         method: Method,
         url: &str,
     ) -> Result<hyper::http::request::Builder, ClientError> {
-        Ok(Request::builder()
+        let mut builder = Request::builder()
             .method(method)
             .uri(url)
-            .header("Authorization", self.credential.authorization_header())
-            .header("User-Agent", USER_AGENT))
+            .header("User-Agent", USER_AGENT);
+
+        if let Some(auth) = self.credential.authorization_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        Ok(builder)
     }
 }
 

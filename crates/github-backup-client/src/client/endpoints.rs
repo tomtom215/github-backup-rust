@@ -13,9 +13,9 @@ use hyper::Method;
 use tracing::info;
 
 use github_backup_types::{
-    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
-    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
-    SecurityAdvisory, User,
+    Branch, Collaborator, DeployKey, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, Team, User,
 };
 
 use crate::error::ClientError;
@@ -471,5 +471,72 @@ impl GitHubClient {
         let parsed: TopicsResponse = serde_json::from_slice(&body)?;
         info!(owner, repo, count = parsed.names.len(), "fetched topics");
         Ok(parsed.names)
+    }
+
+    // ── Deploy keys ───────────────────────────────────────────────────────
+
+    /// Lists deploy keys configured on a repository.
+    ///
+    /// Requires admin access to the repository; callers should handle
+    /// [`ClientError::ApiError`] with status 403 or 404 gracefully.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_deploy_keys(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<DeployKey>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/keys?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
+    }
+
+    // ── Collaborators ─────────────────────────────────────────────────────
+
+    /// Lists collaborators on a repository.
+    ///
+    /// Returns users who have been explicitly granted access to the repository.
+    /// Requires admin access; callers should handle 403/404 gracefully.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_collaborators(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<Collaborator>, ClientError> {
+        let api = self.api();
+        let url =
+            format!("{api}/repos/{owner}/{repo}/collaborators?per_page={PER_PAGE}&affiliation=all");
+        self.get_all_pages(&url).await
+    }
+
+    // ── Organisation data ─────────────────────────────────────────────────
+
+    /// Lists members of a GitHub organisation.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_org_members(&self, org: &str) -> Result<Vec<User>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/orgs/{org}/members?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
+    }
+
+    /// Lists teams in a GitHub organisation.
+    ///
+    /// Requires the authenticated user to be an organisation member.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_org_teams(&self, org: &str) -> Result<Vec<Team>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/orgs/{org}/teams?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
     }
 }

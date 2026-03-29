@@ -1,24 +1,33 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! User-level data backup: starred repos, watched repos, followers, following.
+//! User-level and org-level owner data backup.
+//!
+//! Handles starred repos, watched repos, followers, following (all targets),
+//! and org members / org teams (org targets only).
 
 use std::path::Path;
 
 use tracing::info;
 
 use github_backup_client::BackupClient;
-use github_backup_types::config::BackupOptions;
+use github_backup_types::config::{BackupOptions, BackupTarget};
 
 use crate::{error::CoreError, storage::Storage};
 
-/// Backs up user-level relationship data for `username`.
+/// Backs up owner-level relationship and social data.
 ///
 /// Writes JSON files into `owner_json_dir`:
-/// - `starred.json`   – repositories starred by the user
-/// - `watched.json`   – repositories watched by the user
-/// - `followers.json` – users who follow the user
-/// - `following.json` – users the user follows
+///
+/// For **all** targets:
+/// - `starred.json`   – repositories starred by the owner
+/// - `watched.json`   – repositories watched by the owner
+/// - `followers.json` – users who follow the owner
+/// - `following.json` – users the owner follows
+///
+/// For **organisation** targets only (when `opts.target == BackupTarget::Org`):
+/// - `org_members.json` – organisation member list
+/// - `org_teams.json`   – organisation team list
 ///
 /// # Errors
 ///
@@ -31,7 +40,7 @@ pub async fn backup_user_data(
     storage: &impl Storage,
 ) -> Result<(), CoreError> {
     if opts.dry_run {
-        info!(username, "dry-run: skipping user data backup");
+        info!(username, "dry-run: skipping owner data backup");
         return Ok(());
     }
 
@@ -59,6 +68,21 @@ pub async fn backup_user_data(
         storage.write_json(&owner_json_dir.join("following.json"), &following)?;
     }
 
+    // Org-specific data — only fetched when target is an organisation.
+    if opts.target == BackupTarget::Org {
+        if opts.org_members {
+            info!(org = username, "fetching org members");
+            let members = client.list_org_members(username).await?;
+            storage.write_json(&owner_json_dir.join("org_members.json"), &members)?;
+        }
+
+        if opts.org_teams {
+            info!(org = username, "fetching org teams");
+            let teams = client.list_org_teams(username).await?;
+            storage.write_json(&owner_json_dir.join("org_teams.json"), &teams)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -67,7 +91,7 @@ mod tests {
     use super::*;
     use crate::backup::mock_client::MockBackupClient;
     use crate::storage::test_support::MemStorage;
-    use github_backup_types::config::BackupOptions;
+    use github_backup_types::config::{BackupOptions, BackupTarget};
     use std::path::PathBuf;
 
     const JSON_DIR: &str = "/json";
@@ -227,6 +251,78 @@ mod tests {
             storage.len(),
             4,
             "all four user-data files should be written"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_user_data_org_members_written_for_org_target() {
+        let client = MockBackupClient::new();
+        let storage = MemStorage::default();
+        let opts = BackupOptions {
+            target: BackupTarget::Org,
+            org_members: true,
+            ..Default::default()
+        };
+
+        backup_user_data(&client, "my-org", &opts, &PathBuf::from(JSON_DIR), &storage)
+            .await
+            .expect("backup_user_data org_members");
+
+        assert!(
+            storage
+                .get(&PathBuf::from(format!("{JSON_DIR}/org_members.json")))
+                .is_some(),
+            "org_members.json should be written for org target"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_user_data_org_members_not_written_for_user_target() {
+        let client = MockBackupClient::new();
+        let storage = MemStorage::default();
+        let opts = BackupOptions {
+            target: BackupTarget::User,
+            org_members: true, // flag set but target is User
+            ..Default::default()
+        };
+
+        backup_user_data(
+            &client,
+            "octocat",
+            &opts,
+            &PathBuf::from(JSON_DIR),
+            &storage,
+        )
+        .await
+        .expect("backup_user_data");
+
+        assert!(
+            storage
+                .get(&PathBuf::from(format!("{JSON_DIR}/org_members.json")))
+                .is_none(),
+            "org_members.json must not be written for a user target"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_user_data_org_teams_written_for_org_target() {
+        let client = MockBackupClient::new();
+        let storage = MemStorage::default();
+        let opts = BackupOptions {
+            target: BackupTarget::Org,
+            org_teams: true,
+            ..Default::default()
+        };
+
+        backup_user_data(&client, "my-org", &opts, &PathBuf::from(JSON_DIR), &storage)
+            .await
+            .expect("backup_user_data org_teams");
+
+        assert!(
+            storage
+                .get(&PathBuf::from(format!("{JSON_DIR}/org_teams.json")))
+                .is_some(),
+            "org_teams.json should be written for org target"
         );
     }
 }

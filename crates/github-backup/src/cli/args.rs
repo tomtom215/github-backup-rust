@@ -175,6 +175,7 @@ pub struct Args {
         "hooks", "security_advisories", "wikis",
         "starred", "watched", "followers", "following",
         "gists", "starred_gists", "topics", "branches",
+        "deploy_keys", "collaborators", "org_members", "org_teams",
     ])]
     pub all: bool,
 
@@ -277,9 +278,20 @@ pub struct Args {
     pub wikis: bool,
 
     // ── User / org data ────────────────────────────────────────────────────
-    /// Back up repositories starred by the owner.
+    /// Record the list of repositories starred by the owner as JSON.
     #[arg(long)]
     pub starred: bool,
+
+    /// Clone every starred repository as a bare mirror.
+    ///
+    /// Uses a durable queue at
+    /// `<output>/<owner>/json/starred_clone_queue.json` that persists across
+    /// runs.  Re-run with this flag to resume an interrupted clone.
+    ///
+    /// Not included in `--all` because it can consume significant disk space
+    /// and time for users with many starred repositories.
+    #[arg(long)]
+    pub clone_starred: bool,
 
     /// Back up repositories watched by the owner.
     #[arg(long)]
@@ -309,6 +321,31 @@ pub struct Args {
     /// Back up the list of repository branches and their protection status.
     #[arg(long)]
     pub branches: bool,
+
+    /// Back up deploy keys for each repository (requires admin access).
+    ///
+    /// Repositories where the token lacks admin access are skipped silently.
+    #[arg(long)]
+    pub deploy_keys: bool,
+
+    /// Back up the list of collaborators for each repository (requires admin access).
+    ///
+    /// Repositories where the token lacks admin access are skipped silently.
+    #[arg(long)]
+    pub collaborators: bool,
+
+    // ── Organisation data ──────────────────────────────────────────────────
+    /// Back up the member list of the organisation (requires `--org`).
+    ///
+    /// Ignored when backing up a user account.
+    #[arg(long)]
+    pub org_members: bool,
+
+    /// Back up the team list of the organisation (requires `--org`).
+    ///
+    /// Ignored when backing up a user account.
+    #[arg(long)]
+    pub org_teams: bool,
 
     // ── Repository name filters ────────────────────────────────────────────
     /// Only back up repositories whose names match this glob pattern.

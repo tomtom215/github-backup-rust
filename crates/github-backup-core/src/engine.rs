@@ -14,9 +14,10 @@ use github_backup_types::Repository;
 
 use crate::{
     backup::{
-        gist::backup_gists, issue::backup_issues, pull_request::backup_pull_requests,
-        release::backup_releases, repository::backup_repository, user_data::backup_user_data,
-        wiki::backup_wiki,
+        collaborators::backup_collaborators, deploy_keys::backup_deploy_keys, gist::backup_gists,
+        issue::backup_issues, pull_request::backup_pull_requests, release::backup_releases,
+        repository::backup_repository, starred_repos::backup_starred_repos,
+        user_data::backup_user_data, wiki::backup_wiki,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -118,8 +119,20 @@ where
         )
         .await?;
 
-        // ── Gists ──────────────────────────────────────────────────────────
+        // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();
+        backup_starred_repos(
+            &self.client,
+            &self.git,
+            owner,
+            &self.opts,
+            &self.output.starred_repos_dir(owner),
+            &self.output.starred_queue_path(owner),
+            &clone_opts,
+        )
+        .await?;
+
+        // ── Gists ──────────────────────────────────────────────────────────
         let gist_count = backup_gists(
             &self.client,
             owner,
@@ -362,6 +375,9 @@ where
         let branches = client.list_branches(owner, &repo.name).await?;
         storage.write_json(&meta_dir.join("branches.json"), &branches)?;
     }
+
+    backup_deploy_keys(client, owner, &repo.name, opts, meta_dir, storage).await?;
+    backup_collaborators(client, owner, &repo.name, opts, meta_dir, storage).await?;
 
     Ok(())
 }

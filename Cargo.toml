@@ -29,6 +29,9 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "http2", "tls12"] }
+tokio-rustls = "0.26"
+tower-service = "0.3"
+base64 = "0.22"
 rustls = { version = "0.23", features = ["std"] }
 rustls-native-certs = "0.8"
 bytes = "1"
@@ -64,6 +67,9 @@ github-backup-s3 = { path = "crates/github-backup-s3" }
 
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+# Date / time formatting (RFC 3339 timestamps in queue files)
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 
 # Test-only
 tokio-test = "0.4"

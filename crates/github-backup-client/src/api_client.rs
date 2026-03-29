@@ -27,9 +27,9 @@ use std::pin::Pin;
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, PullRequest,
-    PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
-    SecurityAdvisory, User,
+    Branch, Collaborator, DeployKey, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release, Repository,
+    SecurityAdvisory, Team, User,
 };
 
 use crate::error::ClientError;
@@ -217,6 +217,41 @@ pub trait BackupClient: Send + Sync {
         &'a self,
         asset_url: &'a str,
     ) -> BoxFuture<'a, Result<Bytes, ClientError>>;
+
+    // ── Deploy keys ───────────────────────────────────────────────────────
+
+    /// Lists deploy keys configured on a repository.
+    ///
+    /// Callers should handle [`ClientError::ApiError`] with status 403/404
+    /// gracefully (insufficient permissions).
+    fn list_deploy_keys<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<DeployKey>, ClientError>>;
+
+    // ── Collaborators ─────────────────────────────────────────────────────
+
+    /// Lists collaborators on a repository.
+    ///
+    /// Callers should handle [`ClientError::ApiError`] with status 403/404
+    /// gracefully (insufficient permissions).
+    fn list_collaborators<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Collaborator>, ClientError>>;
+
+    // ── Organisation data ─────────────────────────────────────────────────
+
+    /// Lists members of a GitHub organisation.
+    fn list_org_members<'a>(
+        &'a self,
+        org: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>>;
+
+    /// Lists teams in a GitHub organisation.
+    fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Vec<Team>, ClientError>>;
 }
 
 // ── Blanket impl for the production client ────────────────────────────────
@@ -415,5 +450,32 @@ impl BackupClient for GitHubClient {
         asset_url: &'a str,
     ) -> BoxFuture<'a, Result<Bytes, ClientError>> {
         Box::pin(GitHubClient::download_release_asset(self, asset_url))
+    }
+
+    fn list_deploy_keys<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<DeployKey>, ClientError>> {
+        Box::pin(GitHubClient::list_deploy_keys(self, owner, repo))
+    }
+
+    fn list_collaborators<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Collaborator>, ClientError>> {
+        Box::pin(GitHubClient::list_collaborators(self, owner, repo))
+    }
+
+    fn list_org_members<'a>(
+        &'a self,
+        org: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>> {
+        Box::pin(GitHubClient::list_org_members(self, org))
+    }
+
+    fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Vec<Team>, ClientError>> {
+        Box::pin(GitHubClient::list_org_teams(self, org))
     }
 }

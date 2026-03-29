@@ -618,11 +618,16 @@ proptest! {
         security_advisories in any::<bool>(),
         wikis in any::<bool>(),
         starred in any::<bool>(),
+        clone_starred in any::<bool>(),
         watched in any::<bool>(),
         followers in any::<bool>(),
         following in any::<bool>(),
         gists in any::<bool>(),
         starred_gists in any::<bool>(),
+        deploy_keys in any::<bool>(),
+        collaborators in any::<bool>(),
+        org_members in any::<bool>(),
+        org_teams in any::<bool>(),
         dry_run in any::<bool>(),
         concurrency in 1usize..16usize,
         is_org in any::<bool>(),
@@ -637,10 +642,14 @@ proptest! {
             pulls, pull_comments, pull_commits, pull_reviews,
             labels, milestones, releases, release_assets,
             hooks, security_advisories, wikis,
-            starred, watched, followers, following,
+            starred, clone_starred, watched, followers, following,
             gists, starred_gists,
             topics: false,
             branches: false,
+            deploy_keys,
+            collaborators,
+            org_members,
+            org_teams,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
@@ -670,6 +679,7 @@ proptest! {
         prop_assert_eq!(decoded.security_advisories, opts.security_advisories);
         prop_assert_eq!(decoded.wikis, opts.wikis);
         prop_assert_eq!(decoded.starred, opts.starred);
+        prop_assert_eq!(decoded.clone_starred, opts.clone_starred);
         prop_assert_eq!(decoded.watched, opts.watched);
         prop_assert_eq!(decoded.followers, opts.followers);
         prop_assert_eq!(decoded.following, opts.following);
@@ -677,6 +687,10 @@ proptest! {
         prop_assert_eq!(decoded.starred_gists, opts.starred_gists);
         prop_assert_eq!(decoded.topics, opts.topics);
         prop_assert_eq!(decoded.branches, opts.branches);
+        prop_assert_eq!(decoded.deploy_keys, opts.deploy_keys);
+        prop_assert_eq!(decoded.collaborators, opts.collaborators);
+        prop_assert_eq!(decoded.org_members, opts.org_members);
+        prop_assert_eq!(decoded.org_teams, opts.org_teams);
         prop_assert_eq!(decoded.dry_run, opts.dry_run);
         prop_assert_eq!(decoded.concurrency, opts.concurrency);
     }

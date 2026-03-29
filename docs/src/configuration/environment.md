@@ -22,6 +22,28 @@
 |---------|----------------|-------------|
 | `MIRROR_TOKEN` | `--mirror-token` | API token for Gitea/Codeberg mirror destination |
 
+## Proxy
+
+| Variable | Description |
+|---------|-------------|
+| `HTTPS_PROXY` | Route HTTPS API calls through this proxy (e.g. `http://user:pass@proxy.example.com:3128`). Also read as `https_proxy` (lowercase). |
+| `NO_PROXY` | Comma-separated list of hosts that bypass the proxy (e.g. `localhost,127.0.0.1`). |
+
+`github-backup` automatically detects `HTTPS_PROXY` / `https_proxy` at startup and routes all GitHub API calls through the configured proxy using HTTP `CONNECT` tunnelling.  Credentials embedded in the URL (`http://user:pass@host:port`) are forwarded as a `Proxy-Authorization` header.
+
+```bash
+export HTTPS_PROXY=http://proxy.corp.example.com:3128
+github-backup octocat --output /backup --all
+```
+
+With authentication:
+```bash
+export HTTPS_PROXY=http://proxyuser:secret@proxy.corp.example.com:3128
+github-backup octocat --output /backup --all
+```
+
+---
+
 ## Logging
 
 | Variable | Description |

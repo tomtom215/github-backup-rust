@@ -1,6 +1,6 @@
 # Authentication
 
-`github-backup` supports two authentication methods: a **Personal Access Token** (PAT) and the **GitHub OAuth device flow**.
+`github-backup` supports three authentication modes: a **Personal Access Token** (PAT), the **GitHub OAuth device flow**, and **no token** (unauthenticated, public data only).
 
 ---
 
@@ -102,6 +102,30 @@ The default scope string `"repo gist read:org"` is sufficient for a complete bac
 | `gist` | Gists |
 | `read:org` | Organisation repositories |
 | `admin:repo_hook` | Webhooks (`--hooks`) |
+
+---
+
+## Unauthenticated Access (Public Repos Only)
+
+No token is required to back up **public** repositories, gists, and user data.
+Simply omit `--token` and skip the device flow:
+
+```bash
+github-backup octocat --output /backup --repositories --issues --releases
+```
+
+`github-backup` will warn you at startup:
+
+```
+WARN  no token provided — running unauthenticated (public data only, 60 req/h rate limit)
+```
+
+> **Rate limit**: unauthenticated requests are limited to **60 requests per hour** per source IP (GitHub's public bucket).  Accounts with many repositories or large issue histories will hit this quickly — use a token to get 5 000 requests/hour.
+
+Useful for:
+- Quick one-off snapshots of a public project.
+- CI pipelines that only need public metadata.
+- Testing the tool before creating a token.
 
 ---
 

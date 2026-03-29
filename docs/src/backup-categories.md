@@ -95,8 +95,13 @@ Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 | `--security-advisories` | Published security advisories |
 | `--topics` | Repository topics (tags) |
 | `--branches` | Branch list with tip SHAs and protection status |
+| `--deploy-keys` | Deploy keys attached to the repository (requires admin access) |
+| `--collaborators` | Collaborator list with permissions (requires admin access) |
 
-Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, etc.
+Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, `deploy_keys.json`, `collaborators.json`, etc.
+
+> **Note**: `--hooks`, `--deploy-keys`, and `--collaborators` all require admin access to the repository.
+> On repositories where the token lacks admin rights the tool logs a warning and continues rather than failing the entire backup.
 
 ---
 
@@ -115,14 +120,20 @@ Output:
 
 ## User / Organisation Data
 
-| Flag | Description |
-|------|-------------|
-| `--starred` | Repositories starred by the owner |
-| `--watched` | Repositories watched by the owner |
-| `--followers` | Follower list |
-| `--following` | Following list |
+| Flag | Description | Target |
+|------|-------------|--------|
+| `--starred` | Starred repos as a JSON list | User & Org |
+| `--clone-starred` | Clone every starred repo as a bare mirror (durable queue, pause/resume) | User & Org |
+| `--watched` | Repositories watched by the owner | User & Org |
+| `--followers` | Follower list | User & Org |
+| `--following` | Following list | User & Org |
+| `--org-members` | Organisation member list | **Org only** |
+| `--org-teams` | Organisation team list | **Org only** |
 
-Output: `<output>/<owner>/json/starred.json`, `watched.json`, etc.
+Output: `<output>/<owner>/json/starred.json`, `watched.json`, `org_members.json`, `org_teams.json`, etc.
+Cloned starred repos: `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git`
+
+> **Note**: `--org-members` and `--org-teams` are silently skipped for user targets. `--clone-starred` is intentionally omitted from `--all` due to its potentially large footprint.
 
 ---
 
