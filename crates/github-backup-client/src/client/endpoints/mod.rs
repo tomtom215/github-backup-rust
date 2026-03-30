@@ -15,7 +15,7 @@
 //! | [`keys`]      | deploy keys, collaborators                           |
 //! | [`org`]       | organisation members and teams                       |
 //! | [`actions`]   | workflows, workflow runs, deployment environments    |
-//! | [`write`]     | label and milestone creation (used by restore mode)  |
+//! | [`mod@write`] | label and milestone creation (used by restore mode)  |
 
 mod actions;
 mod community;
