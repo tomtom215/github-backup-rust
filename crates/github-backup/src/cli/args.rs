@@ -741,6 +741,23 @@ pub struct Args {
     #[arg(long, value_name = "FILE", requires = "decrypt")]
     pub decrypt_output: Option<PathBuf>,
 
+    // ── Webhook notification ───────────────────────────────────────────────
+    /// Send a webhook notification to this URL after the backup completes.
+    ///
+    /// Posts a JSON payload to the given URL with the backup outcome
+    /// (`"success"` or `"failure"`), the owner, timestamp, and counters.
+    /// Notification failures are logged as warnings and never cause the
+    /// backup process to exit with a non-zero code.
+    ///
+    /// Can also be set via the `BACKUP_NOTIFY_WEBHOOK` environment variable.
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "BACKUP_NOTIFY_WEBHOOK",
+        hide_env_values = false
+    )]
+    pub notify_webhook: Option<String>,
+
     // ── Logging ────────────────────────────────────────────────────────────
     /// Suppress all non-error output.
     #[arg(long, short = 'q')]

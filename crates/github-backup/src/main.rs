@@ -19,6 +19,7 @@ use github_backup_types::backup_state::BackupState;
 use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
 
 mod cli;
+mod notify;
 mod post_process;
 mod report;
 mod restore;
@@ -203,6 +204,7 @@ async fn main() -> ExitCode {
     let restore_target_org = args.restore_target_org.clone();
     let restore_yes = args.restore_yes;
     let dry_run = args.dry_run;
+    let notify_webhook = args.notify_webhook.clone();
 
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
@@ -303,6 +305,9 @@ async fn main() -> ExitCode {
         }
         Err(e) => {
             error!("backup failed: {e}");
+            if let Some(ref url) = notify_webhook {
+                notify::send_webhook(url, &owner, "failure", Some(&e.to_string()), 0, 0).await;
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -422,6 +427,19 @@ async fn main() -> ExitCode {
         if let Err(e) = apply_retention(&output_path, keep_last, max_age_days) {
             warn!(error = %e, "retention policy application failed (non-fatal)");
         }
+    }
+
+    // ── Webhook notification ───────────────────────────────────────────────
+    if let Some(ref url) = notify_webhook {
+        notify::send_webhook(
+            url,
+            &owner,
+            "success",
+            None,
+            stats.repos_backed_up(),
+            stats.repos_errored(),
+        )
+        .await;
     }
 
     ExitCode::SUCCESS

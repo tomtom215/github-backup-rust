@@ -28,6 +28,13 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
+bytes = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+hyper-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
