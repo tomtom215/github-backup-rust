@@ -38,6 +38,7 @@
 
 pub mod backup_state;
 pub mod branch;
+pub mod branch_protection;
 pub mod collaborator;
 pub mod config;
 pub mod deploy_key;
@@ -63,6 +64,10 @@ pub mod workflow;
 // Convenience re-exports for the most commonly used types.
 pub use backup_state::{BackupCheckpoint, BackupState};
 pub use branch::{Branch, BranchCommit};
+pub use branch_protection::{
+    AdminEnforcement, BranchProtection, RequiredPullRequestReviews, RequiredStatusChecks,
+    Restrictions, SimpleEnabled,
+};
 pub use collaborator::{Collaborator, CollaboratorPermissions};
 pub use config::{BackupOptions, ConfigFile, OutputConfig};
 pub use deploy_key::DeployKey;

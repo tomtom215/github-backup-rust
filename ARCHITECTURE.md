@@ -66,7 +66,8 @@ Backup modules (`crates/github-backup-core/src/backup/`), one file per category:
 - `user_data.rs` — starred, watched, followers, following
 - `labels.rs`, `milestones.rs` — repository metadata
 - `hooks.rs`, `security_advisories.rs` — admin metadata (graceful 403/404)
-- `topics.rs`, `branches.rs` — repository topology
+- `topics.rs`, `branches.rs` — repository topology; `branches.rs` also saves
+  `branch_protections.json` for protected branches (graceful 403/404 per branch)
 - `deploy_keys.rs`, `collaborators.rs` — access control metadata
 - `actions.rs`, `environments.rs` — GitHub Actions and deployments
 - `discussion.rs`, `project.rs`, `package.rs` — Discussions, Classic Projects, Packages

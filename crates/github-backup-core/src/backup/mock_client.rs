@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use github_backup_client::{BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
-    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
-    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
-    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, BranchProtection, ClassicProject, Collaborator, DeployKey, Discussion,
+    DiscussionComment, Environment, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    Package, PackageVersion, ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit,
+    PullRequestReview, Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -49,6 +49,8 @@ struct MockData {
     asset_bytes: Vec<u8>,
     topics: Vec<String>,
     branches: Vec<Branch>,
+    /// Maps branch name → protection rules.  Returns 404 when not found.
+    branch_protections: std::collections::HashMap<String, BranchProtection>,
     deploy_keys: Vec<DeployKey>,
     collaborators: Vec<Collaborator>,
     org_members: Vec<User>,
@@ -176,6 +178,15 @@ impl MockBackupClient {
     /// Pre-loads branches.
     pub fn with_branches(self, branches: Vec<Branch>) -> Self {
         self.inner.lock().unwrap().branches = branches;
+        self
+    }
+
+    /// Pre-loads branch-protection rules (keyed by branch name).
+    pub fn with_branch_protections(
+        self,
+        protections: std::collections::HashMap<String, BranchProtection>,
+    ) -> Self {
+        self.inner.lock().unwrap().branch_protections = protections;
         self
     }
 
@@ -457,6 +468,27 @@ impl BackupClient for MockBackupClient {
     ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>> {
         let d = self.inner.lock().unwrap().branches.clone();
         Box::pin(async move { Ok(d) })
+    }
+
+    fn get_branch_protection<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+        branch: &'a str,
+    ) -> BoxFuture<'a, Result<BranchProtection, ClientError>> {
+        let result = self
+            .inner
+            .lock()
+            .unwrap()
+            .branch_protections
+            .get(branch)
+            .cloned();
+        Box::pin(async move {
+            result.ok_or_else(|| ClientError::ApiError {
+                status: 404,
+                body: format!("no protection rules found for branch '{branch}'"),
+            })
+        })
     }
 
     fn download_release_asset<'a>(

@@ -33,10 +33,10 @@ use std::pin::Pin;
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
-    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
-    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, BranchProtection, ClassicProject, Collaborator, DeployKey, Discussion,
+    DiscussionComment, Environment, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    Package, PackageVersion, ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit,
+    PullRequestReview, Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -215,6 +215,17 @@ pub trait BackupClient: Send + Sync {
         owner: &'a str,
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>>;
+
+    /// Returns the detailed branch-protection rules for a single branch.
+    ///
+    /// Callers should handle [`ClientError::ApiError`] with status 403 (no
+    /// admin access) or 404 (branch has no protection rules) gracefully.
+    fn get_branch_protection<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        branch: &'a str,
+    ) -> BoxFuture<'a, Result<BranchProtection, ClientError>>;
 
     // ── Assets ────────────────────────────────────────────────────────────
 

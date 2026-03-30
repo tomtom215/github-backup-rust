@@ -11,7 +11,7 @@ use http_body_util::Full;
 use hyper::Method;
 use tracing::info;
 
-use github_backup_types::{Branch, Hook, Label, Milestone, Release, SecurityAdvisory};
+use github_backup_types::{Branch, BranchProtection, Hook, Label, Milestone, Release, SecurityAdvisory};
 
 use crate::error::ClientError;
 
@@ -146,6 +146,30 @@ impl GitHubClient {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
+    }
+
+    /// Returns the detailed branch-protection rules for a single branch.
+    ///
+    /// Calls `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
+    ///
+    /// Returns `Err(ClientError::ApiError { status: 403, .. })` when the
+    /// authenticated token lacks admin access to the repository, and
+    /// `Err(ClientError::ApiError { status: 404, .. })` when the branch does
+    /// not have protection enabled.  Callers should handle both gracefully.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or other API errors.
+    pub async fn get_branch_protection(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<BranchProtection, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/branches/{branch}/protection");
+        let (protection, _) = self.get_json_with_link::<BranchProtection>(&url).await?;
+        Ok(protection)
     }
 
     // ── Assets ────────────────────────────────────────────────────────────
