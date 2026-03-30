@@ -47,11 +47,15 @@
 
 - [Monitoring & Reporting](monitoring.md)
 
+# Restore & Recovery
+
+- [Restore Guide](restore.md)
+- [Operations Runbook](ops-runbook.md)
+
 # Development
 
 - [Architecture](development/architecture.md)
 - [Contributing](development/contributing.md)
-- [Restore from Backup](development/restore.md)
 - [Security](development/security.md)
 - [Troubleshooting](development/troubleshooting.md)
 - [Changelog](development/changelog.md)
