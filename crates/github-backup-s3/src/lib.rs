@@ -46,7 +46,8 @@
 //!     &client,
 //!     &config,
 //!     Path::new("/backup/octocat"),
-//!     false, // skip binary release assets
+//!     false,  // skip binary release assets
+//!     None,   // no at-rest encryption
 //! ).await?;
 //!
 //! println!("Uploaded {} files", stats.uploaded);
@@ -62,6 +63,7 @@
 
 pub mod client;
 pub mod config;
+pub mod encrypt;
 pub mod error;
 pub mod signing;
 pub mod sync;

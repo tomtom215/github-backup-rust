@@ -202,6 +202,16 @@ github-backup octocat --token $TOKEN --output /backup \
 | `--s3-access-key <KEY>` | `AWS_ACCESS_KEY_ID` | — | AWS access key ID |
 | `--s3-secret-key <SECRET>` | `AWS_SECRET_ACCESS_KEY` | — | AWS secret access key |
 | `--s3-include-assets` | — | `false` | Upload binary release assets to S3 |
+| `--encrypt-key <HEX_KEY>` | `BACKUP_ENCRYPT_KEY` | *(none)* | 64-hex-char AES-256-GCM key for at-rest encryption before S3 upload |
+
+## Restore
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--restore` | `false` | Restore labels and milestones from backup to target organisation |
+| `--restore-target-org <ORG>` | *(source owner)* | Target organisation for `--restore` |
+
+See the [Restore guide](../development/restore.md) for usage details.
 
 ## Execution Options
 
