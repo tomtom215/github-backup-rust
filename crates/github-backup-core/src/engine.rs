@@ -259,18 +259,17 @@ where
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
-                let result = backup_one_repo(
-                    &client,
-                    &storage,
-                    &git,
-                    &output,
-                    &opts,
-                    &owner_str,
-                    &repo,
-                    &clone_opts,
-                    &task_stats,
-                )
-                .await;
+                let ctx = RepoBackupContext {
+                    client: &client,
+                    storage: &storage,
+                    git: &git,
+                    output: &output,
+                    opts: &opts,
+                    owner: &owner_str,
+                    clone_opts: &clone_opts,
+                    stats: &task_stats,
+                };
+                let result = backup_one_repo(&ctx, &repo).await;
 
                 let current = done_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 info!(
@@ -337,23 +336,31 @@ where
     }
 }
 
+/// Context bundle for [`backup_one_repo`].
+///
+/// Extracted from the nine-argument function signature to satisfy
+/// `clippy::too_many_arguments` and to make it easier to add new per-repo
+/// context without modifying every call site.
+struct RepoBackupContext<'a, S, G> {
+    client: &'a GitHubClient,
+    storage: &'a S,
+    git: &'a G,
+    output: &'a OutputConfig,
+    opts: &'a BackupOptions,
+    owner: &'a str,
+    clone_opts: &'a CloneOptions,
+    stats: &'a BackupStats,
+}
+
 /// Backs up a single repository: metadata JSON + git mirror + sub-categories.
 ///
 /// Returns `true` if the repository was backed up, `false` if it was skipped
 /// (filtered out by fork/private settings or dry-run mode).
 ///
 /// Extracted as a free function so it can be spawned as an independent task.
-#[allow(clippy::too_many_arguments)]
 async fn backup_one_repo<S, G>(
-    client: &GitHubClient,
-    storage: &S,
-    git: &G,
-    output: &OutputConfig,
-    opts: &BackupOptions,
-    owner: &str,
+    ctx: &RepoBackupContext<'_, S, G>,
     repo: &Repository,
-    clone_opts: &CloneOptions,
-    stats: &BackupStats,
 ) -> Result<bool, CoreError>
 where
     S: Storage,
@@ -361,22 +368,40 @@ where
 {
     use crate::backup::repository::should_include;
 
-    if !should_include(repo, opts) {
+    if !should_include(repo, ctx.opts) {
         return Ok(false);
     }
 
-    if opts.dry_run {
+    if ctx.opts.dry_run {
         info!(repo = %repo.full_name, "dry-run: would back up repository");
         return Ok(false);
     }
 
-    let repos_dir = output.repos_dir(owner);
-    let wikis_dir = output.wikis_dir(owner);
-    let meta_dir = output.repo_meta_dir(owner, &repo.name);
+    let repos_dir = ctx.output.repos_dir(ctx.owner);
+    let wikis_dir = ctx.output.wikis_dir(ctx.owner);
+    let meta_dir = ctx.output.repo_meta_dir(ctx.owner, &repo.name);
 
-    backup_repository(repo, opts, &repos_dir, &meta_dir, storage, git, clone_opts).await?;
-    backup_wiki(repo, opts, &wikis_dir, git, clone_opts).await?;
-    backup_repo_metadata(client, storage, opts, owner, repo, &meta_dir, stats).await?;
+    backup_repository(
+        repo,
+        ctx.opts,
+        &repos_dir,
+        &meta_dir,
+        ctx.storage,
+        ctx.git,
+        ctx.clone_opts,
+    )
+    .await?;
+    backup_wiki(repo, ctx.opts, &wikis_dir, ctx.git, ctx.clone_opts).await?;
+    backup_repo_metadata(
+        ctx.client,
+        ctx.storage,
+        ctx.opts,
+        ctx.owner,
+        repo,
+        &meta_dir,
+        ctx.stats,
+    )
+    .await?;
 
     Ok(true)
 }

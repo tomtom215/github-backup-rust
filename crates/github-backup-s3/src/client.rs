@@ -138,14 +138,15 @@ impl S3Client {
         })
     }
 
-    /// Checks whether an object with `key` exists in the configured bucket.
+    /// Returns the `Content-Length` of `key` in bytes, or `None` if the object
+    /// does not exist.
     ///
     /// Uses `HeadObject` which does not transfer the object body.
     ///
     /// # Errors
     ///
     /// Returns [`S3Error`] on network or auth errors (not on 404).
-    pub async fn object_exists(&self, key: &str) -> Result<bool, S3Error> {
+    pub async fn object_content_length(&self, key: &str) -> Result<Option<u64>, S3Error> {
         let url = self.object_url(key);
         let host = self.host();
         let path = self.object_path(key);
@@ -171,8 +172,15 @@ impl S3Client {
         .map_err(|_| S3Error::Timeout { url: url.clone() })??;
 
         match response.status() {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
+            StatusCode::OK => {
+                let size = response
+                    .headers()
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                Ok(size)
+            }
+            StatusCode::NOT_FOUND => Ok(None),
             status => {
                 let body = collect_body(response.into_body()).await?;
                 Err(S3Error::Api {
@@ -181,6 +189,133 @@ impl S3Client {
                 })
             }
         }
+    }
+
+    /// Lists all object keys in the configured bucket that begin with `prefix`.
+    ///
+    /// Handles pagination automatically (ListObjectsV2 with up to 1 000 keys
+    /// per page).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3Error`] on network, auth, or XML parse errors.
+    pub async fn list_objects(&self, prefix: &str) -> Result<Vec<String>, S3Error> {
+        let mut keys = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            // Build canonical query string (alphabetically sorted).
+            let query = match continuation_token.as_deref() {
+                Some(token) => format!(
+                    "continuation-token={}&list-type=2&max-keys=1000&prefix={}",
+                    percent_encode(token),
+                    percent_encode(prefix),
+                ),
+                None => format!(
+                    "list-type=2&max-keys=1000&prefix={}",
+                    percent_encode(prefix),
+                ),
+            };
+
+            let bucket_url = self.bucket_base_url();
+            let bucket_path = self.bucket_base_path();
+            let url = format!("{bucket_url}?{query}");
+            let host = self.host();
+            let signed = self
+                .signer
+                .sign_request("GET", &host, &bucket_path, &query, "", b"");
+
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(&url)
+                .header("Host", &host)
+                .header("User-Agent", USER_AGENT)
+                .header("x-amz-date", &signed.amz_date)
+                .header("x-amz-content-sha256", &signed.content_sha256)
+                .header("Authorization", &signed.authorization)
+                .body(Full::new(Bytes::new()))
+                .map_err(S3Error::Request)?;
+
+            let response = tokio::time::timeout(
+                Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                self.http.request(req),
+            )
+            .await
+            .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+            let status = response.status();
+            let body = collect_body(response.into_body()).await?;
+            let body_str = String::from_utf8_lossy(&body);
+
+            if !status.is_success() {
+                return Err(S3Error::Api {
+                    status: status.as_u16(),
+                    body: body_str.into_owned(),
+                });
+            }
+
+            keys.extend(extract_all_xml_tags(&body_str, "Key"));
+
+            let is_truncated = extract_xml_tag(&body_str, "IsTruncated")
+                .map(|s| s == "true")
+                .unwrap_or(false);
+
+            if is_truncated {
+                match extract_xml_tag(&body_str, "NextContinuationToken") {
+                    Some(token) => continuation_token = Some(token),
+                    None => break, // Guard against malformed responses.
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(keys)
+    }
+
+    /// Deletes the object at `key` from the configured bucket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3Error`] on network, auth, or service errors.
+    pub async fn delete_object(&self, key: &str) -> Result<(), S3Error> {
+        let url = self.object_url(key);
+        let host = self.host();
+        let path = self.object_path(key);
+        let signed =
+            self.signer
+                .sign_request("DELETE", &host, &path, "", "application/octet-stream", b"");
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(&url)
+            .header("Host", &host)
+            .header("User-Agent", USER_AGENT)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256)
+            .header("Authorization", &signed.authorization)
+            .header("Content-Length", "0")
+            .body(Full::new(Bytes::new()))
+            .map_err(S3Error::Request)?;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| S3Error::Timeout { url: url.clone() })??;
+
+        let status = response.status();
+        // 204 No Content is the expected success response for DeleteObject.
+        if status.is_success() || status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+
+        let body = collect_body(response.into_body()).await?;
+        Err(S3Error::Api {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
     }
 
     /// Uploads `data` using S3 Multipart Upload.
@@ -452,6 +587,28 @@ impl S3Client {
         })
     }
 
+    /// Returns the base URL for the bucket (no trailing slash, no key suffix).
+    fn bucket_base_url(&self) -> String {
+        match &self.config.endpoint {
+            Some(endpoint) => {
+                let endpoint = endpoint.trim_end_matches('/');
+                format!("{endpoint}/{}", self.config.bucket)
+            }
+            None => format!(
+                "https://{}.s3.{}.amazonaws.com",
+                self.config.bucket, self.config.region
+            ),
+        }
+    }
+
+    /// Returns the URL path component for the bucket root (used in SigV4 signing).
+    fn bucket_base_path(&self) -> String {
+        match &self.config.endpoint {
+            Some(_) => format!("/{}", self.config.bucket),
+            None => "/".to_string(),
+        }
+    }
+
     /// Builds the full URL for an object key.
     fn object_url(&self, key: &str) -> String {
         let key = key.trim_start_matches('/');
@@ -517,6 +674,45 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
     Some(xml[start..end].to_string())
+}
+
+/// Extracts the text content of every occurrence of `<tag>…</tag>` from an
+/// XML string.
+fn extract_all_xml_tags(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut result = Vec::new();
+    let mut start = 0;
+    while let Some(open_off) = xml[start..].find(&open) {
+        let content_start = start + open_off + open.len();
+        if let Some(close_off) = xml[content_start..].find(&close) {
+            result.push(xml[content_start..content_start + close_off].to_string());
+            start = content_start + close_off + close.len();
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+/// Percent-encodes a string using the unreserved character set (RFC 3986).
+///
+/// Used to safely embed values such as S3 prefixes and continuation tokens
+/// into query strings.
+fn percent_encode(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b => {
+                write!(out, "%{b:02X}").expect("write to String is infallible");
+            }
+        }
+    }
+    out
 }
 
 /// Builds an HTTPS client using the system native CA bundle.
@@ -624,5 +820,64 @@ mod tests {
             "access key must be redacted"
         );
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn bucket_base_url_virtual_hosted() {
+        let client = S3Client::new(sample_config()).unwrap();
+        assert_eq!(
+            client.bucket_base_url(),
+            "https://my-bucket.s3.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn bucket_base_url_custom_endpoint() {
+        let client = S3Client::new(sample_config_custom_endpoint()).unwrap();
+        assert_eq!(
+            client.bucket_base_url(),
+            "https://s3.us-west-004.backblazeb2.com/my-bucket"
+        );
+    }
+
+    #[test]
+    fn bucket_base_path_virtual_hosted() {
+        let client = S3Client::new(sample_config()).unwrap();
+        assert_eq!(client.bucket_base_path(), "/");
+    }
+
+    #[test]
+    fn bucket_base_path_custom_endpoint() {
+        let client = S3Client::new(sample_config_custom_endpoint()).unwrap();
+        assert_eq!(client.bucket_base_path(), "/my-bucket");
+    }
+
+    #[test]
+    fn percent_encode_unreserved_unchanged() {
+        assert_eq!(
+            percent_encode("backups/owner/json"),
+            "backups%2Fowner%2Fjson"
+        );
+        assert_eq!(percent_encode("abc-_~."), "abc-_~.");
+    }
+
+    #[test]
+    fn percent_encode_special_chars() {
+        assert_eq!(percent_encode("a+b=c"), "a%2Bb%3Dc");
+        assert_eq!(percent_encode("a b"), "a%20b");
+    }
+
+    #[test]
+    fn extract_all_xml_tags_finds_multiple() {
+        let xml = "<r><Key>a/b.json</Key><Key>c/d.json</Key></r>";
+        let keys = extract_all_xml_tags(xml, "Key");
+        assert_eq!(keys, vec!["a/b.json", "c/d.json"]);
+    }
+
+    #[test]
+    fn extract_all_xml_tags_empty() {
+        let xml = "<r><Name>bucket</Name></r>";
+        let keys = extract_all_xml_tags(xml, "Key");
+        assert!(keys.is_empty());
     }
 }

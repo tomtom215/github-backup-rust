@@ -38,6 +38,8 @@ Async HTTP client for the GitHub REST API v3.
   5xx retry
 - `BackupClient` trait — object-safe interface enabling mock substitution in tests
 - `oauth` module — GitHub OAuth Device Flow for browser-based auth
+- `endpoints/write.rs` — mutating endpoints used by `--restore`:
+  `create_label`, `create_milestone`, `create_issue`
 
 ### `github-backup-core`
 
@@ -64,9 +66,11 @@ Backup modules (`crates/github-backup-core/src/backup/`), one file per category:
 - `user_data.rs` — starred, watched, followers, following
 - `labels.rs`, `milestones.rs` — repository metadata
 - `hooks.rs`, `security_advisories.rs` — admin metadata (graceful 403/404)
-- `topics.rs`, `branches.rs` — repository topology
+- `topics.rs`, `branches.rs` — repository topology; `branches.rs` also saves
+  `branch_protections.json` for protected branches (graceful 403/404 per branch)
 - `deploy_keys.rs`, `collaborators.rs` — access control metadata
 - `actions.rs`, `environments.rs` — GitHub Actions and deployments
+- `discussion.rs`, `project.rs`, `package.rs` — Discussions, Classic Projects, Packages
 - `starred_repos.rs` — durable-queue starred-repo cloning
 
 ### `github-backup-mirror`
@@ -83,8 +87,11 @@ Post-processing: push cloned repositories to a secondary Git host.
 Post-processing: upload backup artefacts to S3-compatible object stores.
 
 - `signing::Signer` — AWS Signature Version 4 (pure Rust, no AWS SDK)
-- `S3Client` — PutObject / HeadObject using hyper + rustls
-- `sync::sync_to_s3` — incremental directory sync (skips already-uploaded files)
+- `S3Client` — PutObject / HeadObject / multipart upload using hyper + rustls
+- `sync::sync_to_s3` — concurrent incremental directory sync (up to 8 parallel
+  uploads via Tokio JoinSet + Semaphore; skips already-uploaded objects)
+- `encrypt` — AES-256-GCM at-rest encryption; wire format `[12-byte nonce |
+  ciphertext | 16-byte GCM tag]`; exposed as public `encrypt` / `decrypt` fns
 - Supports AWS S3, Backblaze B2, MinIO, Cloudflare R2, DigitalOcean Spaces
 
 ### `github-backup-tui`
@@ -106,14 +113,25 @@ Full-screen terminal user interface built with [Ratatui](https://ratatui.rs) 0.3
 
 ### `github-backup` (CLI binary)
 
-Orchestrates all crates:
+Orchestrates all crates.  Key source files:
 
-1. Parse CLI args (`clap`)
+| File | Responsibility |
+|------|----------------|
+| `main.rs` | Entry point; arg parsing, credential resolution, backup orchestration |
+| `cli/args.rs` | 50+ clap flags including `--restore`, `--decrypt`, `--restore-yes` |
+| `post_process.rs` | Mirror push, S3 sync, retention, diff, Prometheus metrics; typed `PostProcessError` |
+| `restore.rs` | `--restore` mode: re-creates labels, milestones, and issues via GitHub API; supports `--dry-run` and `--restore-yes` confirmation gate |
+| `report.rs` | JSON summary report generation |
+
+Operational flow:
+
+1. Parse CLI args (`clap`); merge TOML config file
 2. If `--tui`: hand off to `github_backup_tui::run_tui()` and return
-3. Obtain credential (PAT or OAuth device flow)
-4. Run `BackupEngine` (primary backup)
-5. Optional: `push_mirrors` (Gitea mirror)
-6. Optional: `sync_to_s3` (S3 upload)
+3. If `--verify`: manifest integrity check and return
+4. If `--decrypt`: AES-256-GCM file decryption and return
+5. Obtain credential (PAT or OAuth device flow)
+6. Run `BackupEngine` (primary backup)
+7. Optional post-processing: manifest, Prometheus metrics, diff, restore, mirror push, S3 sync, retention
 
 ## Data Flow
 
@@ -187,8 +205,9 @@ the RustCrypto project (no OpenSSL).
 |-------|-----------|
 | Unit | `MockBackupClient` + `MemStorage` + `SpyGitRunner` stubs |
 | TUI unit | 74 tests in `github-backup-tui::tests` — state machine logic without a real terminal |
-| Integration | `tempfile` + real filesystem (storage tests) |
-| Property | `proptest` for type round-trip invariants |
+| Integration | `tempfile` + real filesystem (storage tests, restore dry-run filesystem test) |
+| Property | `proptest` for type round-trip invariants; AES-256-GCM encrypt/decrypt roundtrip + tamper detection |
+| Mutation | `cargo mutants` (runs on `main` branch; report uploaded as CI artefact) |
 | CI | `cargo test --workspace` on ubuntu-latest + macos-latest |
 | Linting | `cargo clippy -D warnings` |
 | Formatting | `cargo fmt --check` |

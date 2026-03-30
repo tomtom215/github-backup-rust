@@ -7,32 +7,48 @@
 //! artefacts to S3.  Only files that do not yet exist in the bucket are
 //! uploaded (checked via `HeadObject`); this makes re-runs incremental.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
+
+/// AES-256-GCM nonce (12 bytes) + GCM tag (16 bytes) overhead added to every
+/// encrypted file.
+const ENCRYPT_OVERHEAD: u64 = 12 + 16;
 
 use crate::client::{S3Client, MULTIPART_THRESHOLD_BYTES};
 use crate::config::S3Config;
 use crate::encrypt;
 use crate::error::S3Error;
 
+/// Maximum number of concurrent S3 upload tasks.
+const S3_UPLOAD_CONCURRENCY: usize = 8;
+/// Log a progress line every time this many percent of files complete.
+const PROGRESS_INTERVAL_PCT: usize = 10;
+
 /// Statistics from a sync run.
 #[derive(Debug, Default, Clone)]
 pub struct SyncStats {
     /// Number of files uploaded to S3.
     pub uploaded: usize,
-    /// Number of files skipped (already exist in S3).
+    /// Number of files skipped (already exist in S3 with matching size).
     pub skipped: usize,
     /// Number of files that failed to upload.
     pub errored: usize,
+    /// Number of stale S3 objects deleted (only when `delete_stale = true`).
+    pub deleted: usize,
 }
 
 impl std::fmt::Display for SyncStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "uploaded={} skipped={} errored={}",
-            self.uploaded, self.skipped, self.errored
+            "uploaded={} skipped={} errored={} deleted={}",
+            self.uploaded, self.skipped, self.errored, self.deleted
         )
     }
 }
@@ -51,6 +67,14 @@ impl std::fmt::Display for SyncStats {
 /// objects from plaintext ones.  The wire format is
 /// `[12-byte nonce][ciphertext + 16-byte tag]` — see [`encrypt`] for details.
 ///
+/// Uploads are skipped when an existing S3 object already has the expected
+/// `Content-Length`; objects with a mismatched size are re-uploaded.
+///
+/// When `delete_stale` is `true`, after uploads complete, any S3 objects
+/// under the configured prefix that are *not* part of the current local
+/// backup are deleted.  This keeps the S3 bucket in sync with the local
+/// state and prevents stale objects from accumulating across runs.
+///
 /// # Errors
 ///
 /// Returns [`S3Error`] on configuration or TLS errors.  Per-file upload
@@ -61,63 +85,157 @@ pub async fn sync_to_s3(
     backup_root: &Path,
     include_binary_assets: bool,
     encrypt_key: Option<&[u8; 32]>,
+    delete_stale: bool,
 ) -> Result<SyncStats, S3Error> {
-    let mut stats = SyncStats::default();
-
     let files = walk_files(backup_root);
     if files.is_empty() {
         info!(dir = %backup_root.display(), "no files to sync to S3");
-        return Ok(stats);
+        return Ok(SyncStats::default());
     }
 
+    // Build the list of (local_path, s3_key) pairs, skipping excluded files.
+    let candidates: Vec<(PathBuf, String)> = files
+        .into_iter()
+        .filter_map(|file_path| {
+            if !include_binary_assets && is_binary_asset(&file_path) {
+                debug!(path = %file_path.display(), "skipping binary asset");
+                return None;
+            }
+            let relative = file_path
+                .strip_prefix(backup_root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Encrypted objects get a `.enc` suffix so they are never confused
+            // with a stale plaintext object from a previous unencrypted run.
+            let keyed_relative = if encrypt_key.is_some() {
+                format!("{relative}.enc")
+            } else {
+                relative
+            };
+            Some((file_path, config.full_key(&keyed_relative)))
+        })
+        .collect();
+
+    let total = candidates.len();
     info!(
-        count = files.len(),
+        count = total,
+        concurrency = S3_UPLOAD_CONCURRENCY,
         bucket = %config.bucket,
         "syncing backup to S3"
     );
 
-    for file_path in &files {
-        // Optionally skip binary assets (large files in release_assets/).
-        if !include_binary_assets && is_binary_asset(file_path) {
-            debug!(path = %file_path.display(), "skipping binary asset");
-            continue;
-        }
+    // Pre-compute the expected S3 key set for stale-deletion (before the
+    // `for` loop moves `candidates`).
+    let expected_keys: HashSet<String> = if delete_stale {
+        candidates.iter().map(|(_, k)| k.clone()).collect()
+    } else {
+        HashSet::new()
+    };
 
-        // Compute the S3 key relative to the backup root.
-        let relative = match file_path.strip_prefix(backup_root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
-        // Encrypted objects get a `.enc` suffix so they can be distinguished
-        // from plaintext objects and so that the plaintext S3 key is never
-        // inadvertently treated as already-uploaded when the encryption key
-        // changes.
-        let keyed_relative = if encrypt_key.is_some() {
-            format!("{relative}.enc")
-        } else {
-            relative
-        };
-        let s3_key = config.full_key(&keyed_relative);
+    // Shared state updated by concurrent upload tasks.
+    let uploaded = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let errored = Arc::new(AtomicUsize::new(0));
+    // Tracks the last progress-log threshold crossed (in integer percent buckets).
+    let last_logged_pct = Arc::new(AtomicUsize::new(0));
 
-        match upload_file(client, file_path, &s3_key, encrypt_key).await {
-            Ok(UploadOutcome::Uploaded) => {
-                stats.uploaded += 1;
+    // Copy the key bytes so each task gets its own owned copy (avoids lifetime
+    // issues when spawning independent tasks).
+    let key_copy: Option<[u8; 32]> = encrypt_key.copied();
+
+    let sem = Arc::new(Semaphore::new(S3_UPLOAD_CONCURRENCY));
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    for (file_path, s3_key) in candidates {
+        let permit = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let client = client.clone();
+        let uploaded = Arc::clone(&uploaded);
+        let skipped = Arc::clone(&skipped);
+        let errored = Arc::clone(&errored);
+        let last_logged_pct = Arc::clone(&last_logged_pct);
+
+        join_set.spawn(async move {
+            let _permit = permit;
+
+            match upload_file(&client, &file_path, &s3_key, key_copy.as_ref()).await {
+                Ok(UploadOutcome::Uploaded) => {
+                    uploaded.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(UploadOutcome::Skipped) => {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    errored.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        path = %file_path.display(),
+                        key = %s3_key,
+                        error = %e,
+                        "failed to upload file to S3"
+                    );
+                }
             }
-            Ok(UploadOutcome::Skipped) => {
-                stats.skipped += 1;
+
+            // Emit a progress log line at configurable percentage intervals.
+            if total > 0 {
+                let done = uploaded.load(Ordering::Relaxed)
+                    + skipped.load(Ordering::Relaxed)
+                    + errored.load(Ordering::Relaxed);
+                let pct = done * 100 / total;
+                let bucket = pct / PROGRESS_INTERVAL_PCT;
+                let prev = last_logged_pct.fetch_max(bucket, Ordering::Relaxed);
+                if bucket > prev {
+                    info!(done, total, percent = pct, "S3 sync progress");
+                }
+            }
+        });
+    }
+
+    // Drain all tasks.
+    while join_set.join_next().await.is_some() {}
+
+    // Optionally delete S3 objects that no longer exist locally.
+    let mut deleted = 0usize;
+    if delete_stale {
+        match client.list_objects(&config.prefix).await {
+            Ok(remote_keys) => {
+                let stale: Vec<String> = remote_keys
+                    .into_iter()
+                    .filter(|k| !expected_keys.contains(k))
+                    .collect();
+
+                if stale.is_empty() {
+                    debug!("no stale S3 objects to delete");
+                } else {
+                    info!(count = stale.len(), "deleting stale S3 objects");
+                    for key in &stale {
+                        match client.delete_object(key).await {
+                            Ok(()) => {
+                                deleted += 1;
+                                debug!(key, "deleted stale S3 object");
+                            }
+                            Err(e) => {
+                                warn!(key, error = %e, "failed to delete stale S3 object");
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
-                stats.errored += 1;
-                warn!(
-                    path = %file_path.display(),
-                    key = %s3_key,
-                    error = %e,
-                    "failed to upload file to S3"
-                );
+                warn!(error = %e, "failed to list S3 objects for stale-deletion; skipping");
             }
         }
     }
 
+    let stats = SyncStats {
+        uploaded: uploaded.load(Ordering::Relaxed),
+        skipped: skipped.load(Ordering::Relaxed),
+        errored: errored.load(Ordering::Relaxed),
+        deleted,
+    };
     info!(%stats, "S3 sync complete");
     Ok(stats)
 }
@@ -134,16 +252,39 @@ enum UploadOutcome {
 /// When `encrypt_key` is `Some`, the file bytes are encrypted with
 /// AES-256-GCM before upload.  The content type is always
 /// `application/octet-stream` for encrypted blobs.
+///
+/// Takes `encrypt_key` by value (it is `Copy`) so this function can be
+/// safely called from spawned tasks without lifetime complications.
 async fn upload_file(
     client: &S3Client,
     local_path: &Path,
     s3_key: &str,
     encrypt_key: Option<&[u8; 32]>,
 ) -> Result<UploadOutcome, S3Error> {
-    // Skip files that already exist in S3.
-    if client.object_exists(s3_key).await? {
-        debug!(key = %s3_key, "object already exists in S3, skipping");
-        return Ok(UploadOutcome::Skipped);
+    // Check the S3 object's size.  If it matches the expected upload size the
+    // file is already up-to-date and can be skipped.  A size mismatch
+    // (e.g. truncated upload from a previous failed run) triggers a re-upload.
+    let local_size = std::fs::metadata(local_path)?.len();
+    let expected_s3_size = if encrypt_key.is_some() {
+        local_size + ENCRYPT_OVERHEAD
+    } else {
+        local_size
+    };
+
+    match client.object_content_length(s3_key).await? {
+        Some(s3_size) if s3_size == expected_s3_size => {
+            debug!(key = %s3_key, "object already exists in S3 with matching size, skipping");
+            return Ok(UploadOutcome::Skipped);
+        }
+        Some(s3_size) => {
+            warn!(
+                key = %s3_key,
+                local_bytes = expected_s3_size,
+                s3_bytes = s3_size,
+                "S3 object size mismatch — re-uploading"
+            );
+        }
+        None => {} // Object not found; upload it.
     }
 
     let plaintext = std::fs::read(local_path)?;
@@ -271,7 +412,8 @@ mod tests {
             uploaded: 5,
             skipped: 3,
             errored: 1,
+            deleted: 2,
         };
-        assert_eq!(s.to_string(), "uploaded=5 skipped=3 errored=1");
+        assert_eq!(s.to_string(), "uploaded=5 skipped=3 errored=1 deleted=2");
     }
 }

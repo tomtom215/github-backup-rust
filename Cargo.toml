@@ -58,7 +58,8 @@ url = "2"
 # Cryptography (AWS SigV4 signing for S3 backend + AES-256-GCM at-rest encryption)
 sha2 = "0.10"
 hmac = "0.12"
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 
 # Workspace crates
 github-backup-types = { path = "crates/github-backup-types" }

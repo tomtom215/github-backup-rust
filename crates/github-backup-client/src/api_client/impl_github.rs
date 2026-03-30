@@ -10,10 +10,10 @@
 use bytes::Bytes;
 
 use github_backup_types::{
-    Branch, ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Environment,
-    Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion,
-    ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview, Release,
-    Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, BranchProtection, ClassicProject, Collaborator, DeployKey, Discussion,
+    DiscussionComment, Environment, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
+    Package, PackageVersion, ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit,
+    PullRequestReview, Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -208,6 +208,17 @@ impl BackupClient for GitHubClient {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>> {
         Box::pin(GitHubClient::list_branches(self, owner, repo))
+    }
+
+    fn get_branch_protection<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        branch: &'a str,
+    ) -> BoxFuture<'a, Result<BranchProtection, ClientError>> {
+        Box::pin(GitHubClient::get_branch_protection(
+            self, owner, repo, branch,
+        ))
     }
 
     fn download_release_asset<'a>(

@@ -24,8 +24,10 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 aes-gcm = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }

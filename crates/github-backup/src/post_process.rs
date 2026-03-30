@@ -11,7 +11,9 @@
 //! 4. **S3 sync** — upload backup artefacts to an S3-compatible object store.
 //! 5. **Retention** — delete old snapshot directories matching `YYYY-MM-DD*`.
 
+use thiserror::Error;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use github_backup_mirror::{
     config::{GitLabConfig, GiteaConfig},
@@ -24,6 +26,30 @@ use github_backup_types::config::OutputConfig;
 
 use crate::cli::Args;
 
+/// Typed errors from the post-processing phase.
+///
+/// Replaces the previous `Result<(), String>` returns on public post-process
+/// functions, preserving source context and enabling structured handling.
+#[derive(Debug, Error)]
+#[allow(dead_code)] // Diff and Metrics variants reserved for future use
+pub enum PostProcessError {
+    /// A mirror push operation failed.
+    #[error("mirror push failed: {0}")]
+    Mirror(String),
+    /// An S3 sync operation failed.
+    #[error("S3 sync failed: {0}")]
+    S3(String),
+    /// The retention policy application failed.
+    #[error("retention policy failed: {0}")]
+    Retention(String),
+    /// The backup diff operation failed.
+    #[error("diff failed: {0}")]
+    Diff(String),
+    /// Writing Prometheus metrics failed.
+    #[error("metrics write failed: {0}")]
+    Metrics(String),
+}
+
 /// Mirror destination — either a Gitea-compatible host or a GitLab instance.
 pub enum MirrorDest {
     Gitea(GiteaConfig),
@@ -34,16 +60,20 @@ pub enum MirrorDest {
 ///
 /// # Errors
 ///
-/// Returns a string error if the mirror client fails to initialise or the push
-/// fails.
+/// Returns [`PostProcessError::Mirror`] if the mirror client fails to
+/// initialise or the push fails.
 pub async fn run_mirror_push_dest(
     dest: &MirrorDest,
     output: &OutputConfig,
     owner: &str,
-) -> Result<(), String> {
+) -> Result<(), PostProcessError> {
     match dest {
-        MirrorDest::Gitea(config) => run_mirror_push_gitea(config, output, owner).await,
-        MirrorDest::GitLab(config) => run_mirror_push_gitlab(config, output, owner).await,
+        MirrorDest::Gitea(config) => run_mirror_push_gitea(config, output, owner)
+            .await
+            .map_err(PostProcessError::Mirror),
+        MirrorDest::GitLab(config) => run_mirror_push_gitlab(config, output, owner)
+            .await
+            .map_err(PostProcessError::Mirror),
     }
 }
 
@@ -125,16 +155,17 @@ async fn run_mirror_push_gitlab(
 ///
 /// # Errors
 ///
-/// Returns a string error if the S3 client fails to initialise or a sync error
-/// is encountered.
+/// Returns [`PostProcessError::S3`] if the S3 client fails to initialise or a
+/// sync error is encountered.
 pub async fn run_s3_sync(
     config: &S3Config,
     output: &OutputConfig,
     owner: &str,
     include_assets: bool,
     encrypt_key: Option<&[u8; 32]>,
-) -> Result<(), String> {
-    let client = S3Client::new(config.clone()).map_err(|e| e.to_string())?;
+    delete_stale: bool,
+) -> Result<(), PostProcessError> {
+    let client = S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(e.to_string()))?;
     let backup_root = output.owner_json_dir(owner);
 
     if !backup_root.exists() {
@@ -142,19 +173,30 @@ pub async fn run_s3_sync(
         return Ok(());
     }
 
-    let stats = sync_to_s3(&client, config, &backup_root, include_assets, encrypt_key)
-        .await
-        .map_err(|e| e.to_string())?;
+    let stats = sync_to_s3(
+        &client,
+        config,
+        &backup_root,
+        include_assets,
+        encrypt_key,
+        delete_stale,
+    )
+    .await
+    .map_err(|e| PostProcessError::S3(e.to_string()))?;
 
     info!(
         uploaded = stats.uploaded,
         skipped = stats.skipped,
         errored = stats.errored,
+        deleted = stats.deleted,
         "S3 sync complete"
     );
 
     if stats.errored > 0 {
         warn!(errored = stats.errored, "some files failed to upload to S3");
+    }
+    if stats.deleted > 0 {
+        info!(deleted = stats.deleted, "stale S3 objects removed");
     }
 
     Ok(())
@@ -215,10 +257,14 @@ pub fn build_s3_config(args: &Args) -> Option<S3Config> {
 /// Returns `None` if no key is set, or `Err` if the string is not exactly
 /// 64 hex characters that decode to 32 bytes.
 ///
+/// The returned key bytes are wrapped in [`Zeroizing`] so that they are
+/// securely erased from memory when dropped, preventing the key from
+/// lingering in process memory.
+///
 /// # Errors
 ///
 /// Returns a descriptive string on invalid input.
-pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Box<[u8; 32]>>, String> {
+pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
     let Some(hex) = hex_key else {
         return Ok(None);
     };
@@ -228,7 +274,7 @@ pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Box<[u8; 32]>>
             hex.len()
         ));
     }
-    let mut key = Box::new([0u8; 32]);
+    let mut key = Zeroizing::new([0u8; 32]);
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let byte_str = std::str::from_utf8(chunk)
             .map_err(|_| "--encrypt-key contains non-UTF-8 characters".to_string())?;
@@ -375,14 +421,15 @@ pub fn read_repo_names(path: &std::path::Path) -> Result<Vec<String>, String> {
 ///
 /// # Errors
 ///
-/// Returns a string error if the output directory cannot be read or a snapshot
-/// directory cannot be deleted.
+/// Returns [`PostProcessError::Retention`] if the output directory cannot be
+/// read or a snapshot directory cannot be deleted.
 pub fn apply_retention(
     output_root: &std::path::Path,
     keep_last: Option<usize>,
     max_age_days: Option<u64>,
-) -> Result<(), String> {
-    let entries = std::fs::read_dir(output_root).map_err(|e| format!("read output dir: {e}"))?;
+) -> Result<(), PostProcessError> {
+    let entries = std::fs::read_dir(output_root)
+        .map_err(|e| PostProcessError::Retention(format!("read output dir: {e}")))?;
 
     let mut snapshots: Vec<std::path::PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -434,8 +481,9 @@ pub fn apply_retention(
 
     for path in &to_delete {
         info!(path = %path.display(), "applying retention: deleting old snapshot");
-        std::fs::remove_dir_all(path)
-            .map_err(|e| format!("delete snapshot {}: {e}", path.display()))?;
+        std::fs::remove_dir_all(path).map_err(|e| {
+            PostProcessError::Retention(format!("delete snapshot {}: {e}", path.display()))
+        })?;
     }
 
     if !to_delete.is_empty() {
