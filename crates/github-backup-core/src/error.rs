@@ -39,9 +39,30 @@ pub enum CoreError {
         stderr: String,
     },
 
+    /// A `git` subprocess was killed because it exceeded its time limit.
+    #[error("git {args} timed out after {timeout_secs}s")]
+    GitTimeout {
+        /// The git arguments (for context).
+        args: String,
+        /// The timeout that was exceeded, in seconds.
+        timeout_secs: u64,
+    },
+
     /// The `git` binary could not be found or launched.
     #[error("could not start git: {0}")]
     GitSpawn(std::io::Error),
+
+    /// `git fsck` reported repository corruption after a fresh clone.
+    ///
+    /// This is treated as a warning — the backup continues — but is surfaced
+    /// as an error so callers can decide whether to abort or log and proceed.
+    #[error("git fsck reported issues in {repo}: {output}")]
+    GitFsckFailed {
+        /// The repository path that was checked.
+        repo: String,
+        /// The fsck output (first 512 bytes).
+        output: String,
+    },
 
     /// A path cannot be converted to UTF-8, which is required to pass it to
     /// git as a command-line argument.

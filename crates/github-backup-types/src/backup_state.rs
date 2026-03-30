@@ -3,7 +3,7 @@
 
 //! Persistent backup state: last-success timestamp and per-run checkpoint.
 //!
-//! Two independent files are managed:
+//! Three independent files are managed:
 //!
 //! ## `backup_state.json`
 //!
@@ -18,6 +18,11 @@
 //! processed so far.  If the process is interrupted (OOM kill, SIGTERM, power
 //! loss) a subsequent run can load the checkpoint and skip already-completed
 //! repositories rather than restarting from scratch.
+//!
+//! ## `backup_history.json`
+//!
+//! A rolling log of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
+//! Used by the TUI dashboard to display a run history table.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -75,6 +80,78 @@ impl BackupState {
         let state: Self =
             serde_json::from_str(&content).map_err(|e| format!("parse state file: {e}"))?;
         Ok(Some(state))
+    }
+}
+
+// ── Backup run history ────────────────────────────────────────────────────────
+
+/// A single entry in the backup run history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupRunEntry {
+    /// ISO 8601 timestamp of when this run started.
+    pub timestamp: String,
+    /// Number of repositories backed up during this run.
+    pub repos_backed_up: u64,
+    /// Elapsed wall-clock time in seconds.
+    pub elapsed_secs: f64,
+    /// `true` if the run completed without a fatal error.
+    pub success: bool,
+    /// Tool version that produced this entry.
+    pub tool_version: String,
+}
+
+/// Rolling history of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
+///
+/// Stored in `backup_history.json` alongside `backup_state.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupRunHistory {
+    /// Most recent runs, newest first.
+    pub entries: Vec<BackupRunEntry>,
+}
+
+impl BackupRunHistory {
+    /// Maximum number of history entries to retain.
+    pub const MAX_ENTRIES: usize = 20;
+
+    /// Appends a new entry and trims the list to `MAX_ENTRIES`.
+    pub fn push(&mut self, entry: BackupRunEntry) {
+        self.entries.insert(0, entry);
+        self.entries.truncate(Self::MAX_ENTRIES);
+    }
+
+    /// Loads the history from `path`.
+    ///
+    /// Returns an empty history if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the file exists but cannot be parsed.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read history file: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("parse history file: {e}"))
+    }
+
+    /// Saves the history to `path`, creating parent directories as needed.
+    ///
+    /// Writes are atomic (write-then-rename) to prevent corrupt files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string on I/O or serialisation failure.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create history directory: {e}"))?;
+        }
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("serialise history: {e}"))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, json).map_err(|e| format!("write history tmp: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename history file: {e}"))
     }
 }
 

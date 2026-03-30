@@ -70,7 +70,7 @@ github-backup-s3 = { path = "crates/github-backup-s3" }
 github-backup-tui = { path = "crates/github-backup-tui" }
 
 # TOML config file parsing
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 
 # Date / time formatting (RFC 3339 timestamps in queue files)
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }

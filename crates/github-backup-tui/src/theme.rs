@@ -64,7 +64,70 @@ pub const TAB_ACTIVE: Style = Style::new()
 /// Editing cursor / focused input border.
 pub const INPUT_FOCUSED: Style = Style::new().fg(ACCENT);
 
-/// Log level styles.
+// ── Mode indicator ────────────────────────────────────────────────────────────
+
+/// Status bar label shown when navigating (not editing).
+pub const MODE_NAV: Style = Style::new().fg(MUTED);
+
+/// Status bar label shown when editing a text field.
+pub const MODE_EDIT: Style = Style::new()
+    .fg(Color::Black)
+    .bg(ACCENT)
+    .add_modifier(Modifier::BOLD);
+
+/// Status bar label shown when log search is active.
+pub const MODE_SEARCH: Style = Style::new()
+    .fg(Color::Black)
+    .bg(WARNING)
+    .add_modifier(Modifier::BOLD);
+
+// ── Tab badge styles ──────────────────────────────────────────────────────────
+
+/// Badge on a configure tab that has a validation error.
+pub const TAB_ERROR_BADGE: Style = Style::new().fg(ERROR).add_modifier(Modifier::BOLD);
+
+/// Badge on a configure tab that requires attention (env var overriding).
+pub const TAB_INFO_BADGE: Style = Style::new().fg(WARNING);
+
+// ── Help overlay ─────────────────────────────────────────────────────────────
+
+/// Background style for the help overlay panel.
+pub const HELP_TITLE: Style = Style::new()
+    .fg(ACCENT)
+    .add_modifier(Modifier::BOLD)
+    .add_modifier(Modifier::UNDERLINED);
+
+/// A key name inside the help overlay.
+pub const HELP_KEY: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+
+/// A description line inside the help overlay.
+pub const HELP_DESC: Style = Style::new().fg(FG);
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+/// Highlighted log line that matches the current search query.
+pub const SEARCH_MATCH: Style = Style::new()
+    .fg(Color::Black)
+    .bg(WARNING)
+    .add_modifier(Modifier::BOLD);
+
+/// Active search-input field.
+pub const SEARCH_INPUT: Style = Style::new().fg(WARNING).add_modifier(Modifier::BOLD);
+
+// ── Field description ────────────────────────────────────────────────────────
+
+/// Descriptive help text shown below the focused field in Configure.
+pub const FIELD_DESC: Style = Style::new().fg(Color::Gray);
+
+/// Inline validation error shown below an invalid field.
+pub const FIELD_ERR: Style = Style::new().fg(ERROR);
+
+/// Indicator that a value is coming from an environment variable.
+pub const ENV_OVERRIDE: Style = Style::new().fg(SUCCESS).add_modifier(Modifier::ITALIC);
+
+// ── Log level styles ──────────────────────────────────────────────────────────
+
+/// Returns the style appropriate for a tracing log level string.
 pub fn log_level_style(level: &str) -> Style {
     match level {
         "ERROR" => ERR_STYLE,

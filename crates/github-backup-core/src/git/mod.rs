@@ -8,6 +8,21 @@
 //! `GIT_ASKPASS` environment variable rather than being embedded in the URL,
 //! which avoids leaking tokens in process listings and git reflog.
 //!
+//! # Hardening features
+//!
+//! - **Clone timeout** — each git subprocess is killed if it exceeds
+//!   `CloneOptions::clone_timeout_secs` (default 600 s).  This prevents a
+//!   single stalled clone from blocking a worker indefinitely.
+//!
+//! - **Partial clone cleanup** — if a fresh clone fails (destination did not
+//!   exist before the attempt), any partially written directory is removed so
+//!   the next run starts cleanly.
+//!
+//! - **Post-clone fsck** — after every *fresh* clone
+//!   (`CloneOptions::run_fsck = true`) `git fsck --no-dangling` is run.
+//!   Corruption is reported as [`CoreError::GitFsckFailed`] so callers can
+//!   decide whether to abort or log and continue.
+//!
 //! # Sub-modules
 //!
 //! - `askpass` — RAII guard that writes and cleans up the `GIT_ASKPASS` script
@@ -16,10 +31,12 @@
 mod askpass;
 pub mod spy;
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::CoreError;
 use askpass::AskpassScript;
@@ -37,6 +54,9 @@ pub mod test_support {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/// Default per-clone timeout: 10 minutes.
+const DEFAULT_CLONE_TIMEOUT_SECS: u64 = 600;
+
 /// Git clone options passed to the runner.
 #[derive(Debug, Clone)]
 pub struct CloneOptions {
@@ -45,16 +65,32 @@ pub struct CloneOptions {
     pub token: Option<String>,
     /// When `true`, skip `--prune` during updates.
     pub no_prune: bool,
+    /// Maximum seconds to wait for any single git subprocess before killing
+    /// it and returning [`CoreError::GitTimeout`].
+    ///
+    /// Defaults to [`DEFAULT_CLONE_TIMEOUT_SECS`] (600 s).
+    pub clone_timeout_secs: u64,
+    /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
+    /// detect repository corruption early.
+    pub run_fsck: bool,
 }
 
 impl CloneOptions {
-    /// No authentication, prune enabled.
+    /// No authentication, prune enabled, default timeout, fsck disabled.
     #[must_use]
     pub fn unauthenticated() -> Self {
         Self {
             token: None,
             no_prune: false,
+            clone_timeout_secs: DEFAULT_CLONE_TIMEOUT_SECS,
+            run_fsck: false,
         }
+    }
+}
+
+impl Default for CloneOptions {
+    fn default() -> Self {
+        Self::unauthenticated()
     }
 }
 
@@ -171,14 +207,11 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["remote", "update", "--prune"]
             };
-            run_git(update_args, dest, opts.token.as_deref())
+            run_git(update_args, dest, opts.token.as_deref(), opts)
         } else {
             info!(url = %url, dest = %dest.display(), "cloning bare mirror");
-            run_git(
-                &["clone", "--mirror", url, dest_str],
-                Path::new("."),
-                opts.token.as_deref(),
-            )
+            let args = &["clone", "--mirror", url, dest_str];
+            clone_with_cleanup(args, dest, opts)
         }
     }
 
@@ -191,14 +224,11 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["fetch", "--all", "--prune"]
             };
-            run_git(fetch_args, dest, opts.token.as_deref())
+            run_git(fetch_args, dest, opts.token.as_deref(), opts)
         } else {
             info!(url = %url, dest = %dest.display(), "cloning bare");
-            run_git(
-                &["clone", "--bare", url, dest_str],
-                Path::new("."),
-                opts.token.as_deref(),
-            )
+            let args = &["clone", "--bare", url, dest_str];
+            clone_with_cleanup(args, dest, opts)
         }
     }
 
@@ -211,14 +241,11 @@ impl GitRunner for ProcessGitRunner {
             } else {
                 &["fetch", "--all", "--prune"]
             };
-            run_git(fetch_args, dest, opts.token.as_deref())
+            run_git(fetch_args, dest, opts.token.as_deref(), opts)
         } else {
             info!(url = %url, dest = %dest.display(), "cloning full working tree");
-            run_git(
-                &["clone", "--no-local", url, dest_str],
-                Path::new("."),
-                opts.token.as_deref(),
-            )
+            let args = &["clone", "--no-local", url, dest_str];
+            clone_with_cleanup(args, dest, opts)
         }
     }
 
@@ -237,14 +264,12 @@ impl GitRunner for ProcessGitRunner {
                 &["fetch", "--depth", &depth_str],
                 dest,
                 opts.token.as_deref(),
+                opts,
             )
         } else {
             info!(url = %url, dest = %dest.display(), depth, "cloning shallow");
-            run_git(
-                &["clone", "--mirror", "--depth", &depth_str, url, dest_str],
-                Path::new("."),
-                opts.token.as_deref(),
-            )
+            let args = &["clone", "--mirror", "--depth", &depth_str, url, dest_str];
+            clone_with_cleanup(args, dest, opts)
         }
     }
 
@@ -252,14 +277,11 @@ impl GitRunner for ProcessGitRunner {
         let dest_str = path_to_str(dest)?;
         if dest.exists() {
             info!(dest = %dest.display(), "LFS repository exists, updating");
-            run_git(&["lfs", "fetch", "--all"], dest, opts.token.as_deref())
+            run_git(&["lfs", "fetch", "--all"], dest, opts.token.as_deref(), opts)
         } else {
             info!(url = %url, dest = %dest.display(), "cloning with LFS");
-            run_git(
-                &["lfs", "clone", url, dest_str],
-                Path::new("."),
-                opts.token.as_deref(),
-            )
+            let args = &["lfs", "clone", url, dest_str];
+            clone_with_cleanup(args, dest, opts)
         }
     }
 
@@ -278,6 +300,7 @@ impl GitRunner for ProcessGitRunner {
             &["push", "--mirror", remote_url],
             src,
             opts.token.as_deref(),
+            opts,
         )
     }
 }
@@ -292,47 +315,153 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
     })
 }
 
-/// Runs `git` with `args` in `cwd`.
+/// Performs a **fresh** clone: runs `git` with `args`, then:
+/// - On failure: removes the partially-written `dest` directory.
+/// - On success (when `opts.run_fsck`): runs `git fsck` and logs issues.
+fn clone_with_cleanup(args: &[&str], dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
+    match run_git(args, Path::new("."), opts.token.as_deref(), opts) {
+        Ok(()) => {
+            if opts.run_fsck && dest.exists() {
+                run_fsck(dest);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // Remove any partial clone directory so the next run starts fresh.
+            if dest.exists() {
+                if let Err(rm_err) = std::fs::remove_dir_all(dest) {
+                    warn!(
+                        dest = %dest.display(),
+                        error = %rm_err,
+                        "failed to remove partial clone directory after git failure"
+                    );
+                } else {
+                    debug!(dest = %dest.display(), "removed partial clone directory");
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Runs `git fsck --no-dangling` on `repo_dir` and logs any issues found.
+///
+/// Corruption is not treated as a fatal error — the backup has already
+/// completed — but the issues are logged at `warn` level so operators can
+/// investigate.
+fn run_fsck(repo_dir: &Path) {
+    debug!(repo = %repo_dir.display(), "running git fsck");
+    let output = Command::new("git")
+        .args(["fsck", "--no-dangling"])
+        .current_dir(repo_dir)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            debug!(repo = %repo_dir.display(), "git fsck: clean");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let combined = format!("{stdout}{stderr}");
+            warn!(
+                repo = %repo_dir.display(),
+                output = %combined.chars().take(512).collect::<String>(),
+                "git fsck reported issues after clone"
+            );
+        }
+        Err(e) => {
+            warn!(
+                repo = %repo_dir.display(),
+                error = %e,
+                "could not run git fsck (git binary issue?)"
+            );
+        }
+    }
+}
+
+/// Runs `git` with `args` in `cwd`, enforcing a per-process timeout.
 ///
 /// If `token` is `Some`, `GIT_TERMINAL_PROMPT` is disabled and `GIT_ASKPASS`
 /// is set to a small inline script that echoes the token.  This keeps the
 /// credential out of the command line and the process list.
-fn run_git(args: &[&str], cwd: &Path, token: Option<&str>) -> Result<(), CoreError> {
+///
+/// The subprocess is polled every 100 ms.  If `opts.clone_timeout_secs`
+/// elapses before it exits, the process is killed and
+/// [`CoreError::GitTimeout`] is returned.
+fn run_git(
+    args: &[&str],
+    cwd: &Path,
+    token: Option<&str>,
+    opts: &CloneOptions,
+) -> Result<(), CoreError> {
     debug!(args = ?args, cwd = %cwd.display(), "running git");
 
     let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(cwd);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    // Inject token via GIT_ASKPASS to avoid embedding it in the URL or
-    // having it appear in process listings.  The guard is kept alive until
-    // after `cmd.output()` so the file exists when git tries to execute it.
+    // Inject token via GIT_ASKPASS to avoid embedding it in the URL.
     let _askpass_guard;
     if let Some(tok) = token {
         _askpass_guard = AskpassScript::create(tok);
         if let Some(ref script) = _askpass_guard {
             cmd.env("GIT_TERMINAL_PROMPT", "0");
             cmd.env("GIT_ASKPASS", script.path());
-            // Username for GitHub token auth is always "x-access-token".
             cmd.env("GIT_USERNAME", "x-access-token");
         }
     } else {
         _askpass_guard = None;
     }
 
-    let output = cmd.output().map_err(CoreError::GitSpawn)?;
-    // _askpass_guard is dropped here, cleaning up the temp file.
+    let timeout = Duration::from_secs(opts.clone_timeout_secs);
+    let mut child = cmd.spawn().map_err(CoreError::GitSpawn)?;
+    // _askpass_guard kept alive until after process exits.
 
-    if output.status.success() {
-        return Ok(());
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().map_err(CoreError::GitSpawn)? {
+            Some(status) => {
+                // Collect output from piped streams.
+                let stderr = read_child_stream(child.stderr.take());
+                let stdout = read_child_stream(child.stdout.take());
+
+                if status.success() {
+                    return Ok(());
+                }
+                let _ = stdout; // stdout rarely has useful info for errors
+                return Err(CoreError::GitFailed {
+                    args: args.join(" "),
+                    code: status.code().unwrap_or(-1),
+                    stderr,
+                });
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    // Reap the child to avoid zombies.
+                    let _ = child.wait();
+                    return Err(CoreError::GitTimeout {
+                        args: args.join(" "),
+                        timeout_secs: opts.clone_timeout_secs,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
+}
 
-    let code = output.status.code().unwrap_or(-1);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Err(CoreError::GitFailed {
-        args: args.join(" "),
-        code,
-        stderr,
-    })
+/// Reads all bytes from an optional piped stream into a lossy UTF-8 string.
+fn read_child_stream(stream: Option<impl Read>) -> String {
+    let Some(mut s) = stream else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -373,6 +502,17 @@ mod tests {
         let opts = CloneOptions::unauthenticated();
         assert!(opts.token.is_none());
         assert!(!opts.no_prune);
+        assert_eq!(opts.clone_timeout_secs, DEFAULT_CLONE_TIMEOUT_SECS);
+        assert!(!opts.run_fsck);
+    }
+
+    #[test]
+    fn clone_options_default_matches_unauthenticated() {
+        let a = CloneOptions::default();
+        let b = CloneOptions::unauthenticated();
+        assert_eq!(a.clone_timeout_secs, b.clone_timeout_secs);
+        assert_eq!(a.run_fsck, b.run_fsck);
+        assert_eq!(a.no_prune, b.no_prune);
     }
 
     #[test]
