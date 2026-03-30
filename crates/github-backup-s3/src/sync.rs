@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::client::{S3Client, MULTIPART_THRESHOLD_BYTES};
 use crate::config::S3Config;
+use crate::encrypt;
 use crate::error::S3Error;
 
 /// Statistics from a sync run.
@@ -45,6 +46,11 @@ impl std::fmt::Display for SyncStats {
 /// Binary release assets can be large; set `include_binary_assets = false`
 /// to skip files outside `json/` subdirectories.
 ///
+/// When `encrypt_key` is `Some`, every file is encrypted with AES-256-GCM
+/// before upload.  The S3 key gains a `.enc` suffix to distinguish encrypted
+/// objects from plaintext ones.  The wire format is
+/// `[12-byte nonce][ciphertext + 16-byte tag]` — see [`encrypt`] for details.
+///
 /// # Errors
 ///
 /// Returns [`S3Error`] on configuration or TLS errors.  Per-file upload
@@ -54,6 +60,7 @@ pub async fn sync_to_s3(
     config: &S3Config,
     backup_root: &Path,
     include_binary_assets: bool,
+    encrypt_key: Option<&[u8; 32]>,
 ) -> Result<SyncStats, S3Error> {
     let mut stats = SyncStats::default();
 
@@ -81,9 +88,18 @@ pub async fn sync_to_s3(
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
         };
-        let s3_key = config.full_key(&relative);
+        // Encrypted objects get a `.enc` suffix so they can be distinguished
+        // from plaintext objects and so that the plaintext S3 key is never
+        // inadvertently treated as already-uploaded when the encryption key
+        // changes.
+        let keyed_relative = if encrypt_key.is_some() {
+            format!("{relative}.enc")
+        } else {
+            relative
+        };
+        let s3_key = config.full_key(&keyed_relative);
 
-        match upload_file(client, file_path, &s3_key).await {
+        match upload_file(client, file_path, &s3_key, encrypt_key).await {
             Ok(UploadOutcome::Uploaded) => {
                 stats.uploaded += 1;
             }
@@ -114,10 +130,15 @@ enum UploadOutcome {
 }
 
 /// Uploads a single file to S3 if it does not already exist.
+///
+/// When `encrypt_key` is `Some`, the file bytes are encrypted with
+/// AES-256-GCM before upload.  The content type is always
+/// `application/octet-stream` for encrypted blobs.
 async fn upload_file(
     client: &S3Client,
     local_path: &Path,
     s3_key: &str,
+    encrypt_key: Option<&[u8; 32]>,
 ) -> Result<UploadOutcome, S3Error> {
     // Skip files that already exist in S3.
     if client.object_exists(s3_key).await? {
@@ -125,18 +146,34 @@ async fn upload_file(
         return Ok(UploadOutcome::Skipped);
     }
 
-    let file_size = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
-    let data = std::fs::read(local_path)?;
-    let content_type = guess_content_type(local_path);
+    let plaintext = std::fs::read(local_path)?;
+
+    let (data, content_type) = if let Some(key) = encrypt_key {
+        let ciphertext = encrypt::encrypt(key, &plaintext)?;
+        (ciphertext, "application/octet-stream")
+    } else {
+        let ct = guess_content_type(local_path);
+        (plaintext, ct)
+    };
 
     debug!(
         path = %local_path.display(),
         key = %s3_key,
         bytes = data.len(),
+        encrypted = encrypt_key.is_some(),
         "uploading to S3"
     );
 
-    if file_size >= MULTIPART_THRESHOLD_BYTES {
+    // Use multipart upload for large objects (original plaintext size).
+    let original_size = if encrypt_key.is_some() {
+        // The encrypted blob is slightly larger than the plaintext; use the
+        // plaintext size to decide whether to use multipart.
+        std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        data.len() as u64
+    };
+
+    if original_size >= MULTIPART_THRESHOLD_BYTES {
         client.multipart_upload(s3_key, &data, content_type).await?;
     } else {
         client.put_object(s3_key, &data, content_type).await?;

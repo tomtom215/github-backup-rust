@@ -363,6 +363,104 @@ impl GitHubClient {
 
         Ok(builder)
     }
+
+    /// Performs a single POST request with a JSON body and deserialises the
+    /// response.
+    ///
+    /// Handles rate limiting (403/429) and transient 5xx errors identically to
+    /// [`get_json_with_link`][Self::get_json_with_link].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] on network, TLS, API, or deserialisation errors.
+    pub(crate) async fn post_json<T, B>(&self, url: &str, body: &B) -> Result<T, ClientError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: serde::Serialize,
+    {
+        let body_bytes = Bytes::from(serde_json::to_vec(body)?);
+        let mut rate_retries = 0u32;
+        let mut server_retries = 0u32;
+
+        loop {
+            let req = self
+                .build_request(Method::POST, url)?
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("Content-Type", "application/json")
+                .body(Full::new(body_bytes.clone()))
+                .map_err(ClientError::Http)?;
+
+            let response = tokio::time::timeout(
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                self.http.request(req),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout {
+                url: url.to_string(),
+            })??;
+
+            let status = response.status();
+            let headers = response.headers().clone();
+            let rate_info = RateLimitInfo::from_headers(&headers);
+
+            let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
+                || (status == StatusCode::FORBIDDEN
+                    && rate_info.map(|r| r.is_exhausted()).unwrap_or(false));
+
+            if is_rate_limited {
+                if rate_retries >= MAX_RATE_LIMIT_RETRIES {
+                    let wait = RateLimitInfo::retry_after(&headers)
+                        .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
+                        .unwrap_or(60);
+                    return Err(ClientError::RateLimitExceeded {
+                        retry_after_secs: wait,
+                    });
+                }
+                let wait = RateLimitInfo::retry_after(&headers)
+                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
+                    .unwrap_or(60)
+                    .max(1);
+                warn!(
+                    wait_secs = wait,
+                    attempt = rate_retries + 1,
+                    "rate limit hit during POST, sleeping"
+                );
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                rate_retries += 1;
+                continue;
+            }
+
+            if status.is_server_error() {
+                if server_retries >= MAX_SERVER_ERROR_RETRIES {
+                    let body = collect_body(response.into_body()).await?;
+                    return Err(ClientError::ApiError {
+                        status: status.as_u16(),
+                        body: String::from_utf8_lossy(&body).into_owned(),
+                    });
+                }
+                let backoff = Duration::from_secs(2u64.pow(server_retries));
+                warn!(
+                    status = status.as_u16(),
+                    backoff_secs = backoff.as_secs(),
+                    "transient server error on POST, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                server_retries += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                let body = collect_body(response.into_body()).await?;
+                return Err(ClientError::ApiError {
+                    status: status.as_u16(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+            }
+
+            let body = collect_body(response.into_body()).await?;
+            return Ok(serde_json::from_slice(&body)?);
+        }
+    }
 }
 
 /// Returns the current time as a Unix timestamp in seconds.

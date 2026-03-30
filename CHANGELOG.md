@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — 0.3.1
+## [Unreleased] — 0.3.2
+
+### Added
+
+- **`--restore` mode** (labels + milestones): the `--restore` flag is now
+  fully implemented.  It reads every repository's `labels.json` and
+  `milestones.json` from the backup and re-creates them in the target
+  organisation via the GitHub REST API.  Existing resources (HTTP 422) are
+  silently skipped.  Issues and pull requests are informational-only — GitHub
+  does not expose a public bulk-import API; see the Restore documentation for
+  third-party options.  Requires `--restore-target-org` and a token with
+  repository write access.
+
+- **AES-256-GCM at-rest encryption for S3** (`--encrypt-key`): the
+  `--encrypt-key` flag is now fully wired up.  Provide a 32-byte hex key
+  (64 hex chars) and every file is encrypted with AES-256-GCM before upload.
+  The wire format is `[12-byte random nonce][ciphertext + 16-byte tag]`.
+  Encrypted objects receive a `.enc` suffix in S3.  Key can also be set via
+  `BACKUP_ENCRYPT_KEY`.  Decrypt offline with `openssl enc -d -aes-256-gcm`.
+
+- **`post_process` module** in the main binary: mirror push, S3 sync,
+  Prometheus metrics, diff, and retention logic have been extracted from
+  `main.rs` into a dedicated `post_process.rs`, keeping both files under the
+  500-line modular limit.
+
+- **Write endpoints for GitHub REST API**: `GitHubClient` now exposes
+  `create_label()` and `create_milestone()` using a new `post_json` internal
+  helper that handles rate limiting and 5xx retries identically to GET requests.
+
+---
+
+## [0.3.1] — 2026-03-29
 
 ### Added
 

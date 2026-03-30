@@ -114,7 +114,9 @@ Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](htt
 | **Repo filters** | `--include-repos` / `--exclude-repos` glob patterns |
 | **Incremental** | `--since` to limit issues/PR fetching by date |
 | **S3 sync** | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
+| **At-rest encryption** | AES-256-GCM encryption before S3 upload (`--encrypt-key`) |
 | **Git mirroring** | Push to Gitea, Codeberg, Forgejo |
+| **Restore mode** | Re-create labels and milestones in target org (`--restore`) |
 | **Auth** | PAT or OAuth device flow |
 | **GitHub Enterprise** | `--api-url` + `--clone-host` for GHES instances |
 | **Config file** | TOML config with CLI override |
@@ -145,6 +147,8 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 | CLI Reference | [configuration/cli-reference](https://tomtom215.github.io/github-backup-rust/configuration/cli-reference.html) |
 | Config File | [configuration/config-file](https://tomtom215.github.io/github-backup-rust/configuration/config-file.html) |
 | S3 Storage | [storage/s3](https://tomtom215.github.io/github-backup-rust/storage/s3.html) |
+| At-Rest Encryption | [storage/encryption](https://tomtom215.github.io/github-backup-rust/storage/encryption.html) |
+| Restore from Backup | [development/restore](https://tomtom215.github.io/github-backup-rust/development/restore.html) |
 | Mirroring | [mirroring](https://tomtom215.github.io/github-backup-rust/mirroring.html) |
 | Monitoring & Reporting | [monitoring](https://tomtom215.github.io/github-backup-rust/monitoring.html) |
 | Docker | [docker](https://tomtom215.github.io/github-backup-rust/docker.html) |

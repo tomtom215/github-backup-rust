@@ -23,6 +23,7 @@
 
 - [Local Filesystem](storage/local.md)
 - [S3-Compatible Storage](storage/s3.md)
+- [At-Rest Encryption (AES-256-GCM)](storage/encryption.md)
 
 # Mirroring
 

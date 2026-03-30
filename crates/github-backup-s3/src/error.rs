@@ -52,4 +52,8 @@ pub enum S3Error {
     /// Invalid S3 endpoint URL.
     #[error("invalid S3 endpoint URL: {0}")]
     InvalidEndpoint(String),
+
+    /// AES-256-GCM encryption or decryption failed.
+    #[error("encryption error: {0}")]
+    Encrypt(String),
 }
