@@ -10,7 +10,7 @@
 
 use serde::Serialize;
 
-use github_backup_types::{Label, Milestone};
+use github_backup_types::{Issue, Label, Milestone};
 
 use crate::error::ClientError;
 
@@ -35,6 +35,16 @@ struct CreateMilestoneRequest<'a> {
     state: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     due_on: Option<&'a str>,
+}
+
+/// Request body for `POST /repos/{owner}/{repo}/issues`.
+#[derive(Debug, Serialize)]
+struct CreateIssueRequest<'a> {
+    title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<&'a str>,
 }
 
 impl GitHubClient {
@@ -66,6 +76,34 @@ impl GitHubClient {
             description,
         };
         self.post_json(&url, &body).await
+    }
+
+    /// Creates an issue in a repository.
+    ///
+    /// Restores a backed-up issue using `POST /repos/{owner}/{repo}/issues`.
+    /// The `labels` slice should contain label **names** (not IDs); the GitHub
+    /// API accepts names directly and will attach labels that already exist in
+    /// the repository.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn create_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: Option<&str>,
+        labels: &[&str],
+    ) -> Result<Issue, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/issues");
+        let req = CreateIssueRequest {
+            title,
+            body,
+            labels: labels.to_vec(),
+        };
+        self.post_json(&url, &req).await
     }
 
     /// Creates a milestone in a repository.
@@ -124,6 +162,32 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"description\":\"New feature\""));
+    }
+
+    #[test]
+    fn create_issue_request_includes_title_and_body() {
+        let req = CreateIssueRequest {
+            title: "Found a bug",
+            body: Some("Reproduction steps here"),
+            labels: vec!["bug", "help wanted"],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"title\":\"Found a bug\""));
+        assert!(json.contains("\"body\":\"Reproduction steps here\""));
+        assert!(json.contains("\"labels\":[\"bug\",\"help wanted\"]"));
+    }
+
+    #[test]
+    fn create_issue_request_skips_none_body_and_empty_labels() {
+        let req = CreateIssueRequest {
+            title: "Minimal issue",
+            body: None,
+            labels: vec![],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"title\":\"Minimal issue\""));
+        assert!(!json.contains("body"), "None body should be omitted");
+        assert!(!json.contains("labels"), "empty labels should be omitted");
     }
 
     #[test]
