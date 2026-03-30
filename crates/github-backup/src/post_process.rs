@@ -13,6 +13,7 @@
 
 use thiserror::Error;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use github_backup_mirror::{
     config::{GitLabConfig, GiteaConfig},
@@ -249,10 +250,14 @@ pub fn build_s3_config(args: &Args) -> Option<S3Config> {
 /// Returns `None` if no key is set, or `Err` if the string is not exactly
 /// 64 hex characters that decode to 32 bytes.
 ///
+/// The returned key bytes are wrapped in [`Zeroizing`] so that they are
+/// securely erased from memory when dropped, preventing the key from
+/// lingering in process memory.
+///
 /// # Errors
 ///
 /// Returns a descriptive string on invalid input.
-pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Box<[u8; 32]>>, String> {
+pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
     let Some(hex) = hex_key else {
         return Ok(None);
     };
@@ -262,7 +267,7 @@ pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Box<[u8; 32]>>
             hex.len()
         ));
     }
-    let mut key = Box::new([0u8; 32]);
+    let mut key = Zeroizing::new([0u8; 32]);
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let byte_str = std::str::from_utf8(chunk)
             .map_err(|_| "--encrypt-key contains non-UTF-8 characters".to_string())?;

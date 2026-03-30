@@ -271,7 +271,24 @@ async fn main() -> ExitCode {
         opts,
     );
 
-    let stats = match engine.run(&owner).await {
+    // Race the backup against a Ctrl+C / SIGINT signal.  On interruption we
+    // log a warning, skip post-processing, and exit with code 130 (the
+    // conventional Unix exit code for SIGINT-terminated processes).
+    // Any temporary GIT_ASKPASS scripts are cleaned up by their RAII guards
+    // when the Tokio runtime shuts down.
+    let backup_result = tokio::select! {
+        result = engine.run(&owner) => result,
+        _ = tokio::signal::ctrl_c() => {
+            warn!(
+                "backup interrupted by SIGINT — partial data may remain on disk; \
+                 re-run to resume"
+            );
+            // Exit with 130 (128 + SIGINT signal number 2).
+            return ExitCode::from(130);
+        }
+    };
+
+    let stats = match backup_result {
         Ok(s) => {
             info!(
                 repos_backed_up = s.repos_backed_up(),
