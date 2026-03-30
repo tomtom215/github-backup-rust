@@ -65,6 +65,7 @@ async fn main() -> ExitCode {
         match ConfigFile::from_path(config_path) {
             Ok(cfg) => {
                 info!(path = %config_path.display(), "loaded config file");
+                check_config_permissions(config_path);
                 args.merge_config(&cfg);
             }
             Err(e) => {
@@ -134,6 +135,43 @@ async fn main() -> ExitCode {
         }
     };
 
+    // ── Decrypt mode ──────────────────────────────────────────────────────
+    if args.decrypt {
+        let input_path = match args.decrypt_input.as_ref() {
+            Some(p) => p,
+            None => {
+                error!("--decrypt requires --decrypt-input <FILE>");
+                return ExitCode::FAILURE;
+            }
+        };
+        let output_path = match args.decrypt_output.as_ref() {
+            Some(p) => p,
+            None => {
+                error!("--decrypt requires --decrypt-output <FILE>");
+                return ExitCode::FAILURE;
+            }
+        };
+        let key = match encrypt_key.as_deref() {
+            Some(k) => k,
+            None => {
+                error!("--decrypt requires --encrypt-key or BACKUP_ENCRYPT_KEY");
+                return ExitCode::FAILURE;
+            }
+        };
+        return run_decrypt(input_path, output_path, key);
+    }
+
+    // Warn when --encrypt-key was supplied on the command line (visible in ps aux).
+    // If BACKUP_ENCRYPT_KEY is set in the environment, the value came from the env
+    // var and is safe; if it is absent the user must have passed --encrypt-key directly.
+    if args.encrypt_key.is_some() && std::env::var("BACKUP_ENCRYPT_KEY").is_err() {
+        warn!(
+            "--encrypt-key was supplied on the command line. The key is visible \
+             in the process list (ps aux) to any user on this machine. \
+             Use the BACKUP_ENCRYPT_KEY environment variable instead."
+        );
+    }
+
     // Obtain GitHub credential — token, device flow, or anonymous.
     let credential = match obtain_credential(&args).await {
         Ok(c) => c,
@@ -162,6 +200,8 @@ async fn main() -> ExitCode {
     let max_age_days = args.max_age_days;
     let restore_mode = args.restore;
     let restore_target_org = args.restore_target_org.clone();
+    let restore_yes = args.restore_yes;
+    let dry_run = args.dry_run;
 
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
@@ -313,8 +353,21 @@ async fn main() -> ExitCode {
     // ── Restore mode ───────────────────────────────────────────────────────
     if restore_mode {
         let target_org = restore_target_org.as_deref().unwrap_or(&owner);
-        if let Err(e) =
-            restore::run_restore(&client, &output, &owner, target_org, api_url.as_deref()).await
+        if !dry_run && !confirm_restore(target_org, restore_yes) {
+            error!(
+                "restore aborted — pass --restore-yes to confirm non-interactively"
+            );
+            return ExitCode::FAILURE;
+        }
+        if let Err(e) = restore::run_restore(
+            &client,
+            &output,
+            &owner,
+            target_org,
+            api_url.as_deref(),
+            dry_run,
+        )
+        .await
         {
             error!("restore failed: {e}");
             return ExitCode::FAILURE;
@@ -434,6 +487,115 @@ fn run_verify(json_dir: &std::path::Path) -> ExitCode {
             }
         }
     }
+}
+
+/// Decrypts `input_path` with `key` and writes plaintext to `output_path`.
+fn run_decrypt(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    key: &[u8; 32],
+) -> ExitCode {
+    let ciphertext = match std::fs::read(input_path) {
+        Ok(b) => b,
+        Err(e) => {
+            error!(path = %input_path.display(), "failed to read encrypted file: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let plaintext = match github_backup_s3::encrypt::decrypt(key, &ciphertext) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("decryption failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                error!(path = %parent.display(), "failed to create output directory: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    match std::fs::write(output_path, &plaintext) {
+        Ok(()) => {
+            info!(
+                input = %input_path.display(),
+                output = %output_path.display(),
+                bytes = plaintext.len(),
+                "decryption complete"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!(path = %output_path.display(), "failed to write decrypted output: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Checks config file permissions and warns if it is group- or world-readable.
+///
+/// A config file commonly contains `token`, `s3_access_key`, or
+/// `s3_secret_key`.  If the file is readable by other users, those credentials
+/// are exposed.
+fn check_config_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.mode();
+            if mode & 0o077 != 0 {
+                warn!(
+                    path = %path.display(),
+                    mode = format!("{:o}", mode & 0o777),
+                    "config file is readable by group or others; credentials stored \
+                     in it may be exposed. Run: chmod 600 {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path; // permission checks not supported on this platform
+    }
+}
+
+/// Prints a restore warning banner and, when interactive, asks for explicit
+/// confirmation.
+///
+/// Returns `true` if the user confirmed (or `--restore-yes` was passed).
+/// Returns `false` if the user declined or stdin is not a TTY and `--restore-yes`
+/// was not supplied.
+fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
+    if restore_yes {
+        return true;
+    }
+
+    eprintln!();
+    eprintln!("╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║         WARNING: RESTORE WILL MODIFY GITHUB DATA            ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════╝");
+    eprintln!("  Target : {target_org}");
+    eprintln!("  This will CREATE labels, milestones, and issues in the target");
+    eprintln!("  organisation.  This action cannot be automatically undone.");
+    eprintln!();
+
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        eprintln!("  stdin is not a TTY — re-run with --restore-yes to confirm.");
+        eprintln!();
+        return false;
+    }
+
+    eprint!("  Type 'yes' to continue: ");
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    eprintln!();
+    input.trim() == "yes"
 }
 
 /// Initialises the `tracing` subscriber.

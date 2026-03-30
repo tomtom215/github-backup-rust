@@ -670,10 +670,23 @@ pub struct Args {
     #[arg(long, value_name = "ORG", requires = "restore")]
     pub restore_target_org: Option<String>,
 
+    /// Skip the interactive confirmation prompt for `--restore`.
+    ///
+    /// By default `--restore` prints a warning banner and requires either
+    /// interactive confirmation (TTY) or this flag (non-interactive / CI).
+    /// Pass `--restore-yes` to acknowledge the warning and proceed without
+    /// user input.
+    #[arg(long, requires = "restore")]
+    pub restore_yes: bool,
+
     // ── Encryption ────────────────────────────────────────────────────────
     /// Encrypt backup data before writing to S3 using AES-256-GCM.
     ///
     /// Provide a 32-byte hex-encoded encryption key (64 hex characters).
+    /// **Prefer** supplying the key via the `BACKUP_ENCRYPT_KEY` environment
+    /// variable rather than on the command line — a CLI flag is visible to
+    /// any user running `ps aux` on the same host.
+    ///
     /// Can also be set via the `BACKUP_ENCRYPT_KEY` environment variable.
     ///
     /// The key is never written to disk or logged.
@@ -681,10 +694,40 @@ pub struct Args {
         long,
         value_name = "HEX_KEY",
         env = "BACKUP_ENCRYPT_KEY",
-        hide_env_values = true,
-        requires = "s3_bucket"
+        hide_env_values = true
     )]
     pub encrypt_key: Option<String>,
+
+    // ── Decrypt ───────────────────────────────────────────────────────────
+    /// Decrypt a file previously encrypted by `--encrypt-key`.
+    ///
+    /// Reads the AES-256-GCM–encrypted blob from `--decrypt-input` and writes
+    /// the recovered plaintext to `--decrypt-output`.  The same key used for
+    /// encryption must be supplied via `--encrypt-key` or
+    /// `BACKUP_ENCRYPT_KEY`.  Does not contact the GitHub API or perform a
+    /// backup.
+    ///
+    /// Example:
+    /// ```text
+    /// github-backup --decrypt \
+    ///   --encrypt-key "$BACKUP_ENCRYPT_KEY" \
+    ///   --decrypt-input issues.json.enc \
+    ///   --decrypt-output issues.json
+    /// ```
+    #[arg(long, requires = "encrypt_key")]
+    pub decrypt: bool,
+
+    /// Path to the AES-256-GCM encrypted file to decrypt.
+    ///
+    /// Required when `--decrypt` is set.
+    #[arg(long, value_name = "FILE", requires = "decrypt")]
+    pub decrypt_input: Option<PathBuf>,
+
+    /// Path where the decrypted plaintext will be written.
+    ///
+    /// Required when `--decrypt` is set.
+    #[arg(long, value_name = "FILE", requires = "decrypt")]
+    pub decrypt_output: Option<PathBuf>,
 
     // ── Logging ────────────────────────────────────────────────────────────
     /// Suppress all non-error output.

@@ -8,13 +8,22 @@
 //! uploaded (checked via `HeadObject`); this makes re-runs incremental.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::client::{S3Client, MULTIPART_THRESHOLD_BYTES};
 use crate::config::S3Config;
 use crate::encrypt;
 use crate::error::S3Error;
+
+/// Maximum number of concurrent S3 upload tasks.
+const S3_UPLOAD_CONCURRENCY: usize = 8;
+/// Log a progress line every time this many percent of files complete.
+const PROGRESS_INTERVAL_PCT: usize = 10;
 
 /// Statistics from a sync run.
 #[derive(Debug, Default, Clone)]
@@ -62,62 +71,113 @@ pub async fn sync_to_s3(
     include_binary_assets: bool,
     encrypt_key: Option<&[u8; 32]>,
 ) -> Result<SyncStats, S3Error> {
-    let mut stats = SyncStats::default();
-
     let files = walk_files(backup_root);
     if files.is_empty() {
         info!(dir = %backup_root.display(), "no files to sync to S3");
-        return Ok(stats);
+        return Ok(SyncStats::default());
     }
 
+    // Build the list of (local_path, s3_key) pairs, skipping excluded files.
+    let candidates: Vec<(PathBuf, String)> = files
+        .into_iter()
+        .filter_map(|file_path| {
+            if !include_binary_assets && is_binary_asset(&file_path) {
+                debug!(path = %file_path.display(), "skipping binary asset");
+                return None;
+            }
+            let relative = file_path
+                .strip_prefix(backup_root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Encrypted objects get a `.enc` suffix so they are never confused
+            // with a stale plaintext object from a previous unencrypted run.
+            let keyed_relative = if encrypt_key.is_some() {
+                format!("{relative}.enc")
+            } else {
+                relative
+            };
+            Some((file_path, config.full_key(&keyed_relative)))
+        })
+        .collect();
+
+    let total = candidates.len();
     info!(
-        count = files.len(),
+        count = total,
+        concurrency = S3_UPLOAD_CONCURRENCY,
         bucket = %config.bucket,
         "syncing backup to S3"
     );
 
-    for file_path in &files {
-        // Optionally skip binary assets (large files in release_assets/).
-        if !include_binary_assets && is_binary_asset(file_path) {
-            debug!(path = %file_path.display(), "skipping binary asset");
-            continue;
-        }
+    // Shared state updated by concurrent upload tasks.
+    let uploaded = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let errored = Arc::new(AtomicUsize::new(0));
+    // Tracks the last progress-log threshold crossed (in integer percent buckets).
+    let last_logged_pct = Arc::new(AtomicUsize::new(0));
 
-        // Compute the S3 key relative to the backup root.
-        let relative = match file_path.strip_prefix(backup_root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => continue,
-        };
-        // Encrypted objects get a `.enc` suffix so they can be distinguished
-        // from plaintext objects and so that the plaintext S3 key is never
-        // inadvertently treated as already-uploaded when the encryption key
-        // changes.
-        let keyed_relative = if encrypt_key.is_some() {
-            format!("{relative}.enc")
-        } else {
-            relative
-        };
-        let s3_key = config.full_key(&keyed_relative);
+    // Copy the key bytes so each task gets its own owned copy (avoids lifetime
+    // issues when spawning independent tasks).
+    let key_copy: Option<[u8; 32]> = encrypt_key.copied();
 
-        match upload_file(client, file_path, &s3_key, encrypt_key).await {
-            Ok(UploadOutcome::Uploaded) => {
-                stats.uploaded += 1;
+    let sem = Arc::new(Semaphore::new(S3_UPLOAD_CONCURRENCY));
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    for (file_path, s3_key) in candidates {
+        let permit = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let client = client.clone();
+        let uploaded = Arc::clone(&uploaded);
+        let skipped = Arc::clone(&skipped);
+        let errored = Arc::clone(&errored);
+        let last_logged_pct = Arc::clone(&last_logged_pct);
+
+        join_set.spawn(async move {
+            let _permit = permit;
+
+            match upload_file(&client, &file_path, &s3_key, key_copy.as_ref()).await {
+                Ok(UploadOutcome::Uploaded) => {
+                    uploaded.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(UploadOutcome::Skipped) => {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    errored.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        path = %file_path.display(),
+                        key = %s3_key,
+                        error = %e,
+                        "failed to upload file to S3"
+                    );
+                }
             }
-            Ok(UploadOutcome::Skipped) => {
-                stats.skipped += 1;
+
+            // Emit a progress log line at configurable percentage intervals.
+            if total > 0 {
+                let done = uploaded.load(Ordering::Relaxed)
+                    + skipped.load(Ordering::Relaxed)
+                    + errored.load(Ordering::Relaxed);
+                let pct = done * 100 / total;
+                let bucket = pct / PROGRESS_INTERVAL_PCT;
+                let prev = last_logged_pct.fetch_max(bucket, Ordering::Relaxed);
+                if bucket > prev {
+                    info!(done, total, percent = pct, "S3 sync progress");
+                }
             }
-            Err(e) => {
-                stats.errored += 1;
-                warn!(
-                    path = %file_path.display(),
-                    key = %s3_key,
-                    error = %e,
-                    "failed to upload file to S3"
-                );
-            }
-        }
+        });
     }
 
+    // Drain all tasks.
+    while join_set.join_next().await.is_some() {}
+
+    let stats = SyncStats {
+        uploaded: uploaded.load(Ordering::Relaxed),
+        skipped: skipped.load(Ordering::Relaxed),
+        errored: errored.load(Ordering::Relaxed),
+    };
     info!(%stats, "S3 sync complete");
     Ok(stats)
 }
@@ -134,6 +194,9 @@ enum UploadOutcome {
 /// When `encrypt_key` is `Some`, the file bytes are encrypted with
 /// AES-256-GCM before upload.  The content type is always
 /// `application/octet-stream` for encrypted blobs.
+///
+/// Takes `encrypt_key` by value (it is `Copy`) so this function can be
+/// safely called from spawned tasks without lifetime complications.
 async fn upload_file(
     client: &S3Client,
     local_path: &Path,

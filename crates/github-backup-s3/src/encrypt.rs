@@ -101,9 +101,41 @@ pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, S3Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn test_key() -> [u8; 32] {
         [0x42u8; 32]
+    }
+
+    proptest! {
+        /// Verifies that decrypt(encrypt(pt)) == pt for arbitrary plaintext.
+        #[test]
+        fn encrypt_decrypt_roundtrip_arbitrary(pt in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let key = test_key();
+            let blob = encrypt(&key, &pt).expect("encrypt");
+            let recovered = decrypt(&key, &blob).expect("decrypt");
+            prop_assert_eq!(recovered, pt);
+        }
+
+        /// Verifies that a 1-byte bit-flip in the ciphertext causes decryption
+        /// to fail (AEAD tag integrity check).
+        #[test]
+        fn tampered_ciphertext_fails_decryption(
+            pt in proptest::collection::vec(any::<u8>(), 1..256),
+            flip_idx in any::<usize>(),
+        ) {
+            let key = test_key();
+            let mut blob = encrypt(&key, &pt).expect("encrypt");
+            // Flip a byte in the ciphertext region (after the nonce).
+            if blob.len() > NONCE_LEN {
+                let idx = NONCE_LEN + (flip_idx % (blob.len() - NONCE_LEN));
+                blob[idx] ^= 0xFF;
+                prop_assert!(
+                    decrypt(&key, &blob).is_err(),
+                    "tampered ciphertext should fail AEAD authentication"
+                );
+            }
+        }
     }
 
     #[test]
