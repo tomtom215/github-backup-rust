@@ -48,6 +48,7 @@
 //!     Path::new("/backup/octocat"),
 //!     false,  // skip binary release assets
 //!     None,   // no at-rest encryption
+//!     false,  // keep stale S3 objects
 //! ).await?;
 //!
 //! println!("Uploaded {} files", stats.uploaded);

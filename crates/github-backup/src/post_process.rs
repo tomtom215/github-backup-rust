@@ -161,6 +161,7 @@ pub async fn run_s3_sync(
     owner: &str,
     include_assets: bool,
     encrypt_key: Option<&[u8; 32]>,
+    delete_stale: bool,
 ) -> Result<(), PostProcessError> {
     let client = S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(e.to_string()))?;
     let backup_root = output.owner_json_dir(owner);
@@ -170,19 +171,24 @@ pub async fn run_s3_sync(
         return Ok(());
     }
 
-    let stats = sync_to_s3(&client, config, &backup_root, include_assets, encrypt_key)
-        .await
-        .map_err(|e| PostProcessError::S3(e.to_string()))?;
+    let stats =
+        sync_to_s3(&client, config, &backup_root, include_assets, encrypt_key, delete_stale)
+            .await
+            .map_err(|e| PostProcessError::S3(e.to_string()))?;
 
     info!(
         uploaded = stats.uploaded,
         skipped = stats.skipped,
         errored = stats.errored,
+        deleted = stats.deleted,
         "S3 sync complete"
     );
 
     if stats.errored > 0 {
         warn!(errored = stats.errored, "some files failed to upload to S3");
+    }
+    if stats.deleted > 0 {
+        info!(deleted = stats.deleted, "stale S3 objects removed");
     }
 
     Ok(())

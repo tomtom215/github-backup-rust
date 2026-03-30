@@ -7,6 +7,7 @@
 //! artefacts to S3.  Only files that do not yet exist in the bucket are
 //! uploaded (checked via `HeadObject`); this makes re-runs incremental.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,6 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
+
+/// AES-256-GCM nonce (12 bytes) + GCM tag (16 bytes) overhead added to every
+/// encrypted file.
+const ENCRYPT_OVERHEAD: u64 = 12 + 16;
 
 use crate::client::{S3Client, MULTIPART_THRESHOLD_BYTES};
 use crate::config::S3Config;
@@ -30,18 +35,20 @@ const PROGRESS_INTERVAL_PCT: usize = 10;
 pub struct SyncStats {
     /// Number of files uploaded to S3.
     pub uploaded: usize,
-    /// Number of files skipped (already exist in S3).
+    /// Number of files skipped (already exist in S3 with matching size).
     pub skipped: usize,
     /// Number of files that failed to upload.
     pub errored: usize,
+    /// Number of stale S3 objects deleted (only when `delete_stale = true`).
+    pub deleted: usize,
 }
 
 impl std::fmt::Display for SyncStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "uploaded={} skipped={} errored={}",
-            self.uploaded, self.skipped, self.errored
+            "uploaded={} skipped={} errored={} deleted={}",
+            self.uploaded, self.skipped, self.errored, self.deleted
         )
     }
 }
@@ -60,6 +67,14 @@ impl std::fmt::Display for SyncStats {
 /// objects from plaintext ones.  The wire format is
 /// `[12-byte nonce][ciphertext + 16-byte tag]` — see [`encrypt`] for details.
 ///
+/// Uploads are skipped when an existing S3 object already has the expected
+/// `Content-Length`; objects with a mismatched size are re-uploaded.
+///
+/// When `delete_stale` is `true`, after uploads complete, any S3 objects
+/// under the configured prefix that are *not* part of the current local
+/// backup are deleted.  This keeps the S3 bucket in sync with the local
+/// state and prevents stale objects from accumulating across runs.
+///
 /// # Errors
 ///
 /// Returns [`S3Error`] on configuration or TLS errors.  Per-file upload
@@ -70,6 +85,7 @@ pub async fn sync_to_s3(
     backup_root: &Path,
     include_binary_assets: bool,
     encrypt_key: Option<&[u8; 32]>,
+    delete_stale: bool,
 ) -> Result<SyncStats, S3Error> {
     let files = walk_files(backup_root);
     if files.is_empty() {
@@ -108,6 +124,14 @@ pub async fn sync_to_s3(
         bucket = %config.bucket,
         "syncing backup to S3"
     );
+
+    // Pre-compute the expected S3 key set for stale-deletion (before the
+    // `for` loop moves `candidates`).
+    let expected_keys: HashSet<String> = if delete_stale {
+        candidates.iter().map(|(_, k)| k.clone()).collect()
+    } else {
+        HashSet::new()
+    };
 
     // Shared state updated by concurrent upload tasks.
     let uploaded = Arc::new(AtomicUsize::new(0));
@@ -173,10 +197,44 @@ pub async fn sync_to_s3(
     // Drain all tasks.
     while join_set.join_next().await.is_some() {}
 
+    // Optionally delete S3 objects that no longer exist locally.
+    let mut deleted = 0usize;
+    if delete_stale {
+        match client.list_objects(&config.prefix).await {
+            Ok(remote_keys) => {
+                let stale: Vec<String> = remote_keys
+                    .into_iter()
+                    .filter(|k| !expected_keys.contains(k))
+                    .collect();
+
+                if stale.is_empty() {
+                    debug!("no stale S3 objects to delete");
+                } else {
+                    info!(count = stale.len(), "deleting stale S3 objects");
+                    for key in &stale {
+                        match client.delete_object(key).await {
+                            Ok(()) => {
+                                deleted += 1;
+                                debug!(key, "deleted stale S3 object");
+                            }
+                            Err(e) => {
+                                warn!(key, error = %e, "failed to delete stale S3 object");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to list S3 objects for stale-deletion; skipping");
+            }
+        }
+    }
+
     let stats = SyncStats {
         uploaded: uploaded.load(Ordering::Relaxed),
         skipped: skipped.load(Ordering::Relaxed),
         errored: errored.load(Ordering::Relaxed),
+        deleted,
     };
     info!(%stats, "S3 sync complete");
     Ok(stats)
@@ -203,10 +261,30 @@ async fn upload_file(
     s3_key: &str,
     encrypt_key: Option<&[u8; 32]>,
 ) -> Result<UploadOutcome, S3Error> {
-    // Skip files that already exist in S3.
-    if client.object_exists(s3_key).await? {
-        debug!(key = %s3_key, "object already exists in S3, skipping");
-        return Ok(UploadOutcome::Skipped);
+    // Check the S3 object's size.  If it matches the expected upload size the
+    // file is already up-to-date and can be skipped.  A size mismatch
+    // (e.g. truncated upload from a previous failed run) triggers a re-upload.
+    let local_size = std::fs::metadata(local_path)?.len();
+    let expected_s3_size = if encrypt_key.is_some() {
+        local_size + ENCRYPT_OVERHEAD
+    } else {
+        local_size
+    };
+
+    match client.object_content_length(s3_key).await? {
+        Some(s3_size) if s3_size == expected_s3_size => {
+            debug!(key = %s3_key, "object already exists in S3 with matching size, skipping");
+            return Ok(UploadOutcome::Skipped);
+        }
+        Some(s3_size) => {
+            warn!(
+                key = %s3_key,
+                local_bytes = expected_s3_size,
+                s3_bytes = s3_size,
+                "S3 object size mismatch — re-uploading"
+            );
+        }
+        None => {} // Object not found; upload it.
     }
 
     let plaintext = std::fs::read(local_path)?;
@@ -334,7 +412,8 @@ mod tests {
             uploaded: 5,
             skipped: 3,
             errored: 1,
+            deleted: 2,
         };
-        assert_eq!(s.to_string(), "uploaded=5 skipped=3 errored=1");
+        assert_eq!(s.to_string(), "uploaded=5 skipped=3 errored=1 deleted=2");
     }
 }

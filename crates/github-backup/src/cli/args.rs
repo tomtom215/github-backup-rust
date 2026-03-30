@@ -586,6 +586,18 @@ pub struct Args {
     #[arg(long, requires = "s3_bucket")]
     pub s3_include_assets: bool,
 
+    /// Delete S3 objects that no longer exist in the local backup.
+    ///
+    /// After the upload phase completes, lists all objects under the configured
+    /// S3 prefix and deletes any that are not part of the current backup run.
+    /// This keeps the bucket in sync when repositories or files have been
+    /// removed locally.
+    ///
+    /// **Use with caution** — this permanently deletes data from S3.  Review
+    /// your retention policy before enabling.
+    #[arg(long, requires = "s3_bucket")]
+    pub s3_delete_stale: bool,
+
     // ── Execution ─────────────────────────────────────────────────────────
     /// Maximum number of repositories to back up in parallel.
     ///

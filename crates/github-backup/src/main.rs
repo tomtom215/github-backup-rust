@@ -192,6 +192,7 @@ async fn main() -> ExitCode {
     let mirror_dest = build_mirror_dest(&args);
     let s3_config = build_s3_config(&args);
     let s3_include_assets = args.s3_include_assets;
+    let s3_delete_stale = args.s3_delete_stale;
     let api_url = args.api_url.clone();
     let write_manifest_flag = args.manifest;
     let prometheus_metrics_path = args.prometheus_metrics.clone();
@@ -390,6 +391,7 @@ async fn main() -> ExitCode {
             &owner,
             s3_include_assets,
             encrypt_key.as_deref(),
+            s3_delete_stale,
         )
         .await
         {
