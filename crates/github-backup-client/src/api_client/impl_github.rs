@@ -216,7 +216,9 @@ impl BackupClient for GitHubClient {
         repo: &'a str,
         branch: &'a str,
     ) -> BoxFuture<'a, Result<BranchProtection, ClientError>> {
-        Box::pin(GitHubClient::get_branch_protection(self, owner, repo, branch))
+        Box::pin(GitHubClient::get_branch_protection(
+            self, owner, repo, branch,
+        ))
     }
 
     fn download_release_asset<'a>(

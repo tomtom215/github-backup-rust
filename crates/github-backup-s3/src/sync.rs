@@ -9,8 +9,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;

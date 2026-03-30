@@ -221,9 +221,9 @@ impl S3Client {
             let bucket_path = self.bucket_base_path();
             let url = format!("{bucket_url}?{query}");
             let host = self.host();
-            let signed =
-                self.signer
-                    .sign_request("GET", &host, &bucket_path, &query, "", b"");
+            let signed = self
+                .signer
+                .sign_request("GET", &host, &bucket_path, &query, "", b"");
 
             let req = Request::builder()
                 .method(Method::GET)
@@ -854,7 +854,10 @@ mod tests {
 
     #[test]
     fn percent_encode_unreserved_unchanged() {
-        assert_eq!(percent_encode("backups/owner/json"), "backups%2Fowner%2Fjson");
+        assert_eq!(
+            percent_encode("backups/owner/json"),
+            "backups%2Fowner%2Fjson"
+        );
         assert_eq!(percent_encode("abc-_~."), "abc-_~.");
     }
 

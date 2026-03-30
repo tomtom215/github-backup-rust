@@ -136,7 +136,10 @@ mod tests {
             "allow_deletions": {"enabled": false}
         });
         let bp: BranchProtection = serde_json::from_value(json).expect("deserialise");
-        assert_eq!(bp.url, "https://api.github.com/repos/owner/repo/branches/main/protection");
+        assert_eq!(
+            bp.url,
+            "https://api.github.com/repos/owner/repo/branches/main/protection"
+        );
         assert!(bp.enforce_admins.as_ref().unwrap().enabled);
         assert!(bp.required_status_checks.is_none());
         let re = serde_json::to_string(&bp).expect("serialise");

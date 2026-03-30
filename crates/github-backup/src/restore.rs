@@ -110,7 +110,10 @@ pub async fn run_restore(
     dry_run: bool,
 ) -> Result<(), String> {
     if dry_run {
-        info!(source_owner, target_org, "dry-run: would restore labels, milestones, and issues");
+        info!(
+            source_owner,
+            target_org, "dry-run: would restore labels, milestones, and issues"
+        );
     } else {
         info!(
             source_owner,
@@ -410,10 +413,10 @@ mod tests {
     /// correctly counts resources in dry-run mode without making any API calls.
     #[tokio::test]
     async fn restore_repo_dry_run_counts_without_api_calls() {
-        use std::fs;
-        use tempfile::TempDir;
         use github_backup_client::GitHubClient;
         use github_backup_types::config::Credential;
+        use std::fs;
+        use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let meta_dir = dir.path();
@@ -479,7 +482,10 @@ mod tests {
         assert_eq!(stats.milestones_created, 1);
         assert_eq!(stats.milestones_errored, 0);
         // 1 real issue created (dry-run), 1 PR skipped.
-        assert_eq!(stats.issues_created, 1, "dry-run should count the real issue");
+        assert_eq!(
+            stats.issues_created, 1,
+            "dry-run should count the real issue"
+        );
         assert_eq!(stats.issues_skipped, 1, "PR stub should be skipped");
         assert_eq!(stats.issues_errored, 0);
     }

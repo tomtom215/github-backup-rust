@@ -381,9 +381,27 @@ where
     let wikis_dir = ctx.output.wikis_dir(ctx.owner);
     let meta_dir = ctx.output.repo_meta_dir(ctx.owner, &repo.name);
 
-    backup_repository(repo, ctx.opts, &repos_dir, &meta_dir, ctx.storage, ctx.git, ctx.clone_opts).await?;
+    backup_repository(
+        repo,
+        ctx.opts,
+        &repos_dir,
+        &meta_dir,
+        ctx.storage,
+        ctx.git,
+        ctx.clone_opts,
+    )
+    .await?;
     backup_wiki(repo, ctx.opts, &wikis_dir, ctx.git, ctx.clone_opts).await?;
-    backup_repo_metadata(ctx.client, ctx.storage, ctx.opts, ctx.owner, repo, &meta_dir, ctx.stats).await?;
+    backup_repo_metadata(
+        ctx.client,
+        ctx.storage,
+        ctx.opts,
+        ctx.owner,
+        repo,
+        &meta_dir,
+        ctx.stats,
+    )
+    .await?;
 
     Ok(true)
 }

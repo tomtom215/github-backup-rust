@@ -11,7 +11,9 @@ use http_body_util::Full;
 use hyper::Method;
 use tracing::info;
 
-use github_backup_types::{Branch, BranchProtection, Hook, Label, Milestone, Release, SecurityAdvisory};
+use github_backup_types::{
+    Branch, BranchProtection, Hook, Label, Milestone, Release, SecurityAdvisory,
+};
 
 use crate::error::ClientError;
 

@@ -75,7 +75,12 @@ pub async fn backup_branches(
             Err(ClientError::ApiError {
                 status: 403 | 404, ..
             }) => {
-                debug!(owner, repo, branch = branch_name, "skipping branch protection (no admin access or not protected)");
+                debug!(
+                    owner,
+                    repo,
+                    branch = branch_name,
+                    "skipping branch protection (no admin access or not protected)"
+                );
             }
             Err(e) => return Err(e.into()),
         }
@@ -241,8 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn backup_branches_no_protection_for_unprotected_branches() {
-        let client = MockBackupClient::new()
-            .with_branches(vec![make_branch("main", false)]);
+        let client = MockBackupClient::new().with_branches(vec![make_branch("main", false)]);
 
         let storage = MemStorage::default();
         let opts = BackupOptions {
