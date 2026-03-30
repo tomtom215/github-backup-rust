@@ -31,6 +31,7 @@ use crate::cli::Args;
 /// Replaces the previous `Result<(), String>` returns on public post-process
 /// functions, preserving source context and enabling structured handling.
 #[derive(Debug, Error)]
+#[allow(dead_code)] // Diff and Metrics variants reserved for future use
 pub enum PostProcessError {
     /// A mirror push operation failed.
     #[error("mirror push failed: {0}")]
@@ -172,10 +173,16 @@ pub async fn run_s3_sync(
         return Ok(());
     }
 
-    let stats =
-        sync_to_s3(&client, config, &backup_root, include_assets, encrypt_key, delete_stale)
-            .await
-            .map_err(|e| PostProcessError::S3(e.to_string()))?;
+    let stats = sync_to_s3(
+        &client,
+        config,
+        &backup_root,
+        include_assets,
+        encrypt_key,
+        delete_stale,
+    )
+    .await
+    .map_err(|e| PostProcessError::S3(e.to_string()))?;
 
     info!(
         uploaded = stats.uploaded,

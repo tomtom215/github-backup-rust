@@ -85,7 +85,10 @@ async fn send_post(url: &str, body: Vec<u8>) -> Result<StatusCode, String> {
         .method(Method::POST)
         .uri(url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", concat!("github-backup-rust/", env!("CARGO_PKG_VERSION")))
+        .header(
+            "User-Agent",
+            concat!("github-backup-rust/", env!("CARGO_PKG_VERSION")),
+        )
         .header("Content-Length", body.len().to_string())
         .body(Full::new(Bytes::from(body)))
         .map_err(|e| format!("build request: {e}"))?;

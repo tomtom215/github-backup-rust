@@ -377,9 +377,7 @@ async fn main() -> ExitCode {
     if restore_mode {
         let target_org = restore_target_org.as_deref().unwrap_or(&owner);
         if !dry_run && !confirm_restore(target_org, restore_yes) {
-            error!(
-                "restore aborted — pass --restore-yes to confirm non-interactively"
-            );
+            error!("restore aborted — pass --restore-yes to confirm non-interactively");
             return ExitCode::FAILURE;
         }
         if let Err(e) = restore::run_restore(
