@@ -173,6 +173,12 @@ fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
+        // PID 0 is never a real user-space process.  kill(0, sig) is a POSIX
+        // special case that signals the entire process group — it would return
+        // 0 (success) for any running process, giving a false positive.
+        if pid == 0 {
+            return false;
+        }
         // POSIX kill(pid, 0): returns 0 if the process exists and we have
         // permission to signal it; returns -1 (ESRCH) if not found.
         // pid_t is i32 on all Unix platforms we support.
