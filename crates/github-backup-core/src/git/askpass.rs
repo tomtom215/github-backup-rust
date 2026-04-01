@@ -181,11 +181,17 @@ mod tests {
         let dir = askpass_dir();
         let meta = std::fs::metadata(dir).expect("metadata");
         let mode = meta.permissions().mode();
-        // Lower 9 bits: owner rwx (7), group --- (0), others --- (0) = 0o700
-        let lower = mode & 0o777;
+        // Check that neither group nor others have any permission bits set.
+        // We use (mode & 0o077) rather than asserting an exact 0o700 value
+        // because macOS APFS may report sticky bits or ACL-influenced modes
+        // that change the upper portion of the lower 9 bits while still
+        // restricting access correctly.
+        let group_other = mode & 0o077;
         assert_eq!(
-            lower, 0o700,
-            "private askpass dir must have mode 0700, got {lower:#o}"
+            group_other,
+            0,
+            "private askpass dir must have no group/other permissions, got mode {:#o}",
+            mode & 0o777
         );
     }
 

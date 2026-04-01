@@ -68,7 +68,7 @@ pub struct CloneOptions {
     /// Maximum seconds to wait for any single git subprocess before killing
     /// it and returning [`CoreError::GitTimeout`].
     ///
-    /// Defaults to [`DEFAULT_CLONE_TIMEOUT_SECS`] (600 s).
+    /// Defaults to 600 s.
     pub clone_timeout_secs: u64,
     /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
     /// detect repository corruption early.
