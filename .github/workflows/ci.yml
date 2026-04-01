@@ -113,9 +113,14 @@ jobs:
   #
   # On pushes to main: full workspace mutation test to catch any survivors that
   # slipped through the diff-based run.
+  #
+  # Branch pushes (non-main, non-PR): skipped — the full workspace has
+  # pre-existing survivors in network/git/S3 code that require live
+  # infrastructure to test and would produce constant false failures.
   mutants:
     name: Mutation testing (${{ github.event_name == 'pull_request' && 'diff' || 'full' }})
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -135,7 +140,7 @@ jobs:
             2>&1 | tee mutants-report.txt
 
       - name: Run mutation tests (main — full)
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         run: |
           cargo mutants --workspace --timeout 120 -- --lib \
             2>&1 | tee mutants-report.txt
