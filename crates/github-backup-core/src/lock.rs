@@ -16,14 +16,14 @@
 //! remain on disk.  On the next run:
 //!
 //! - The PID stored in the file is read.
-//! - If no process with that PID exists (on Linux via `/proc/<pid>`) the stale
-//!   lock is deleted and the new run proceeds.
+//! - If no process with that PID exists the stale lock is deleted and the new
+//!   run proceeds.  Liveness is checked via `/proc/<pid>` on Linux and via
+//!   `kill(pid, 0)` on other Unix platforms.
 //! - If a process with that PID exists, the new run is aborted with an error.
 //!
-//! On non-Linux platforms (macOS, Windows) stale-PID detection falls back to a
-//! permissive "delete and proceed" strategy because cross-platform PID liveness
-//! checking is complex; the atomic `O_CREAT | O_EXCL` still prevents two
-//! *concurrent* processes from racing.
+//! On non-Unix platforms (Windows) stale-PID detection falls back to a
+//! permissive "delete and proceed" strategy; the atomic `O_CREAT | O_EXCL`
+//! still prevents two *concurrent* processes from racing.
 
 use std::path::{Path, PathBuf};
 
@@ -162,16 +162,28 @@ fn try_create_exclusive(path: &Path, content: &str) -> std::io::Result<()> {
 
 /// Returns `true` if a process with `pid` is currently running.
 ///
-/// On Linux this checks `/proc/<pid>`.  On other platforms it falls back to
-/// `false` (assume dead) to avoid blocking on cross-platform process APIs.
+/// - **Linux**: checks `/proc/<pid>` (efficient, no syscall round-trip).
+/// - **Other Unix** (macOS, FreeBSD, …): uses POSIX `kill(pid, 0)` which
+///   probes process existence without delivering any signal.
+/// - **Windows / other**: falls back to `false` (assume dead).
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         std::path::Path::new(&format!("/proc/{pid}")).exists()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
-        // Conservative fallback: assume dead so stale locks are removed.
+        // POSIX kill(pid, 0): returns 0 if the process exists and we have
+        // permission to signal it; returns -1 (ESRCH) if not found.
+        // pid_t is i32 on all Unix platforms we support.
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        // SAFETY: signal 0 is never delivered; this only checks existence.
+        unsafe { kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
         let _ = pid;
         false
     }
