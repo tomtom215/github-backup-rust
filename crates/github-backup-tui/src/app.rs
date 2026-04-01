@@ -185,7 +185,7 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 });
             }
         }
-        BackupEvent::RepoCompleted { name, success } => {
+        BackupEvent::RepoCompleted { name, success, .. } => {
             let status = if success {
                 RepoStatus::Done
             } else {

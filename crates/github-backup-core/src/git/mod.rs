@@ -277,7 +277,12 @@ impl GitRunner for ProcessGitRunner {
         let dest_str = path_to_str(dest)?;
         if dest.exists() {
             info!(dest = %dest.display(), "LFS repository exists, updating");
-            run_git(&["lfs", "fetch", "--all"], dest, opts.token.as_deref(), opts)
+            run_git(
+                &["lfs", "fetch", "--all"],
+                dest,
+                opts.token.as_deref(),
+                opts,
+            )
         } else {
             info!(url = %url, dest = %dest.display(), "cloning with LFS");
             let args = &["lfs", "clone", url, dest_str];

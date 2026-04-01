@@ -2,6 +2,7 @@
 // Copyright 2026 Tom F
 
 //! Colour palette and style constants used throughout the TUI.
+#![allow(dead_code)]
 
 use ratatui::style::{Color, Modifier, Style};
 
