@@ -34,3 +34,14 @@ heading-split-level = 3
 [output.html.fold]
 enable = true
 level = 1
+
+[output.linkcheck]
+# Fail the build on broken links.  External URLs are checked; anchors are
+# verified within the book.  Set warning-policy to "error" so CI catches
+# broken links before they reach readers.
+warning-policy = "error"
+# External link checking requires network access in CI; skip targets that
+# require authentication or are flaky in CI environments.
+exclude = [
+    "crates.io",   # may rate-limit CI runners
+]

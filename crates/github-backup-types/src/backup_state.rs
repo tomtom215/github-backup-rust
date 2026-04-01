@@ -110,13 +110,16 @@ pub struct BackupRunHistory {
 }
 
 impl BackupRunHistory {
-    /// Maximum number of history entries to retain.
+    /// Default maximum number of history entries to retain when the caller
+    /// does not provide a custom limit.
     pub const MAX_ENTRIES: usize = 20;
 
-    /// Appends a new entry and trims the list to `MAX_ENTRIES`.
-    pub fn push(&mut self, entry: BackupRunEntry) {
+    /// Appends a new entry and trims the list to `max_entries`.
+    ///
+    /// Pass [`Self::MAX_ENTRIES`] to use the default limit.
+    pub fn push(&mut self, entry: BackupRunEntry, max_entries: usize) {
         self.entries.insert(0, entry);
-        self.entries.truncate(Self::MAX_ENTRIES);
+        self.entries.truncate(max_entries);
     }
 
     /// Loads the history from `path`.

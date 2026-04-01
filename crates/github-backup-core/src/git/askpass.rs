@@ -1,23 +1,34 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! RAII guard for a temporary `GIT_ASKPASS` shell script.
+//! RAII guard for a temporary `GIT_ASKPASS` credential helper script.
 //!
-//! The script is written to a process-private directory with mode `0700` so
-//! that no other user on the system can read the token — even during the brief
-//! window between `create` and the git subprocess completing.
+//! The script echoes the provided token to stdout; git calls it with an
+//! interactive prompt string that we intentionally ignore.
 //!
-//! When the guard is dropped the file is deleted, ensuring no credentials are
-//! left on disk after the git subprocess exits — even on panic.
+//! Credentials are kept out of process arguments and environment variables by
+//! routing them through a short-lived executable script that only exists for
+//! the duration of the git subprocess call.
+//!
+//! # Platform behaviour
+//!
+//! | Platform | Script format | Extension | Permissions |
+//! |----------|---------------|-----------|-------------|
+//! | Unix     | `#!/bin/sh`   | `.sh`     | `0700` (owner-execute only) |
+//! | Windows  | `@echo off`   | `.bat`    | No extra restriction needed; directory is process-private |
+//!
+//! On Unix the parent directory is created with mode `0700` so no other user
+//! on the system can read the token even during the brief window between
+//! `create` and the git subprocess completing.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Returns the path to the process-private directory used for askpass scripts.
 ///
-/// The directory is created once per process with mode `0700` so only the
-/// current user can read files inside it.  All subsequent calls return a
-/// reference to the same path.
+/// The directory is created once per process.  On Unix it has mode `0700` so
+/// only the current user can read files inside it.  All subsequent calls return
+/// a reference to the same path.
 fn askpass_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -38,14 +49,43 @@ fn askpass_dir() -> &'static PathBuf {
     })
 }
 
-/// RAII guard for a temporary `GIT_ASKPASS` shell script.
+/// Builds the platform-appropriate askpass script content for `token`.
 ///
-/// The script echoes the provided token to stdout; git calls it with an
-/// interactive prompt string that we intentionally ignore.
+/// - **Unix**: a POSIX shell script that echoes the token.  Single-quote
+///   metacharacters in the token are escaped via the `'\''` idiom so the
+///   shell never interprets token characters.
+/// - **Windows**: a CMD batch file that echoes the token literally.  Any `%`
+///   characters are doubled to prevent CMD variable expansion.
+#[cfg(unix)]
+fn script_content(token: &str) -> String {
+    // Replace `'` with `'\''` so the shell does not interpret token chars.
+    let escaped = token.replace('\'', "'\\''");
+    format!("#!/bin/sh\necho '{}'\n", escaped)
+}
+
+#[cfg(windows)]
+fn script_content(token: &str) -> String {
+    // Prevent CMD variable expansion by doubling `%`; strip CR/LF that would
+    // corrupt the echoed value.
+    let escaped = token.replace('%', "%%").replace('\r', "").replace('\n', "");
+    format!("@echo off\r\necho {}\r\n", escaped)
+}
+
+/// Returns the platform-appropriate file extension for askpass scripts.
+#[cfg(unix)]
+fn script_extension() -> &'static str {
+    "sh"
+}
+
+#[cfg(windows)]
+fn script_extension() -> &'static str {
+    "bat"
+}
+
+/// RAII guard for a temporary `GIT_ASKPASS` script.
 ///
-/// Credentials are kept out of process arguments and environment variables by
-/// routing them through a short-lived executable script that only exists for
-/// the duration of the git subprocess call.
+/// When dropped the script file is deleted, ensuring no credentials are
+/// left on disk after the git subprocess exits — even on panic.
 pub(super) struct AskpassScript {
     path: PathBuf,
 }
@@ -53,28 +93,27 @@ pub(super) struct AskpassScript {
 impl AskpassScript {
     /// Creates the script file and returns a guard, or `None` on I/O failure.
     ///
-    /// On failure, git receives an empty `GIT_ASKPASS` and authentication
+    /// On failure git receives an empty `GIT_ASKPASS` and authentication
     /// will fail with an auth error rather than hanging indefinitely.
     pub(super) fn create(token: &str) -> Option<Self> {
-        // Single-quote–safe token embedding: replace `'` with `'\''` so the
-        // shell does not interpret token characters.
-        let script = format!("#!/bin/sh\necho '{}'", token.replace('\'', "'\\''"));
+        let content = script_content(token);
 
-        // Use the process-private 0700 directory to prevent other users from
+        // Use the process-private directory to prevent other users from
         // reading the token during the git subprocess window.
         let dir = askpass_dir();
         let mut path = dir.clone();
         // Use thread-id for collision-resistance when concurrent git operations
         // run within the same process.
         path.push(format!(
-            "askpass-{}.sh",
+            "askpass-{}.{}",
             format!("{:?}", std::thread::current().id())
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric())
                 .collect::<String>(),
+            script_extension(),
         ));
 
-        if std::fs::write(&path, script.as_bytes()).is_err() {
+        if std::fs::write(&path, content.as_bytes()).is_err() {
             return None;
         }
 
@@ -131,7 +170,7 @@ mod tests {
         let dir = askpass_dir();
         assert!(
             guard.path().starts_with(dir),
-            "script must be in the private 0700 directory, not directly in /tmp"
+            "script must be in the private directory, not directly in the temp dir"
         );
     }
 
@@ -148,5 +187,37 @@ mod tests {
             lower, 0o700,
             "private askpass dir must have mode 0700, got {lower:#o}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_content_escapes_single_quote() {
+        let content = script_content("to'ken");
+        assert!(
+            content.contains("to'\\''ken"),
+            "single quote must be escaped; got: {content:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn script_content_escapes_percent() {
+        let content = script_content("tok%en");
+        assert!(
+            content.contains("tok%%en"),
+            "percent must be doubled; got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn script_has_correct_extension() {
+        let guard = AskpassScript::create("token").expect("create");
+        let ext = guard
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let expected = script_extension();
+        assert_eq!(ext, expected, "script extension must be {expected}");
     }
 }

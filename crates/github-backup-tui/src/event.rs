@@ -19,7 +19,6 @@ pub enum BackupEvent {
         name: String,
         success: bool,
         /// Error description when `success` is `false`.
-        #[allow(dead_code)]
         error: Option<String>,
     },
     /// Total repository count became known after listing.

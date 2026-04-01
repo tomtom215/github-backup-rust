@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml)
 [![Book](https://github.com/tomtom215/github-backup-rust/actions/workflows/pages.yml/badge.svg)](https://tomtom215.github.io/github-backup-rust/)
-[![Crates.io](https://img.shields.io/crates/v/github-backup.svg)](https://crates.io/crates/github-backup)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
 
@@ -20,8 +19,11 @@ support, and a full-screen interactive TUI.
 ## Quick Start
 
 ```bash
-# Install
+# Install from source (requires Rust toolchain)
 cargo install --git https://github.com/tomtom215/github-backup-rust github-backup
+
+# Or download a pre-built binary from the GitHub Releases page
+# https://github.com/tomtom215/github-backup-rust/releases
 
 # Launch the interactive TUI (recommended first-run experience)
 export GITHUB_TOKEN=ghp_your_token_here
@@ -30,11 +32,12 @@ github-backup octocat --tui
 # Or run non-interactively
 github-backup octocat --output /var/backup/github --all
 
-# Or using Docker
+# Or build and run with Docker
+docker build -t github-backup .
 docker run --rm \
   -e GITHUB_TOKEN="$GITHUB_TOKEN" \
   -v /var/backup/github:/backup \
-  ghcr.io/tomtom215/github-backup:latest \
+  github-backup \
   octocat --output /backup --all
 ```
 

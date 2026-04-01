@@ -75,10 +75,16 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 # Date / time formatting (RFC 3339 timestamps in queue files)
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 
+# Cross-platform exclusive file locking (output-directory protection)
+fslock = "0.2"
+
 # Test-only
 tokio-test = "0.4"
 proptest = "1"
 tempfile = "3"
+
+# Benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 opt-level = 3

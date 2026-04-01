@@ -15,10 +15,11 @@ use github_backup_core::{
     verify_manifest, write_manifest, BackupEngine, FsStorage, ProcessGitRunner,
 };
 use github_backup_tui::InitialConfig;
-use github_backup_types::backup_state::BackupState;
+use github_backup_types::backup_state::{BackupRunEntry, BackupRunHistory, BackupState};
 use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
 
 mod cli;
+mod lock;
 mod notify;
 mod post_process;
 mod report;
@@ -29,7 +30,7 @@ use post_process::{
     apply_retention, build_mirror_dest, build_s3_config, decode_encrypt_key, run_diff,
     run_mirror_push_dest, run_s3_sync, write_prometheus_metrics,
 };
-use report::{is_valid_iso8601, write_report};
+use report::{is_valid_iso8601, unix_secs_to_iso8601, write_report};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -205,9 +206,22 @@ async fn main() -> ExitCode {
     let restore_yes = args.restore_yes;
     let dry_run = args.dry_run;
     let notify_webhook = args.notify_webhook.clone();
+    let history_size = args.history_size;
 
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
+
+    // Acquire an exclusive lock on the output directory so two concurrent
+    // github-backup processes cannot corrupt each other's checkpoint and state
+    // files.  The lock is automatically released when `_output_lock` is dropped
+    // at the end of main.
+    let _output_lock = match lock::acquire(&output_path) {
+        Ok(l) => l,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let cred = credential;
 
     // Construct the GitHub client (with optional GHE base URL).
@@ -273,20 +287,25 @@ async fn main() -> ExitCode {
         opts,
     );
 
-    // Race the backup against a Ctrl+C / SIGINT signal.  On interruption we
-    // log a warning, skip post-processing, and exit with code 130 (the
-    // conventional Unix exit code for SIGINT-terminated processes).
+    // Race the backup against a shutdown signal.
+    //
+    // Handles both Ctrl+C (SIGINT) and SIGTERM (used by `docker stop`,
+    // `systemctl stop`, and Kubernetes pod eviction).  On interruption we log
+    // a warning, skip post-processing, and exit with the conventional signal
+    // exit code so the caller knows the process was terminated rather than
+    // completing normally.
+    //
     // Any temporary GIT_ASKPASS scripts are cleaned up by their RAII guards
     // when the Tokio runtime shuts down.
     let backup_result = tokio::select! {
         result = engine.run(&owner) => result,
-        _ = tokio::signal::ctrl_c() => {
+        code = wait_for_shutdown_signal() => {
             warn!(
-                "backup interrupted by SIGINT — partial data may remain on disk; \
+                exit_code = code,
+                "backup interrupted by signal — partial data may remain on disk; \
                  re-run to resume"
             );
-            // Exit with 130 (128 + SIGINT signal number 2).
-            return ExitCode::from(130);
+            return ExitCode::from(code);
         }
     };
 
@@ -315,12 +334,13 @@ async fn main() -> ExitCode {
     info!("{stats}");
 
     // ── Write backup state ─────────────────────────────────────────────────
+    let finished_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     {
-        use std::time::{Duration, UNIX_EPOCH};
         let state = BackupState {
-            last_successful_run: report::unix_to_iso8601(
-                UNIX_EPOCH + Duration::from_secs(started_at_unix),
-            ),
+            last_successful_run: unix_secs_to_iso8601(started_at_unix),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             repos_backed_up: stats.repos_backed_up(),
         };
@@ -329,6 +349,27 @@ async fn main() -> ExitCode {
             warn!(error = %e, "failed to write backup state file");
         } else {
             info!(path = %state_path.display(), "wrote backup state");
+        }
+    }
+
+    // ── Append to backup run history ───────────────────────────────────────
+    {
+        let history_path = output.backup_history_path(&owner);
+        let mut history = BackupRunHistory::load(&history_path).unwrap_or_default();
+        history.push(
+            BackupRunEntry {
+                timestamp: unix_secs_to_iso8601(started_at_unix),
+                repos_backed_up: stats.repos_backed_up(),
+                elapsed_secs: (finished_at_unix.saturating_sub(started_at_unix)) as f64,
+                success: true,
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            history_size,
+        );
+        if let Err(e) = history.save(&history_path) {
+            warn!(error = %e, "failed to write backup history file");
+        } else {
+            info!(path = %history_path.display(), entries = history.entries.len(), "wrote backup history");
         }
     }
 
@@ -343,8 +384,7 @@ async fn main() -> ExitCode {
 
     // ── SHA-256 manifest ───────────────────────────────────────────────────
     if write_manifest_flag {
-        use std::time::{Duration, UNIX_EPOCH};
-        let created_at = report::unix_to_iso8601(UNIX_EPOCH + Duration::from_secs(started_at_unix));
+        let created_at = unix_secs_to_iso8601(started_at_unix);
         let json_dir = output.owner_json_dir(&owner);
         match write_manifest(&json_dir, &created_at) {
             Ok(n) => info!(entries = n, "SHA-256 manifest written"),
@@ -380,16 +420,7 @@ async fn main() -> ExitCode {
             error!("restore aborted — pass --restore-yes to confirm non-interactively");
             return ExitCode::FAILURE;
         }
-        if let Err(e) = restore::run_restore(
-            &client,
-            &output,
-            &owner,
-            target_org,
-            api_url.as_deref(),
-            dry_run,
-        )
-        .await
-        {
+        if let Err(e) = restore::run_restore(&client, &output, &owner, target_org, dry_run).await {
             error!("restore failed: {e}");
             return ExitCode::FAILURE;
         }
@@ -631,6 +662,39 @@ fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
     }
     eprintln!();
     input.trim() == "yes"
+}
+
+/// Waits for a process shutdown signal and returns the conventional exit code.
+///
+/// Handles:
+/// - `SIGINT` (Ctrl+C) → exit code 130  (128 + 2)
+/// - `SIGTERM` (`docker stop`, `systemctl stop`, Kubernetes) → exit code 143  (128 + 15)
+///
+/// On Windows only `Ctrl+C` is handled (exit code 130); there is no SIGTERM.
+async fn wait_for_shutdown_signal() -> u8 {
+    // Ctrl+C / SIGINT is cross-platform via tokio.
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+        130u8
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            code = ctrl_c => code,
+            _ = sigterm.recv() => 143u8,
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await
+    }
 }
 
 /// Initialises the `tracing` subscriber.

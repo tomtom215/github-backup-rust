@@ -726,6 +726,7 @@ fn running_j_k_scroll_repo_list() {
         app.run.repos.push(crate::state::RepoEntry {
             name: format!("repo-{i}"),
             status: RepoStatus::Done,
+            error: None,
         });
     }
     press(&mut app, KeyCode::Char('j'));
