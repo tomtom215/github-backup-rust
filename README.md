@@ -47,16 +47,16 @@ Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](htt
 
 ```
  github-backup v0.3.1  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
-┌─────────────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────────────┐
 │  Owner          octocat                                                      │
 │  Output dir     /var/backup/github                                           │
 │  Token          ghp_****...****                                              │
-│  Last run       2026-03-29 08:14 UTC  (312 repos)                           │
+│  Last run       2026-03-29 08:14 UTC  (312 repos)                            │
 │                                                                              │
 │  > Start backup                                                              │
 │    Verify integrity                                                          │
 │    Configure                                                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────────────────┘
  j/k select   Enter run   q quit
 ```
 
