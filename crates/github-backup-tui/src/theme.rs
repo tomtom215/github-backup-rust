@@ -10,8 +10,6 @@ use ratatui::style::{Color, Modifier, Style};
 pub const FG: Color = Color::White;
 pub const MUTED: Color = Color::DarkGray;
 pub const ACCENT: Color = Color::Cyan;
-#[allow(dead_code)]
-pub const ACCENT2: Color = Color::Blue;
 pub const SUCCESS: Color = Color::Green;
 pub const WARNING: Color = Color::Yellow;
 pub const ERROR: Color = Color::Red;
@@ -64,7 +62,9 @@ pub const TAB_ACTIVE: Style = Style::new()
 /// Editing cursor / focused input border.
 pub const INPUT_FOCUSED: Style = Style::new().fg(ACCENT);
 
-/// Log level styles.
+// ── Log level styles ──────────────────────────────────────────────────────────
+
+/// Returns the style appropriate for a tracing log level string.
 pub fn log_level_style(level: &str) -> Style {
     match level {
         "ERROR" => ERR_STYLE,

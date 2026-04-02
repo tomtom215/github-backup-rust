@@ -92,4 +92,69 @@ mod tests {
             Some("https://api.github.com/repos?page=2".to_string())
         );
     }
+
+    /// Simulates the `get_all_pages` loop with two pages of data and asserts
+    /// that results from both pages are concatenated in the correct order.
+    ///
+    /// This mirrors the logic in `GitHubClient::get_all_pages` without
+    /// requiring a real HTTP server: each "page" returns a slice of items and
+    /// an optional `Link` header; the loop continues while `parse_next_link`
+    /// returns a URL.
+    #[test]
+    fn multi_page_results_are_concatenated() {
+        let pages: &[(&[u32], Option<&str>)] = &[
+            (
+                &[1, 2, 3],
+                Some(
+                    r#"<https://api.github.com/items?page=2>; rel="next", <https://api.github.com/items?page=2>; rel="last""#,
+                ),
+            ),
+            (&[4, 5, 6], None),
+        ];
+
+        // Replay the pagination loop exactly as `get_all_pages` does it.
+        let mut all_items: Vec<u32> = Vec::new();
+        let mut page_index = 0usize;
+        let mut next_url: Option<String> = Some("https://api.github.com/items?page=1".to_string());
+
+        while let Some(_url) = next_url.take() {
+            let (items, link_header) = pages[page_index];
+            page_index += 1;
+            all_items.extend_from_slice(items);
+            next_url = link_header.and_then(parse_next_link);
+        }
+
+        assert_eq!(all_items, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(page_index, 2, "exactly two pages should have been fetched");
+    }
+
+    /// Three pages with explicit prev/next links on each page.
+    #[test]
+    fn three_page_chain_is_fully_traversed() {
+        let page1_link = r#"<https://api.github.com/repos?page=2>; rel="next", <https://api.github.com/repos?page=3>; rel="last""#;
+        let page2_link = r#"<https://api.github.com/repos?page=1>; rel="prev", <https://api.github.com/repos?page=3>; rel="next", <https://api.github.com/repos?page=3>; rel="last""#;
+
+        let pages: &[(&[&str], Option<&str>)] = &[
+            (&["repo-a", "repo-b"], Some(page1_link)),
+            (&["repo-c", "repo-d"], Some(page2_link)),
+            (&["repo-e"], None),
+        ];
+
+        let mut all_repos: Vec<&str> = Vec::new();
+        let mut page_index = 0usize;
+        let mut next_url: Option<String> = Some("https://api.github.com/repos?page=1".to_string());
+
+        while let Some(_url) = next_url.take() {
+            let (items, link_header) = pages[page_index];
+            page_index += 1;
+            all_repos.extend_from_slice(items);
+            next_url = link_header.and_then(parse_next_link);
+        }
+
+        assert_eq!(
+            all_repos,
+            vec!["repo-a", "repo-b", "repo-c", "repo-d", "repo-e"]
+        );
+        assert_eq!(page_index, 3, "all three pages should have been fetched");
+    }
 }

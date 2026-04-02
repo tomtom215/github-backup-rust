@@ -54,6 +54,7 @@ impl<S: Subscriber> Layer<S> for TuiTracingLayer {
                     let _ = self.tx.send(BackupEvent::RepoCompleted {
                         name: repo_name,
                         success,
+                        error: if success { None } else { Some(message.clone()) },
                     });
                 }
             } else if message.contains("fetched repository list") {

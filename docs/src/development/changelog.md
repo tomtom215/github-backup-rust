@@ -4,7 +4,7 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
-## [Unreleased] — 0.3.1
+## Unreleased — 0.3.1
 
 ### Added
 
@@ -30,7 +30,7 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
-## [0.3.0] — 2026-03-29
+## 0.3.0 — 2026-03-29
 
 ### Added (this release)
 
@@ -91,7 +91,7 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
-## [0.2.0] — 2026-01-15
+## 0.2.0 — 2026-01-15
 
 ### Added
 
@@ -111,7 +111,7 @@ All notable changes are documented here.  This project follows [Semantic Version
 
 ---
 
-## [0.1.0] — 2025-12-01
+## 0.1.0 — 2025-12-01
 
 ### Added
 

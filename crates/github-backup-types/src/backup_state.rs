@@ -3,7 +3,7 @@
 
 //! Persistent backup state: last-success timestamp and per-run checkpoint.
 //!
-//! Two independent files are managed:
+//! Three independent files are managed:
 //!
 //! ## `backup_state.json`
 //!
@@ -18,6 +18,11 @@
 //! processed so far.  If the process is interrupted (OOM kill, SIGTERM, power
 //! loss) a subsequent run can load the checkpoint and skip already-completed
 //! repositories rather than restarting from scratch.
+//!
+//! ## `backup_history.json`
+//!
+//! A rolling log of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
+//! Used by the TUI dashboard to display a run history table.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -75,6 +80,81 @@ impl BackupState {
         let state: Self =
             serde_json::from_str(&content).map_err(|e| format!("parse state file: {e}"))?;
         Ok(Some(state))
+    }
+}
+
+// ── Backup run history ────────────────────────────────────────────────────────
+
+/// A single entry in the backup run history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupRunEntry {
+    /// ISO 8601 timestamp of when this run started.
+    pub timestamp: String,
+    /// Number of repositories backed up during this run.
+    pub repos_backed_up: u64,
+    /// Elapsed wall-clock time in seconds.
+    pub elapsed_secs: f64,
+    /// `true` if the run completed without a fatal error.
+    pub success: bool,
+    /// Tool version that produced this entry.
+    pub tool_version: String,
+}
+
+/// Rolling history of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
+///
+/// Stored in `backup_history.json` alongside `backup_state.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupRunHistory {
+    /// Most recent runs, newest first.
+    pub entries: Vec<BackupRunEntry>,
+}
+
+impl BackupRunHistory {
+    /// Default maximum number of history entries to retain when the caller
+    /// does not provide a custom limit.
+    pub const MAX_ENTRIES: usize = 20;
+
+    /// Appends a new entry and trims the list to `max_entries`.
+    ///
+    /// Pass [`Self::MAX_ENTRIES`] to use the default limit.
+    pub fn push(&mut self, entry: BackupRunEntry, max_entries: usize) {
+        self.entries.insert(0, entry);
+        self.entries.truncate(max_entries);
+    }
+
+    /// Loads the history from `path`.
+    ///
+    /// Returns an empty history if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the file exists but cannot be parsed.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read history file: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("parse history file: {e}"))
+    }
+
+    /// Saves the history to `path`, creating parent directories as needed.
+    ///
+    /// Writes are atomic (write-then-rename) to prevent corrupt files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string on I/O or serialisation failure.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create history directory: {e}"))?;
+        }
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| format!("serialise history: {e}"))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, json).map_err(|e| format!("write history tmp: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename history file: {e}"))
     }
 }
 
@@ -222,5 +302,54 @@ mod tests {
         std::fs::write(&path, b"{}").expect("create");
         BackupCheckpoint::delete(&path).expect("delete");
         assert!(!path.exists());
+    }
+
+    fn make_entry(ts: &str) -> BackupRunEntry {
+        BackupRunEntry {
+            timestamp: ts.to_string(),
+            repos_backed_up: 1,
+            elapsed_secs: 1.0,
+            success: true,
+            tool_version: "0.1.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn history_push_prepends_newest_first() {
+        let mut h = BackupRunHistory::default();
+        h.push(make_entry("2026-01-01T00:00:00Z"), 10);
+        h.push(make_entry("2026-01-02T00:00:00Z"), 10);
+        assert_eq!(h.entries.len(), 2);
+        assert_eq!(h.entries[0].timestamp, "2026-01-02T00:00:00Z");
+        assert_eq!(h.entries[1].timestamp, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn history_push_truncates_at_max_entries() {
+        let mut h = BackupRunHistory::default();
+        for i in 0..5 {
+            h.push(make_entry(&format!("2026-01-0{}T00:00:00Z", i + 1)), 3);
+        }
+        assert_eq!(h.entries.len(), 3, "must not exceed max_entries");
+        assert_eq!(h.entries[0].timestamp, "2026-01-05T00:00:00Z");
+    }
+
+    #[test]
+    fn history_roundtrip_save_load() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("history.json");
+        let mut h = BackupRunHistory::default();
+        h.push(make_entry("2026-01-01T00:00:00Z"), 20);
+        h.save(&path).expect("save");
+        let loaded = BackupRunHistory::load(&path).expect("load");
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].timestamp, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn history_load_missing_returns_empty() {
+        let dir = tempdir().expect("tempdir");
+        let h = BackupRunHistory::load(&dir.path().join("none.json")).expect("no error");
+        assert!(h.entries.is_empty());
     }
 }

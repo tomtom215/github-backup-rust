@@ -35,7 +35,9 @@
 pub mod backup;
 pub mod engine;
 pub mod error;
+pub mod events;
 pub mod git;
+pub mod lock;
 pub mod manifest;
 pub mod starred_queue;
 pub mod stats;
@@ -43,7 +45,9 @@ pub mod storage;
 
 pub use engine::BackupEngine;
 pub use error::CoreError;
+pub use events::{EngineEvent, EngineEventTx};
 pub use git::{GitRunner, ProcessGitRunner};
+pub use lock::BackupLock;
 pub use manifest::{verify_manifest, write_manifest, VerifyReport};
 pub use stats::BackupStats;
 pub use storage::{FsStorage, Storage};

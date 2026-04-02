@@ -69,14 +69,16 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
-  # ── mdBook ──────────────────────────────────────────────────────────────────
+  # ── mdBook (build + link check) ─────────────────────────────────────────────
   book:
     name: mdBook
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install mdBook
-        run: cargo install mdbook --locked
+      - name: Install mdBook and link checker
+        run: |
+          cargo install mdbook --version "0.4.40" --locked
+          cargo install mdbook-linkcheck --locked
       - run: mdbook build docs
       - uses: actions/upload-artifact@v7
         with:
@@ -105,21 +107,44 @@ jobs:
           command: check licenses bans advisories sources
 
   # ── Mutation testing ─────────────────────────────────────────────────────────
+  #
+  # On pull requests: test only mutants in lines changed by the PR (fast — only
+  # the diff is mutated, not the whole codebase).
+  #
+  # On pushes to main: full workspace mutation test to catch any survivors that
+  # slipped through the diff-based run.
+  #
+  # Branch pushes (non-main, non-PR): skipped — the full workspace has
+  # pre-existing survivors in network/git/S3 code that require live
+  # infrastructure to test and would produce constant false failures.
   mutants:
-    name: Mutation testing
+    name: Mutation testing (${{ github.event_name == 'pull_request' && 'diff' || 'full' }})
     runs-on: ubuntu-latest
-    # Run mutation testing only on pushes to main to avoid excessive CI times
-    # on every PR. The mutants.toml configuration limits scope to the most
-    # critical modules.
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # need full history for --in-diff
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
-      - name: Run mutation tests
-        run: cargo mutants --workspace --timeout 120 -- --lib 2>&1 | tee mutants-report.txt
+
+      - name: Run mutation tests (PR — diff only)
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          cargo mutants --workspace --timeout 120 --in-diff pr.diff -- --lib \
+            2>&1 | tee mutants-report.txt
+
+      - name: Run mutation tests (main — full)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cargo mutants --workspace --timeout 120 -- --lib \
+            2>&1 | tee mutants-report.txt
+
       - name: Upload mutation report
         uses: actions/upload-artifact@v7
         if: always()

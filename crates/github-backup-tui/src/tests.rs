@@ -592,6 +592,7 @@ fn backup_event_repo_completed_success() {
         BackupEvent::RepoCompleted {
             name: "octocat/hello-world".into(),
             success: true,
+            error: None,
         },
     );
     assert_eq!(app.run.repos[0].status, RepoStatus::Done);
@@ -608,6 +609,7 @@ fn backup_event_repo_completed_failure() {
         BackupEvent::RepoCompleted {
             name: "r".into(),
             success: false,
+            error: Some("backup failed".into()),
         },
     );
     assert_eq!(app.run.repos[0].status, RepoStatus::Error);
@@ -724,6 +726,7 @@ fn running_j_k_scroll_repo_list() {
         app.run.repos.push(crate::state::RepoEntry {
             name: format!("repo-{i}"),
             status: RepoStatus::Done,
+            error: None,
         });
     }
     press(&mut app, KeyCode::Char('j'));

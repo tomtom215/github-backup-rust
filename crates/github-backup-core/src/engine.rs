@@ -25,7 +25,9 @@ use crate::{
         topics::backup_topics, user_data::backup_user_data, wiki::backup_wiki,
     },
     error::CoreError,
+    events::{EngineEvent, EngineEventTx},
     git::{CloneOptions, GitRunner},
+    lock::{BackupLock, LockError},
     stats::BackupStats,
     storage::Storage,
 };
@@ -40,6 +42,12 @@ use crate::{
 /// Repository backups run in parallel up to `opts.concurrency`. Set it to `1`
 /// for fully sequential operation. The API client, storage, and git runner must
 /// all be `Send + Sync` (the production implementations satisfy this).
+///
+/// # Progress events
+///
+/// Attach a channel via [`BackupEngine::with_event_channel`] to receive
+/// real-time [`EngineEvent`]s during the run.  The TUI uses this to drive the
+/// repository list and progress bar.  The CLI does not need to attach a channel.
 ///
 /// # Example
 ///
@@ -69,6 +77,8 @@ pub struct BackupEngine<S, G> {
     git: G,
     output: OutputConfig,
     opts: BackupOptions,
+    /// Optional channel for real-time per-repo progress events.
+    engine_events: Option<EngineEventTx>,
 }
 
 impl<S, G> BackupEngine<S, G>
@@ -91,7 +101,21 @@ where
             git,
             output,
             opts,
+            engine_events: None,
         }
+    }
+
+    /// Attaches an event channel for real-time progress reporting.
+    ///
+    /// The engine will send [`EngineEvent`]s on this channel during [`run`].
+    /// Use [`tokio::sync::mpsc::unbounded_channel`] to create the matched
+    /// receiver.
+    ///
+    /// [`run`]: Self::run
+    #[must_use]
+    pub fn with_event_channel(mut self, tx: EngineEventTx) -> Self {
+        self.engine_events = Some(tx);
+        self
     }
 
     /// Runs the full backup for `owner`.
@@ -102,9 +126,13 @@ where
     /// Per-repository errors are logged as warnings but do not abort the run.
     /// Returns [`BackupStats`] with counters for everything that was processed.
     ///
+    /// An advisory lock file is held for the duration of the run to prevent
+    /// two concurrent backups from writing to the same directory.
+    ///
     /// # Errors
     ///
-    /// Returns [`CoreError`] on fatal errors (auth, network, filesystem).
+    /// Returns [`CoreError`] on fatal errors (auth, network, filesystem, or
+    /// concurrent lock conflict).
     pub async fn run(&self, owner: &str) -> Result<BackupStats, CoreError> {
         let stats = BackupStats::new();
         info!(owner, dry_run = self.opts.dry_run, "starting backup");
@@ -113,26 +141,47 @@ where
             warn!("dry-run mode: no files will be written and no git commands will be run");
         }
 
+        // ── Acquire advisory lock ──────────────────────────────────────────
+        let json_dir = self.output.owner_json_dir(owner);
+        let _lock = match BackupLock::acquire(&json_dir) {
+            Ok(l) => l,
+            Err(LockError::AlreadyRunning { pid }) => {
+                let msg = match pid {
+                    Some(p) => format!(
+                        "another backup for '{owner}' is already running (PID {p}); \
+                         if that process is dead, remove {json_dir}/.backup.lock and retry",
+                        json_dir = json_dir.display()
+                    ),
+                    None => format!(
+                        "another backup for '{owner}' is already running; \
+                         if you believe this is stale, remove {json_dir}/.backup.lock",
+                        json_dir = json_dir.display()
+                    ),
+                };
+                return Err(CoreError::Io {
+                    path: json_dir.display().to_string(),
+                    source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, msg),
+                });
+            }
+            Err(LockError::DirCreate(e)) => {
+                return Err(CoreError::Io {
+                    path: json_dir.display().to_string(),
+                    source: e,
+                });
+            }
+            Err(LockError::Write(e)) => {
+                return Err(CoreError::Io {
+                    path: json_dir.join(".backup.lock").display().to_string(),
+                    source: e,
+                });
+            }
+        };
+
         // ── User-level data ────────────────────────────────────────────────
-        let owner_json_dir = self.output.owner_json_dir(owner);
-        backup_user_data(
-            &self.client,
-            owner,
-            &self.opts,
-            &owner_json_dir,
-            &self.storage,
-        )
-        .await?;
+        backup_user_data(&self.client, owner, &self.opts, &json_dir, &self.storage).await?;
 
         // ── GitHub Packages (user-level) ───────────────────────────────────
-        backup_packages(
-            &self.client,
-            owner,
-            &self.opts,
-            &owner_json_dir,
-            &self.storage,
-        )
-        .await?;
+        backup_packages(&self.client, owner, &self.opts, &json_dir, &self.storage).await?;
 
         // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();
@@ -163,8 +212,14 @@ where
 
         // ── Repositories ───────────────────────────────────────────────────
         let repos = self.fetch_repos(owner).await?;
-        info!(owner, count = repos.len(), "fetched repository list");
-        stats.add_discovered(repos.len() as u64);
+        let repo_count = repos.len();
+        info!(owner, count = repo_count, "fetched repository list");
+        stats.add_discovered(repo_count as u64);
+
+        // Notify listeners of the total count before any per-repo events.
+        self.emit(EngineEvent::ReposDiscovered {
+            total: repo_count as u64,
+        });
 
         self.backup_repos_concurrent(owner, repos, &stats).await;
 
@@ -178,6 +233,16 @@ where
 
         info!(owner, %stats, "backup complete");
         Ok(stats)
+        // _lock is dropped here, releasing the advisory lock.
+    }
+
+    /// Sends an [`EngineEvent`] if a channel is attached.
+    fn emit(&self, event: EngineEvent) {
+        if let Some(ref tx) = self.engine_events {
+            // Ignore send errors: the receiver may have been dropped (e.g.
+            // the TUI was closed while a backup was still running).
+            let _ = tx.send(event);
+        }
     }
 
     /// Fetches the repository list using the user or org API as appropriate.
@@ -256,9 +321,19 @@ where
             let cp = Arc::clone(&checkpoint);
             let cp_path = checkpoint_path.clone();
             let done_count = Arc::clone(&completed_count);
+            // Clone the event sender so the task can emit per-repo events.
+            let event_tx = self.engine_events.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
+
+                // Notify listeners that this repo is starting.
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(EngineEvent::RepoStarted {
+                        name: repo.full_name.clone(),
+                    });
+                }
+
                 let ctx = RepoBackupContext {
                     client: &client,
                     storage: &storage,
@@ -282,8 +357,15 @@ where
                     Ok(backed_up) => {
                         if backed_up {
                             task_stats.inc_backed_up();
-                            // Mark complete in the checkpoint so a future
-                            // interrupted-run resume can skip this repo.
+                            // Notify listeners of success.
+                            if let Some(ref tx) = event_tx {
+                                let _ = tx.send(EngineEvent::RepoCompleted {
+                                    name: repo.full_name.clone(),
+                                    success: true,
+                                    error: None,
+                                });
+                            }
+                            // Mark complete in the checkpoint.
                             let mut guard = cp.lock().await;
                             if let Err(e) = guard.mark_complete_and_save(&repo.full_name, &cp_path)
                             {
@@ -295,15 +377,25 @@ where
                             }
                         } else {
                             task_stats.inc_skipped();
+                            // Skipped repos don't emit a Completed event.
                         }
                     }
                     Err(e) => {
                         task_stats.inc_errored();
+                        let err_str = e.to_string();
                         error!(
                             repo = %repo.full_name,
-                            error = %e,
+                            error = %err_str,
                             "repository backup failed, continuing"
                         );
+                        // Notify listeners of failure with the error text.
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(EngineEvent::RepoCompleted {
+                                name: repo.full_name.clone(),
+                                success: false,
+                                error: Some(err_str),
+                            });
+                        }
                     }
                 }
             });
@@ -325,13 +417,13 @@ where
             true => None,
             false => {
                 // Extract token from the client's credential for injection.
-                // We expose a helper on GitHubClient for this purpose.
                 self.client.token()
             }
         };
         CloneOptions {
             token,
             no_prune: self.opts.no_prune,
+            ..CloneOptions::default()
         }
     }
 }
@@ -472,6 +564,13 @@ mod tests {
     #[test]
     fn backup_engine_constructs_without_panic() {
         let _engine = make_engine();
+    }
+
+    #[test]
+    fn backup_engine_with_event_channel_stores_sender() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = make_engine().with_event_channel(tx);
+        assert!(engine.engine_events.is_some());
     }
 
     #[test]

@@ -15,7 +15,12 @@ pub enum BackupEvent {
     /// A repository was picked up by a worker task.
     RepoStarted { name: String },
     /// A repository finished (success or failure).
-    RepoCompleted { name: String, success: bool },
+    RepoCompleted {
+        name: String,
+        success: bool,
+        /// Error description when `success` is `false`.
+        error: Option<String>,
+    },
     /// Total repository count became known after listing.
     ReposDiscovered { total: u64 },
     /// Backup run completed successfully.

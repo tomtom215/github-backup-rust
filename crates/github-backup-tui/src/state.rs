@@ -454,6 +454,8 @@ pub enum RepoStatus {
 pub struct RepoEntry {
     pub name: String,
     pub status: RepoStatus,
+    /// Error description, populated when `status == RepoStatus::Error`.
+    pub error: Option<String>,
 }
 
 /// All state for the Running screen.
