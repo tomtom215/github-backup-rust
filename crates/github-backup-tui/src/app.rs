@@ -182,10 +182,15 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 app.run.repos.push(RepoEntry {
                     name,
                     status: RepoStatus::Running,
+                    error: None,
                 });
             }
         }
-        BackupEvent::RepoCompleted { name, success } => {
+        BackupEvent::RepoCompleted {
+            name,
+            success,
+            error,
+        } => {
             let status = if success {
                 RepoStatus::Done
             } else {
@@ -193,8 +198,13 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             };
             if let Some(e) = app.run.repos.iter_mut().find(|r| r.name == name) {
                 e.status = status;
+                e.error = error;
             } else {
-                app.run.repos.push(RepoEntry { name, status });
+                app.run.repos.push(RepoEntry {
+                    name,
+                    status,
+                    error,
+                });
             }
             if success {
                 app.run.repos_done += 1;

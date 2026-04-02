@@ -106,7 +106,6 @@ pub async fn run_restore(
     output: &OutputConfig,
     source_owner: &str,
     target_org: &str,
-    _api_url: Option<&str>,
     dry_run: bool,
 ) -> Result<(), String> {
     if dry_run {

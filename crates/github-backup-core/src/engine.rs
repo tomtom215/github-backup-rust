@@ -178,24 +178,10 @@ where
         };
 
         // ── User-level data ────────────────────────────────────────────────
-        backup_user_data(
-            &self.client,
-            owner,
-            &self.opts,
-            &json_dir,
-            &self.storage,
-        )
-        .await?;
+        backup_user_data(&self.client, owner, &self.opts, &json_dir, &self.storage).await?;
 
         // ── GitHub Packages (user-level) ───────────────────────────────────
-        backup_packages(
-            &self.client,
-            owner,
-            &self.opts,
-            &json_dir,
-            &self.storage,
-        )
-        .await?;
+        backup_packages(&self.client, owner, &self.opts, &json_dir, &self.storage).await?;
 
         // ── Starred repos clone (durable queue) ───────────────────────────
         let clone_opts = self.make_clone_opts();

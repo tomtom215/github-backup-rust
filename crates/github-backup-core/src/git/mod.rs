@@ -68,7 +68,7 @@ pub struct CloneOptions {
     /// Maximum seconds to wait for any single git subprocess before killing
     /// it and returning [`CoreError::GitTimeout`].
     ///
-    /// Defaults to [`DEFAULT_CLONE_TIMEOUT_SECS`] (600 s).
+    /// Defaults to 600 s.
     pub clone_timeout_secs: u64,
     /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
     /// detect repository corruption early.
@@ -277,7 +277,12 @@ impl GitRunner for ProcessGitRunner {
         let dest_str = path_to_str(dest)?;
         if dest.exists() {
             info!(dest = %dest.display(), "LFS repository exists, updating");
-            run_git(&["lfs", "fetch", "--all"], dest, opts.token.as_deref(), opts)
+            run_git(
+                &["lfs", "fetch", "--all"],
+                dest,
+                opts.token.as_deref(),
+                opts,
+            )
         } else {
             info!(url = %url, dest = %dest.display(), "cloning with LFS");
             let args = &["lfs", "clone", url, dest_str];

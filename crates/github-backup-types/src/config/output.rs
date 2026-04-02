@@ -101,6 +101,19 @@ impl OutputConfig {
         self.root.join(owner).join("json").join(filename)
     }
 
+    /// Returns the path to the backup history file:
+    /// `<root>/<owner>/json/backup_history.json`.
+    ///
+    /// The history file is a rolling log of the last N backup runs,
+    /// written after every successful run.
+    #[must_use]
+    pub fn backup_history_path(&self, owner: &str) -> PathBuf {
+        self.root
+            .join(owner)
+            .join("json")
+            .join("backup_history.json")
+    }
+
     /// Returns the path to the backup state file:
     /// `<root>/<owner>/json/backup_state.json`.
     ///

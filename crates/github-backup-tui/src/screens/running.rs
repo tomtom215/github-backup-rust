@@ -138,6 +138,21 @@ fn repo_list_item(entry: &RepoEntry) -> ListItem<'_> {
         &entry.name
     };
 
+    // For errored repos, append a short reason when available so the operator
+    // can see what went wrong without leaving the TUI.
+    if entry.status == RepoStatus::Error {
+        if let Some(ref msg) = entry.error {
+            // Truncate long error messages to keep the list readable.
+            let truncated: String = msg.chars().take(60).collect();
+            let suffix = if msg.len() > 60 { "…" } else { "" };
+            return ListItem::new(Line::from(vec![
+                Span::styled(icon, style),
+                Span::styled(short_name, style),
+                Span::styled(format!(": {truncated}{suffix}"), theme::DIM),
+            ]));
+        }
+    }
+
     ListItem::new(Line::from(vec![
         Span::styled(icon, style),
         Span::styled(short_name, style),

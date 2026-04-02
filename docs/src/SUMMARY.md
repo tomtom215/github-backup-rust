@@ -55,6 +55,7 @@
 # Development
 
 - [Architecture](development/architecture.md)
+- [Restore Implementation](development/restore.md)
 - [Contributing](development/contributing.md)
 - [Security](development/security.md)
 - [Troubleshooting](development/troubleshooting.md)

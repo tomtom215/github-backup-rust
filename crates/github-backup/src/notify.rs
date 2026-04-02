@@ -7,8 +7,16 @@
 //! primary backup completes (success or failure).  Notification failures
 //! are logged as warnings and never cause the backup process to exit with
 //! a non-zero code.
+//!
+//! # Security
+//!
+//! The webhook payload contains the backup owner name, counters, and any
+//! error message.  Always use an `https://` URL so this data is not
+//! transmitted in plaintext.  A warning is emitted when a plain `http://`
+//! URL is supplied.
 
 use bytes::Bytes;
+use chrono::Utc;
 use http_body_util::Full;
 use hyper::{Method, Request, StatusCode};
 use hyper_util::client::legacy::Client;
@@ -39,6 +47,9 @@ struct WebhookPayload<'a> {
 ///
 /// The function is "fire and forget": any error (network, TLS, non-2xx
 /// response) is logged at `WARN` level and silently ignored.
+///
+/// A warning is emitted when `url` uses plain HTTP so operators are aware
+/// that backup metadata will be transmitted unencrypted.
 pub async fn send_webhook(
     url: &str,
     owner: &str,
@@ -47,6 +58,16 @@ pub async fn send_webhook(
     repos_backed_up: u64,
     repos_errored: u64,
 ) {
+    // Warn when the URL is plain HTTP — the payload contains owner name and
+    // error messages that should not travel over an unencrypted connection.
+    if url.starts_with("http://") {
+        warn!(
+            url,
+            "webhook URL uses plain HTTP; backup metadata (owner, error messages) \
+             will be transmitted unencrypted. Use an https:// URL to protect this data."
+        );
+    }
+
     let payload = WebhookPayload {
         status,
         owner,
@@ -140,35 +161,7 @@ fn build_client() -> Result<
 
 /// Returns the current UTC time as an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
 fn utc_now_iso8601() -> String {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs();
-    let (y, mo, d, h, mi, s) = unix_to_ymd_hms(secs);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
-}
-
-/// Converts a Unix timestamp to (year, month, day, hour, minute, second).
-fn unix_to_ymd_hms(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86_400;
-
-    // Days since 1970-01-01 → Gregorian date (simplified Euclidean)
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y };
-
-    (y, mo, d, h, m, s)
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[cfg(test)]
@@ -182,19 +175,6 @@ mod tests {
         assert_eq!(ts.len(), 20);
         assert_eq!(&ts[10..11], "T");
         assert_eq!(&ts[19..20], "Z");
-    }
-
-    #[test]
-    fn unix_to_ymd_hms_epoch() {
-        let (y, mo, d, h, m, s) = unix_to_ymd_hms(0);
-        assert_eq!((y, mo, d, h, m, s), (1970, 1, 1, 0, 0, 0));
-    }
-
-    #[test]
-    fn unix_to_ymd_hms_known_date() {
-        // 2025-03-30T12:00:00Z = 1743336000
-        let (y, mo, d, h, m, s) = unix_to_ymd_hms(1_743_336_000);
-        assert_eq!((y, mo, d, h, m, s), (2025, 3, 30, 12, 0, 0));
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //!
 //! Callers that need live progress (e.g. the TUI) construct an unbounded
 //! channel with [`tokio::sync::mpsc::unbounded_channel`], pass the sender to
-//! [`BackupEngine::with_event_channel`], and poll the receiver from their own
-//! task.
+//! [`crate::engine::BackupEngine::with_event_channel`], and poll the receiver
+//! from their own task.
 //!
 //! The CLI does not use this channel; the events are optional and the engine
 //! operates correctly if no channel is attached.

@@ -767,6 +767,15 @@ pub struct Args {
     #[arg(long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    // ── Run history ───────────────────────────────────────────────────────
+    /// Maximum number of backup run entries to retain in `backup_history.json`.
+    ///
+    /// Each successful run appends an entry to
+    /// `<output>/<owner>/json/backup_history.json`.  When the file grows beyond
+    /// this limit, the oldest entries are dropped.  Defaults to 20.
+    #[arg(long, value_name = "N", default_value = "20")]
+    pub history_size: usize,
+
     // ── TUI ────────────────────────────────────────────────────────────────
     /// Launch the interactive terminal user interface (TUI).
     ///

@@ -34,3 +34,11 @@ heading-split-level = 3
 [output.html.fold]
 enable = true
 level = 1
+
+[output.linkcheck]
+# Fail the build on broken internal cross-page links.
+# External HTTP/HTTPS links are intentionally not followed: they can fail
+# transiently due to network restrictions, rate limiting, or CI egress
+# policies.  Internal structural integrity is what matters for CI.
+follow-web-links = false
+warning-policy = "error"
