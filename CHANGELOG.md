@@ -283,6 +283,8 @@ _No unreleased changes._
   `cargo-audit`, `cargo-deny`.
 - Dependency policy in `deny.toml`: no OpenSSL, no reqwest, no native-tls.
 
+[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tomtom215/github-backup-rust/releases/tag/v0.1.0
