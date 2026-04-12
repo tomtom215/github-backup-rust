@@ -9,7 +9,7 @@ use clap::{ArgGroup, Parser};
 
 use super::clone_type::CliCloneType;
 
-/// Comprehensive GitHub backup tool.
+/// GitHub backup tool.
 ///
 /// Backs up repositories, issues, pull requests, releases, gists, wikis, and
 /// relationship data for a GitHub user or organisation.
@@ -80,7 +80,7 @@ use super::clone_type::CliCloneType;
 #[command(
     name = "github-backup",
     version,
-    about = "Comprehensive GitHub backup: repos, issues, PRs, releases, gists, and more",
+    about = "GitHub backup: repositories, issues, PRs, releases, gists, wikis, and metadata",
     long_about = None,
 )]
 #[command(group(
@@ -189,6 +189,9 @@ pub struct Args {
     ///
     /// GitHub Actions & environments:
     ///   `--actions` `--environments`
+    ///
+    /// Discussions, classic projects, and packages:
+    ///   `--discussions` `--projects` `--packages`
     ///
     /// **Not included** (opt-in only, can generate very large output):
     ///   `--action-runs`  — full workflow run history

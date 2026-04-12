@@ -86,11 +86,11 @@ GitHub App installation tokens work as long as they have the required permission
 
 ### How long does a full backup take?
 
-It depends on the number of repositories and the volume of issues/PRs.  With `--concurrency 8` and `--repositories --issues --pulls`:
-- 50 repos, moderate activity: ~2–5 minutes
-- 500 repos: ~20–60 minutes
-
-Subsequent incremental runs are much faster.
+It depends on the number of repositories, repository sizes, the volume of
+issues and pull requests, the concurrency setting, network bandwidth, and
+GitHub's API rate limits. The dominant cost is usually `git clone` for new
+repositories. Once a repository has been cloned once, subsequent runs only
+fetch incremental updates, which is significantly faster.
 
 ### How do I speed up the backup?
 
@@ -123,7 +123,10 @@ Bare git repositories require filesystem support for atomic renames and file loc
 
 ### Does S3 sync compress the data?
 
-Currently, objects are uploaded uncompressed.  This is a planned enhancement.
+No. Objects are uploaded as-is. JSON metadata files compress well, so if
+storage cost is a concern, configure server-side compression at the bucket
+or object-store layer (or pair S3 sync with at-rest encryption via
+`--encrypt-key`, which still leaves bucket-level compression available).
 
 ---
 

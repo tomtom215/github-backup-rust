@@ -1,12 +1,16 @@
 [package]
-name = "github-backup-s3"
-description = "S3/B2/MinIO storage backend for github-backup-rust (pure Rust, no AWS SDK)"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+name        = "github-backup-s3"
+description = "S3-compatible storage backend with AES-256-GCM at-rest encryption for github-backup-rust (pure Rust, no AWS SDK)"
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [dependencies]
 tokio = { workspace = true }

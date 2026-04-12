@@ -27,11 +27,7 @@ use github_backup_types::config::OutputConfig;
 use crate::cli::Args;
 
 /// Typed errors from the post-processing phase.
-///
-/// Replaces the previous `Result<(), String>` returns on public post-process
-/// functions, preserving source context and enabling structured handling.
 #[derive(Debug, Error)]
-#[allow(dead_code)] // Diff and Metrics variants reserved for future use
 pub enum PostProcessError {
     /// A mirror push operation failed.
     #[error("mirror push failed: {0}")]
@@ -42,12 +38,6 @@ pub enum PostProcessError {
     /// The retention policy application failed.
     #[error("retention policy failed: {0}")]
     Retention(String),
-    /// The backup diff operation failed.
-    #[error("diff failed: {0}")]
-    Diff(String),
-    /// Writing Prometheus metrics failed.
-    #[error("metrics write failed: {0}")]
-    Metrics(String),
 }
 
 /// Mirror destination — either a Gitea-compatible host or a GitLab instance.

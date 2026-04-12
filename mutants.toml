@@ -2,16 +2,13 @@
 # Run: cargo mutants
 # Docs: https://mutants.rs/
 
-# Exclude generated/trivial code from mutation testing.
+# Exclude code that is not appropriate for mutation testing.
 exclude_globs = [
-    # Test-only helpers and spy stubs — not production paths.
+    # Test-only helpers and spy stubs — never executed in production.
     "crates/*/src/**/*test_support*",
     # Main binary wiring (I/O, tracing init) — hard to test in isolation.
     "crates/github-backup/src/main.rs",
 ]
 
-# Limit the total time spent on a single mutant test run.
+# Per-mutant test timeout multiplier (relative to the baseline test run).
 timeout_multiplier = 3.0
-
-# Fail the gate if any mutant survives.
-# (Enforced externally via `cargo mutants --error-on-survived` in CI.)

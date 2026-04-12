@@ -1,12 +1,16 @@
 [package]
-name = "github-backup-mirror"
-description = "Push-mirror backup to Gitea, Codeberg, and other self-hosted Git services"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+name        = "github-backup-mirror"
+description = "Push-mirror backup to Gitea / Codeberg / Forgejo / GitLab for github-backup-rust"
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [dependencies]
 github-backup-types = { workspace = true }

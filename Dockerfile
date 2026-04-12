@@ -4,6 +4,8 @@
 # Multi-stage Docker build for github-backup-rust.
 #
 # Stage 1 (builder): compiles the release binary using the official Rust image.
+#                    The Rust toolchain version must be at least the workspace
+#                    `rust-version` declared in Cargo.toml.
 # Stage 2 (runtime): minimal Alpine image with only the binary and git.
 #
 # Usage:
@@ -13,7 +15,7 @@
 #     github-backup octocat --output /backup --all
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM rust:1.85-alpine AS builder
+FROM rust:1.88-alpine AS builder
 
 # Build dependencies
 RUN apk add --no-cache musl-dev pkgconf
@@ -27,14 +29,15 @@ COPY crates/github-backup-client/Cargo.toml  crates/github-backup-client/Cargo.t
 COPY crates/github-backup-core/Cargo.toml    crates/github-backup-core/Cargo.toml
 COPY crates/github-backup-mirror/Cargo.toml  crates/github-backup-mirror/Cargo.toml
 COPY crates/github-backup-s3/Cargo.toml      crates/github-backup-s3/Cargo.toml
+COPY crates/github-backup-tui/Cargo.toml     crates/github-backup-tui/Cargo.toml
 COPY crates/github-backup/Cargo.toml         crates/github-backup/Cargo.toml
 
-# Create placeholder source files so `cargo fetch` can resolve the dependency
-# graph without the actual source code.
+# Create stub source files so `cargo fetch` can resolve the dependency graph
+# before the real source code is copied.
 RUN for crate in github-backup-types github-backup-client github-backup-core \
-        github-backup-mirror github-backup-s3; do \
+        github-backup-mirror github-backup-s3 github-backup-tui; do \
       mkdir -p crates/${crate}/src && \
-      echo "// placeholder" > crates/${crate}/src/lib.rs; \
+      echo "" > crates/${crate}/src/lib.rs; \
     done && \
     mkdir -p crates/github-backup/src && \
     echo "fn main(){}" > crates/github-backup/src/main.rs

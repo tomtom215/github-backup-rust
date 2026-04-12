@@ -1,12 +1,16 @@
 [package]
-name = "github-backup-core"
+name        = "github-backup-core"
 description = "Trait-based backup engine for github-backup-rust"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [dependencies]
 github-backup-types = { workspace = true }

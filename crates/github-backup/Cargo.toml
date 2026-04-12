@@ -1,12 +1,16 @@
 [package]
-name = "github-backup"
-description = "Comprehensive GitHub backup tool: repos, issues, PRs, releases, gists, and more"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+name        = "github-backup"
+description = "GitHub backup tool: repositories, issues, PRs, releases, gists, wikis, and metadata"
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [[bin]]
 name = "github-backup"

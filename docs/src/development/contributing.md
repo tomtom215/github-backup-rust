@@ -57,32 +57,39 @@ See [Architecture](architecture.md) for a full description of the crate layout.
 
 ## Coding Conventions
 
-- **No unsafe code** — `#![deny(unsafe_op_in_unsafe_fn)]` is workspace-wide
+- **`unsafe` is restricted** — the workspace denies `unsafe_op_in_unsafe_fn`,
+  and the only `unsafe` block in the codebase is a single FFI call to POSIX
+  `kill(2)` for stale-lock detection.  New `unsafe` requires explicit
+  justification in review.
 - **No clippy warnings** — every warning is treated as an error in CI
 - **Document public APIs** — `#![warn(missing_docs)]` is workspace-wide
-- **File size limit** — keep files under ~500 lines for readability; extract sub-modules as needed
-- **Test new code** — add unit tests for any new functions; use `SpyGitRunner` and `MemStorage` for engine tests
-- **No OpenSSL** — use `rustls` for TLS; see `deny.toml`
+- **Prefer small modules** — split large files into focused sub-modules when
+  doing so improves navigability
+- **Test new code** — add unit tests for new functions; use `SpyGitRunner`
+  and `MemStorage` for engine tests
+- **No OpenSSL** — use `rustls` for TLS; enforced by `deny.toml`
 - **No reqwest** — use `hyper` + `hyper-rustls` directly
 
 ## Adding a New Backup Category
 
-1. Add the new field(s) to `BackupOptions` in `crates/github-backup-types/src/config.rs`
-2. Add the CLI flag(s) to `crates/github-backup/src/cli/args.rs`
-3. Update `Args::merge_config()` and `Args::into_backup_options()` accordingly
-4. Add the corresponding field to `ConfigFile` in `config.rs`
-5. Implement the backup function in a new module under `crates/github-backup-core/src/backup/`
-6. Wire it in `crates/github-backup-core/src/engine.rs`
-7. Add the client method to `crates/github-backup-client/src/client/endpoints.rs` and the `BackupClient` trait
-8. Write unit tests using the mock client and `MemStorage`
-9. Update `docs/src/backup-categories.md`
-
-## Adding a New API Endpoint
-
-1. Add the method to `BackupClient` in `crates/github-backup-client/src/client/mod.rs`
-2. Implement it in `crates/github-backup-client/src/client/endpoints.rs`
-3. Add corresponding types in `crates/github-backup-types/src/`
-4. Update `MockBackupClient` in `crates/github-backup-core/src/backup/mock_client.rs`
+1. Add the new field(s) to `BackupOptions` in
+   `crates/github-backup-types/src/config/options.rs`.
+2. Add the matching field to `ConfigFile` in
+   `crates/github-backup-types/src/config/file.rs`.
+3. Add the CLI flag(s) to `crates/github-backup/src/cli/args.rs`.
+4. Update `Args::merge_config()` and `Args::into_backup_options()` in
+   `crates/github-backup/src/cli/args_impl.rs`.
+5. Add the API method to the `BackupClient` trait in
+   `crates/github-backup-client/src/api_client/` and implement it under
+   `crates/github-backup-client/src/client/endpoints/`.
+6. Implement the backup function in a new module under
+   `crates/github-backup-core/src/backup/`.
+7. Wire it in `crates/github-backup-core/src/engine.rs`.
+8. Update `MockBackupClient` in
+   `crates/github-backup-core/src/backup/mock_client.rs` for tests.
+9. Add unit tests using the mock client and `MemStorage`.
+10. Document the new flag in `docs/src/backup-categories.md` and
+    `docs/src/configuration/cli-reference.md`.
 
 ## Pull Requests
 

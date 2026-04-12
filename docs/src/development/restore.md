@@ -1,13 +1,15 @@
-# Restoring from a Backup
+# Restore Implementation
 
-`github-backup` creates self-contained, standard-format archives.
+This page documents how the `--restore` mode works internally.  For the
+user-facing guide, see the [Restore Guide](../restore.md).
 
 ---
 
-## Automated Restore (`--restore`)
+## Overview
 
-The `--restore` flag re-creates **labels** and **milestones** from the JSON backup
-into a target GitHub organisation via the GitHub REST API.
+The `--restore` flag re-creates **labels**, **milestones**, and **issues**
+from the JSON backup into a target GitHub organisation via the GitHub REST
+API.
 
 ```bash
 github-backup octocat \
@@ -23,15 +25,21 @@ github-backup octocat \
 |----------|-------------|---------------------|
 | Labels | `json/repos/<repo>/labels.json` | `POST /repos/{org}/{repo}/labels` |
 | Milestones | `json/repos/<repo>/milestones.json` | `POST /repos/{org}/{repo}/milestones` |
+| Issues | `json/repos/<repo>/issues.json` | `POST /repos/{org}/{repo}/issues` |
 
 ### Behaviour
 
 - **Additive only** — existing resources are never deleted or modified.
-- **Idempotent** — re-running with the same backup is safe; duplicate resources
-  (HTTP 422) are silently skipped.
+- **Idempotent** — re-running with the same backup is safe; duplicate
+  labels and milestones (HTTP 422) are silently skipped.
 - **Per-repository** — iterates over every repository directory under
-  `json/repos/` and restores each one independently.  A failure in one repository
-  is logged but does not abort the rest.
+  `json/repos/` and restores each one independently.  A failure in one
+  repository is logged but does not abort the rest.
+- **Issue numbers are not preserved** — issues created in the target
+  repository receive new sequential numbers.  References to original
+  issue numbers in the bodies are not rewritten.
+- **Pull requests are skipped** — entries in `issues.json` whose
+  `pull_request` field is set are not re-created.
 
 ### Token requirements
 
@@ -39,16 +47,16 @@ The token must have the `repo` scope (classic PAT) or `contents: write` +
 `issues: write` permissions (fine-grained PAT) on the target organisation's
 repositories.
 
-### Issues and pull requests
+### Pull request bodies, comments, and reactions
 
-GitHub does not expose a public bulk-import REST API for issues or pull
-requests.  Options for migrating issue data:
+GitHub does not expose a public bulk-import REST API for pull requests,
+issue comments, or reactions.  Options for migrating that data:
 
 - **GitHub CLI** — `gh issue import` (GitHub Enterprise only).
 - **GitHub Enterprise Migrations API** — for large-scale migrations between
   organisations or instances.
-- **Third-party tools** — e.g.,
-  [`github-importer`](https://github.com/nicowillis/github-importer) or
+- **Third-party tools** such as
+  [`github-importer`](https://github.com/nicowillis/github-importer) and
   [`ghec-importer`](https://github.com/github/ghec-importer).
 
 ---
