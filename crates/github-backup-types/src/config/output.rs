@@ -139,3 +139,152 @@ impl OutputConfig {
             .join("backup_checkpoint.json")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn cfg() -> OutputConfig {
+        OutputConfig::new("/var/backup")
+    }
+
+    #[test]
+    fn new_stores_root_verbatim() {
+        assert_eq!(OutputConfig::new("/foo").root, PathBuf::from("/foo"));
+        assert_eq!(
+            OutputConfig::new(PathBuf::from("/bar")).root,
+            PathBuf::from("/bar")
+        );
+    }
+
+    #[test]
+    fn repos_dir_is_root_owner_git_repos() {
+        assert_eq!(
+            cfg().repos_dir("octocat"),
+            Path::new("/var/backup/octocat/git/repos")
+        );
+    }
+
+    #[test]
+    fn wikis_dir_is_root_owner_git_wikis() {
+        assert_eq!(
+            cfg().wikis_dir("octocat"),
+            Path::new("/var/backup/octocat/git/wikis")
+        );
+    }
+
+    #[test]
+    fn gists_git_dir_is_root_owner_git_gists() {
+        assert_eq!(
+            cfg().gists_git_dir("octocat"),
+            Path::new("/var/backup/octocat/git/gists")
+        );
+    }
+
+    #[test]
+    fn repo_meta_dir_includes_repo_name() {
+        assert_eq!(
+            cfg().repo_meta_dir("octocat", "Hello-World"),
+            Path::new("/var/backup/octocat/json/repos/Hello-World")
+        );
+    }
+
+    #[test]
+    fn gists_meta_dir_is_owner_json_gists() {
+        assert_eq!(
+            cfg().gists_meta_dir("octocat"),
+            Path::new("/var/backup/octocat/json/gists")
+        );
+    }
+
+    #[test]
+    fn owner_json_dir_is_root_owner_json() {
+        assert_eq!(
+            cfg().owner_json_dir("octocat"),
+            Path::new("/var/backup/octocat/json")
+        );
+    }
+
+    #[test]
+    fn starred_repos_dir_is_root_owner_git_starred() {
+        assert_eq!(
+            cfg().starred_repos_dir("octocat"),
+            Path::new("/var/backup/octocat/git/starred")
+        );
+    }
+
+    #[test]
+    fn starred_queue_path_filename() {
+        assert_eq!(
+            cfg().starred_queue_path("octocat"),
+            Path::new("/var/backup/octocat/json/starred_clone_queue.json")
+        );
+    }
+
+    #[test]
+    fn owner_json_joins_filename() {
+        assert_eq!(
+            cfg().owner_json("octocat", "starred.json"),
+            Path::new("/var/backup/octocat/json/starred.json")
+        );
+        assert_eq!(
+            cfg().owner_json("octocat", "followers.json"),
+            Path::new("/var/backup/octocat/json/followers.json")
+        );
+    }
+
+    #[test]
+    fn backup_history_path_filename() {
+        assert_eq!(
+            cfg().backup_history_path("octocat"),
+            Path::new("/var/backup/octocat/json/backup_history.json")
+        );
+    }
+
+    #[test]
+    fn backup_state_path_filename() {
+        assert_eq!(
+            cfg().backup_state_path("octocat"),
+            Path::new("/var/backup/octocat/json/backup_state.json")
+        );
+    }
+
+    #[test]
+    fn backup_checkpoint_path_filename() {
+        assert_eq!(
+            cfg().backup_checkpoint_path("octocat"),
+            Path::new("/var/backup/octocat/json/backup_checkpoint.json")
+        );
+    }
+
+    // ── Cross-method invariants ─────────────────────────────────────────
+    //
+    // These tests pin down the path-segment structure so a mutant that
+    // swaps `git` for `json` (or repos for wikis) is observable, even
+    // when individual methods would otherwise pass via constant-folding.
+
+    #[test]
+    fn git_dirs_are_distinct_from_json_dirs() {
+        let c = cfg();
+        assert_ne!(c.repos_dir("o"), c.repo_meta_dir("o", "repos"));
+        assert_ne!(c.wikis_dir("o"), c.owner_json_dir("o"));
+        assert_ne!(c.gists_git_dir("o"), c.gists_meta_dir("o"));
+        assert_ne!(c.starred_repos_dir("o"), c.starred_queue_path("o"));
+    }
+
+    #[test]
+    fn distinct_owners_get_distinct_paths() {
+        let c = cfg();
+        assert_ne!(c.repos_dir("alice"), c.repos_dir("bob"));
+        assert_ne!(c.owner_json_dir("alice"), c.owner_json_dir("bob"));
+    }
+
+    #[test]
+    fn paths_are_anchored_at_configured_root() {
+        let c = OutputConfig::new("/srv/data");
+        assert!(c.repos_dir("u").starts_with("/srv/data"));
+        assert!(c.owner_json_dir("u").starts_with("/srv/data"));
+        assert!(c.backup_state_path("u").starts_with("/srv/data"));
+    }
+}

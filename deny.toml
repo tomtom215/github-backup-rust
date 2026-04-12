@@ -44,7 +44,18 @@ deny = [
 [advisories]
 # Fetch the OSV advisory database.
 version = 2
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0097: `rand` is unsound when a custom logger calls
+    # `rand::rng()` from inside its `log` callback. The runtime dependency
+    # tree uses `rand >= 0.9.3` (patched). The remaining `rand 0.8.5`
+    # lockfile entry is pulled in transitively by `phf_generator`, which
+    # is a *build-time* proc-macro used by `terminfo`/`termwiz` for static
+    # perfect-hash generation. We disable the `termwiz` ratatui backend in
+    # `crates/github-backup-tui/Cargo.toml`, so neither `phf_generator` nor
+    # `rand 0.8.5` is linked into anything we actually ship. The advisory
+    # therefore does not apply.
+    "RUSTSEC-2026-0097",
+]
 
 # ── Sources ───────────────────────────────────────────────────────────────────
 

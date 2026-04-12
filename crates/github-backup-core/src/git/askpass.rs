@@ -226,4 +226,60 @@ mod tests {
         let expected = script_extension();
         assert_eq!(ext, expected, "script extension must be {expected}");
     }
+
+    // ── Direct tests for script_extension ─────────────────────────────────
+    //
+    // Without these, mutation tests can replace `script_extension` with the
+    // empty string and the loose `script_has_correct_extension` test above
+    // still passes (because both sides of the assertion become ""). These
+    // tests pin down the literal return value.
+
+    #[cfg(unix)]
+    #[test]
+    fn script_extension_is_sh_on_unix() {
+        assert_eq!(script_extension(), "sh");
+        assert!(!script_extension().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn script_extension_is_bat_on_windows() {
+        assert_eq!(script_extension(), "bat");
+        assert!(!script_extension().is_empty());
+    }
+
+    // ── Direct tests for script_content ───────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn script_content_unix_is_not_empty_or_constant() {
+        let a = script_content("alpha");
+        let b = script_content("beta");
+        assert!(!a.is_empty());
+        assert_ne!(a, b, "different tokens must produce different scripts");
+        assert!(a.starts_with("#!/bin/sh"), "must have POSIX shebang: {a:?}");
+        assert!(a.contains("echo 'alpha'"), "must echo the token: {a:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_content_unix_no_quote_token_is_unescaped() {
+        // A token without single quotes should be wrapped verbatim.
+        let content = script_content("plain-token-123");
+        assert!(
+            content.contains("echo 'plain-token-123'"),
+            "got: {content:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn script_content_windows_is_not_empty_or_constant() {
+        let a = script_content("alpha");
+        let b = script_content("beta");
+        assert!(!a.is_empty());
+        assert_ne!(a, b);
+        assert!(a.starts_with("@echo off"), "must have @echo off: {a:?}");
+        assert!(a.contains("echo alpha"), "must echo the token: {a:?}");
+    }
 }

@@ -262,6 +262,42 @@ fn should_include_returns_true_for_fork_when_enabled() {
 }
 
 #[test]
+fn should_include_returns_false_for_private_when_disabled() {
+    // Private repo with `private = false` in opts must be excluded.
+    // Pins down `if repo.private && !opts.private { return false; }` so a
+    // mutant that deletes the `!` (turning it into `... && opts.private`)
+    // is observed.
+    let repo = make_repo("secret", true, false);
+    let opts = BackupOptions {
+        private: false,
+        ..Default::default()
+    };
+    assert!(!should_include(&repo, &opts));
+}
+
+#[test]
+fn should_include_returns_true_for_private_when_enabled() {
+    // Counterpart: with `private = true`, the same private repo is allowed.
+    let repo = make_repo("secret", true, false);
+    let opts = BackupOptions {
+        private: true,
+        ..Default::default()
+    };
+    assert!(should_include(&repo, &opts));
+}
+
+#[test]
+fn should_include_returns_true_for_public_when_private_disabled() {
+    // Sanity: a public (private=false) repo is unaffected by `private` opt.
+    let repo = make_repo("public", false, false);
+    let opts = BackupOptions {
+        private: false,
+        ..Default::default()
+    };
+    assert!(should_include(&repo, &opts));
+}
+
+#[test]
 fn should_include_include_filter_allows_matching_repo() {
     let repo = make_repo("rust-backup", false, false);
     let opts = BackupOptions {

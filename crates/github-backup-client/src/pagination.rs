@@ -128,6 +128,41 @@ mod tests {
         assert_eq!(page_index, 2, "exactly two pages should have been fetched");
     }
 
+    // ── Malformed URL guards ──────────────────────────────────────────
+    //
+    // The function strips the surrounding `<...>` only when *both*
+    // sentinels are present.  These tests pin down the `&&` so a
+    // mutant that swaps it for `||` is observable: with `||`, the
+    // unbracketed/single-bracket URLs below would slice into the
+    // string and return a value rather than `None`.
+
+    #[test]
+    fn parse_next_link_returns_none_when_url_missing_opening_bracket() {
+        let header = r#"https://api.github.com/repos?page=2>; rel="next""#;
+        assert!(
+            parse_next_link(header).is_none(),
+            "URL without leading '<' must not be returned"
+        );
+    }
+
+    #[test]
+    fn parse_next_link_returns_none_when_url_missing_closing_bracket() {
+        let header = r#"<https://api.github.com/repos?page=2; rel="next""#;
+        assert!(
+            parse_next_link(header).is_none(),
+            "URL without trailing '>' must not be returned"
+        );
+    }
+
+    #[test]
+    fn parse_next_link_returns_none_when_url_has_no_brackets_at_all() {
+        let header = r#"https://api.github.com/repos?page=2; rel="next""#;
+        assert!(
+            parse_next_link(header).is_none(),
+            "unbracketed URL must not be returned"
+        );
+    }
+
     /// Three pages with explicit prev/next links on each page.
     #[test]
     fn three_page_chain_is_fully_traversed() {

@@ -308,4 +308,88 @@ mod tests {
         s.add_gists(7);
         assert_eq!(s.gists_backed_up(), 7);
     }
+
+    // ── Issue / PR / workflow / discussion counters ───────────────────────
+    //
+    // These tests pin down each (incrementor, accessor) pair so that
+    // mutation tests cannot replace either side with a constant or a
+    // no-op without observable failure.
+
+    #[test]
+    fn backup_stats_add_issues_is_observed_via_accessor() {
+        let s = BackupStats::new();
+        assert_eq!(s.issues_fetched(), 0, "starts at zero");
+        s.add_issues(13);
+        assert_eq!(s.issues_fetched(), 13);
+        s.add_issues(2);
+        assert_eq!(s.issues_fetched(), 15);
+    }
+
+    #[test]
+    fn backup_stats_add_prs_is_observed_via_accessor() {
+        let s = BackupStats::new();
+        assert_eq!(s.prs_fetched(), 0, "starts at zero");
+        s.add_prs(8);
+        assert_eq!(s.prs_fetched(), 8);
+        s.add_prs(4);
+        assert_eq!(s.prs_fetched(), 12);
+    }
+
+    #[test]
+    fn backup_stats_add_workflows_is_observed_via_accessor() {
+        let s = BackupStats::new();
+        assert_eq!(s.workflows_fetched(), 0, "starts at zero");
+        s.add_workflows(5);
+        assert_eq!(s.workflows_fetched(), 5);
+        s.add_workflows(1);
+        assert_eq!(s.workflows_fetched(), 6);
+    }
+
+    #[test]
+    fn backup_stats_add_discussions_increments_internal_counter() {
+        // No public accessor for discussions yet, so verify the increment
+        // through the `Display` impl which renders the same atomic.
+        let s = BackupStats::new();
+        s.add_discussions(3);
+        // The Display impl doesn't print discussions yet; round-trip via
+        // a second add to ensure it's *not* a no-op (mutation `with ()`).
+        s.add_discussions(2);
+        assert_eq!(
+            s.inner.discussions_fetched.load(Ordering::Relaxed),
+            5,
+            "add_discussions must accumulate"
+        );
+    }
+
+    #[test]
+    fn backup_stats_counters_are_independent() {
+        // Cross-counter sanity check: incrementing one counter must not
+        // bleed into a sibling counter (defends against accidental
+        // copy/paste of the wrong AtomicU64 in the impl).
+        let s = BackupStats::new();
+        s.add_issues(100);
+        s.add_prs(200);
+        s.add_workflows(300);
+        s.add_discussions(400);
+
+        assert_eq!(s.issues_fetched(), 100);
+        assert_eq!(s.prs_fetched(), 200);
+        assert_eq!(s.workflows_fetched(), 300);
+        assert_eq!(s.inner.discussions_fetched.load(Ordering::Relaxed), 400);
+    }
+
+    #[test]
+    fn backup_stats_elapsed_secs_increases_monotonically() {
+        // Pins down `elapsed_secs` so it cannot be replaced with the
+        // constant `0.0` or `1.0` mutants.
+        let s = BackupStats::new();
+        let t0 = s.elapsed_secs();
+        // Brief, non-flaky busy-wait — 5ms is enough for `Instant`.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t1 = s.elapsed_secs();
+        assert!(t1 > t0, "elapsed must strictly grow ({t0} -> {t1})");
+        // And it must be a real, small number — not the constant 1.0
+        // a mutant might substitute.
+        assert!(t1 < 1.0, "5ms cannot exceed 1s ({t1})");
+    }
 }

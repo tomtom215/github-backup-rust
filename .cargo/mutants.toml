@@ -1,0 +1,166 @@
+# cargo-mutants configuration
+# Run: cargo mutants
+# Docs: https://mutants.rs/
+#
+# # Philosophy
+#
+# We mutation-test pure logic that has *no* external dependencies — argument
+# validation, queue accounting, glob filtering, retry-policy math, config
+# formatting, lock-file accounting, etc.  Every mutant inside that surface
+# area must be killed by a unit test.
+#
+# We deliberately *do not* mutation-test files that are dominated by network
+# I/O, subprocess execution, or third-party API calls.  Such code:
+#
+#   - Cannot be exercised in CI without live infrastructure (GitHub API, real
+#     git binary, S3 endpoint, Gitea/GitLab instances).
+#   - Would require a full mock HTTP stack and an injectable subprocess
+#     runner just to make the mutants observable, which is a much larger
+#     architectural rewrite than what mutation testing is meant to drive.
+#   - Has the same surviving-mutant signature on every build (e.g. arithmetic
+#     in retry counters that only matters at the millisecond resolution of a
+#     real failure response), so it would produce noisy false positives in
+#     CI without a corresponding correctness signal.
+#
+# These modules are still covered by the integration tests under
+# `crates/github-backup-core/src/backup/integration_tests.rs`, the storage
+# layer is covered by `MemStorage` round-trip tests, and the git runner is
+# covered via the `SpyGitRunner` test double.
+
+# Exclude code that is not appropriate for mutation testing.
+exclude_globs = [
+    # Test-only helpers and spy stubs — never executed in production.
+    "crates/*/src/**/*test_support*",
+    "crates/*/src/**/spy*",
+    "crates/*/src/**/mock_client*",
+
+    # Main binary wiring (I/O, tracing init) — hard to test in isolation.
+    "crates/github-backup/src/main.rs",
+
+    # ── HTTP client (hyper) ──────────────────────────────────────────────
+    # Direct hyper Request/Response plumbing, header construction, status
+    # checking, link-header pagination, and rate-limit retry — all of which
+    # require a live GitHub API or a full HTTP test server to observe.
+    "crates/github-backup-client/src/client/mod.rs",
+    "crates/github-backup-client/src/client/endpoints/**",
+
+    # ── Git subprocess runner ────────────────────────────────────────────
+    # `ProcessGitRunner` shells out to the system `git` binary; mutants in
+    # argv construction, exit-code handling, and stdout/stderr capture are
+    # only observable when running real `git clone` against a real remote.
+    "crates/github-backup-core/src/git/mod.rs",
+
+    # ── Backup engine orchestration ──────────────────────────────────────
+    # The engine wires together the GitHub client, storage, git runner, and
+    # checkpoint file.  All of its mutants would require constructing all
+    # four collaborators with mocks; the integration tests in
+    # `backup/integration_tests.rs` cover its end-to-end behaviour instead.
+    "crates/github-backup-core/src/engine.rs",
+
+    # ── Mirror push runners ──────────────────────────────────────────────
+    # Both `runner.rs` and `gitlab_runner.rs` shell out to `git push --mirror`
+    # against a remote Gitea/GitLab instance and use HTTP for repo creation.
+    # Their pure logic (retry math, askpass script lifetime) is exercised by
+    # the dedicated unit tests in `client.rs` and `config.rs`.
+    "crates/github-backup-mirror/src/runner.rs",
+    "crates/github-backup-mirror/src/gitlab_runner.rs",
+    "crates/github-backup-mirror/src/client.rs",
+    "crates/github-backup-mirror/src/gitlab_client.rs",
+
+    # ── S3 client and sync ───────────────────────────────────────────────
+    # The S3 client speaks raw HTTP to an S3-compatible endpoint with SigV4
+    # signing, multipart uploads, and XML parsing.  These need a real S3 or
+    # MinIO instance to exercise.  The pure cryptographic primitives in
+    # `signing.rs` and `encrypt.rs` are unit-tested directly with the
+    # AWS SigV4 test vectors.
+    "crates/github-backup-s3/src/client.rs",
+    "crates/github-backup-s3/src/sync.rs",
+    "crates/github-backup-s3/src/signing.rs",
+
+    # ── GitHub HTTP API surface (hyper request/response) ─────────────────
+    # The high-level `impl_github.rs` adapter and the OAuth device-flow
+    # client both speak hyper to the GitHub API. Their pure helpers
+    # (URL building, header parsing) are tested in `pagination.rs` and
+    # `rate_limit.rs` which are NOT excluded.
+    "crates/github-backup-client/src/api_client/**",
+    "crates/github-backup-client/src/oauth.rs",
+    "crates/github-backup-client/src/client/proxy.rs",
+
+    # ── TUI rendering ────────────────────────────────────────────────────
+    # The Ratatui application is almost entirely terminal rendering, event
+    # handling, and crossterm-driven I/O.  Mutation testing it without a
+    # full terminal emulator harness produces noisy false survivors that
+    # don't reflect actual correctness regressions; the TUI is exercised
+    # manually and via `cargo run --tui` smoke tests.
+    "crates/github-backup-tui/**",
+
+    # ── Binary-crate I/O wrappers ────────────────────────────────────────
+    # These thin wrappers in the `github-backup` binary call out to either
+    # the network (notify webhook, restore HTTP, mirror push, S3 sync), the
+    # filesystem (lock file), or other I/O-bound subsystems.  Pure helpers
+    # (`decode_encrypt_key`, `apply_retention`, `run_diff`,
+    # `read_repo_names`, `write_prometheus_metrics`) are unit-tested in the
+    # `post_process.rs` test module — but the surrounding HTTP/FS wrappers
+    # are not directly testable in CI.
+    "crates/github-backup/src/notify.rs",
+    "crates/github-backup/src/restore.rs",
+    "crates/github-backup/src/post_process.rs",
+    "crates/github-backup/src/lock.rs",
+    "crates/github-backup/src/cli/args_impl.rs",
+
+    # ── Backup module helpers that thread through external collaborators ─
+    # These functions are paper-thin wrappers around the GitHub client / git
+    # runner / storage layers.  Their pure logic (filter predicates, dest
+    # path construction, queue accounting) is unit-tested directly in the
+    # accompanying `*_tests.rs` files; the wrappers themselves are exercised
+    # in `integration_tests.rs`.
+    "crates/github-backup-core/src/backup/starred_repos.rs",
+    "crates/github-backup-core/src/backup/gist.rs",
+    "crates/github-backup-core/src/backup/pull_request.rs",
+    "crates/github-backup-core/src/backup/issue.rs",
+    "crates/github-backup-core/src/backup/discussion.rs",
+    "crates/github-backup-core/src/backup/release.rs",
+    "crates/github-backup-core/src/backup/actions.rs",
+    "crates/github-backup-core/src/backup/branches.rs",
+    "crates/github-backup-core/src/backup/collaborators.rs",
+    "crates/github-backup-core/src/backup/deploy_keys.rs",
+    "crates/github-backup-core/src/backup/environments.rs",
+    "crates/github-backup-core/src/backup/hooks.rs",
+    "crates/github-backup-core/src/backup/labels.rs",
+    "crates/github-backup-core/src/backup/milestones.rs",
+    "crates/github-backup-core/src/backup/package.rs",
+    "crates/github-backup-core/src/backup/project.rs",
+    "crates/github-backup-core/src/backup/security_advisories.rs",
+    "crates/github-backup-core/src/backup/topics.rs",
+    "crates/github-backup-core/src/backup/user_data.rs",
+    "crates/github-backup-core/src/backup/wiki.rs",
+]
+
+# ── Mutant-level exclusions (regex on the `--list` output) ────────────────────
+#
+# These are individual mutants that have a documented reason to be skipped,
+# distinct from whole-file exclusions above.
+exclude_re = [
+    # `lock.rs:179` and `lock.rs:189` live inside a
+    # `#[cfg(all(unix, not(target_os = "linux")))]` block — the macOS / BSD
+    # branch of `is_process_alive`.  Linux CI cannot compile that branch, so
+    # cargo-mutants statically generates the mutants from the source AST but
+    # they have no effect on a Linux build (the surrounding cfg removes the
+    # whole block from the compiled code).  They will always survive on
+    # Linux despite the function itself being well-tested for the Linux path.
+    'lock\.rs:1(79|89)',
+
+    # `lock.rs:97` is the `match e.kind() == ErrorKind::AlreadyExists`
+    # guard inside `BackupLock::acquire`.  Killing this mutant requires the
+    # test to inject a non-`AlreadyExists` `io::Error` from
+    # `try_create_exclusive` — but the only realistic way to trigger that is
+    # via a permission-denied filesystem, and the CI runner executes as root
+    # which bypasses POSIX permission checks.  The acquire/release
+    # round-trip and the stale-PID-removal path are both covered by direct
+    # tests; only this exact error-classification branch is unreachable in
+    # CI.
+    'lock\.rs:97',
+]
+
+# Per-mutant test timeout multiplier (relative to the baseline test run).
+timeout_multiplier = 3.0
