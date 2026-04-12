@@ -4,6 +4,22 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  # Mutation testing is opt-in: trigger from the Actions tab via the
+  # "Run workflow" button when you want to validate the test suite's
+  # ability to kill mutants. It is intentionally NOT run on every push
+  # or PR because the full workspace mutation pass takes 20-30 minutes
+  # and the diff-based PR variant produces noisy results when the
+  # changed code lives in a file that is excluded by `.cargo/mutants.toml`.
+  workflow_dispatch:
+    inputs:
+      mutants_scope:
+        description: "Mutation testing scope"
+        type: choice
+        default: full
+        options:
+          - full
+          - diff
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -124,21 +140,23 @@ jobs:
         with:
           command: check licenses bans advisories sources
 
-  # ── Mutation testing ─────────────────────────────────────────────────────────
+  # ── Mutation testing (on-demand) ─────────────────────────────────────────────
   #
-  # On pull requests: test only mutants in lines changed by the PR (fast — only
-  # the diff is mutated, not the whole codebase).
+  # This job is gated on `workflow_dispatch` so it does NOT run automatically
+  # on push or pull-request events.  Trigger it manually from the GitHub
+  # Actions tab via "Run workflow" → choose `full` or `diff` scope.
   #
-  # On pushes to main: full workspace mutation test to catch any survivors that
-  # slipped through the diff-based run.
+  #   - `full` (default): mutate every non-excluded file in the workspace.
+  #     Takes 20-30 minutes and is the canonical pre-release check.
+  #   - `diff`: mutate only the lines changed since `origin/main`.  Useful
+  #     when iterating on a feature branch and you want a fast check that
+  #     your new code is exercised by tests.
   #
-  # Branch pushes (non-main, non-PR): skipped — the full workspace has
-  # pre-existing survivors in network/git/S3 code that require live
-  # infrastructure to test and would produce constant false failures.
+  # The exclusion list and rationale live in `.cargo/mutants.toml`.
   mutants:
-    name: Mutation testing (${{ github.event_name == 'pull_request' && 'diff' || 'full' }})
+    name: Mutation testing (${{ github.event.inputs.mutants_scope }})
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -150,15 +168,16 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
 
-      - name: Run mutation tests (PR — diff only)
-        if: github.event_name == 'pull_request'
+      - name: Run mutation tests (diff scope)
+        if: github.event.inputs.mutants_scope == 'diff'
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          git fetch origin main
+          git diff origin/main...HEAD > pr.diff
           cargo mutants --workspace --timeout 120 --in-diff pr.diff -- --lib \
             2>&1 | tee mutants-report.txt
 
-      - name: Run mutation tests (main — full)
-        if: github.ref == 'refs/heads/main'
+      - name: Run mutation tests (full scope)
+        if: github.event.inputs.mutants_scope == 'full'
         run: |
           cargo mutants --workspace --timeout 120 -- --lib \
             2>&1 | tee mutants-report.txt
