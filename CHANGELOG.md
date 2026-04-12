@@ -13,6 +13,98 @@ _No unreleased changes._
 
 ---
 
+## [0.3.2] — 2026-04-12
+
+Maintenance release focused on the release pipeline, supply-chain
+hardening, mutation-testing coverage, and CI/docs polish. No runtime
+behaviour changes for end users; all existing configurations and
+command-line flags are unchanged.
+
+### Added
+
+- **Multi-stage release pipeline** (`.github/workflows/release.yml`):
+  `validate → ci → security → binaries/package/publish-dry-run →
+  github-release → docker → publish`. The validate job enforces semver
+  tag format, checks `[workspace.package].version` against the tag,
+  verifies every intra-workspace `version =` pin matches, and requires
+  a matching `## [X.Y.Z]` CHANGELOG entry before any build runs. The
+  `publish` job targets a protected `crates-io` GitHub Environment that
+  requires manual reviewer approval and publishes crates in topological
+  dependency order with idempotent already-uploaded / yanked-dep
+  recovery and exponential-backoff retry.
+- **SLSA Level 2 build provenance attestations** for every `.crate`
+  archive produced by the release pipeline, verifiable with
+  `gh attestation verify`.
+- **Mutation-testing configuration** (`.cargo/mutants.toml`): curated
+  exclude list for generated / panic-only / `#[cfg(...)]`-gated code
+  paths so `cargo mutants` produces actionable survivors only. A
+  `workflow_dispatch`-only CI job runs the full mutation suite
+  on-demand without blocking every push to main.
+- **Pagination malformed-URL tests** in `github-backup-client` and
+  **rate-limit edge-case tests** to catch mutants that would otherwise
+  silently degrade GitHub API retry/backoff behaviour.
+- **`BackupRunHistory::push` regression tests** covering the
+  deduplication and ordering mutants flagged by `cargo mutants`.
+- **`cargo-audit` configuration** (`.cargo/audit.toml`) with an
+  explicit ignore entry and rationale for the informational `rand`
+  advisory that does not affect this project.
+
+### Changed
+
+- **Portfolio-grade docs, manifests, and CI polish** (PR #16): the
+  root `README.md`, `ARCHITECTURE.md`, every per-crate `Cargo.toml`
+  (descriptions, keywords, categories, documentation links), the full
+  mdBook (`docs/src/**`), `Dockerfile`, `clippy.toml`, and `deny.toml`
+  have been reviewed and aligned for a first crates.io release. No
+  code behaviour changes; manifests now carry the metadata required
+  for a clean `cargo publish`.
+- **`mdBook` pinned to `0.4.40`** in CI and the Pages workflow to
+  match the version that the `mdbook-linkcheck` backend is known to be
+  compatible with.
+- **Pages deployment publishes `docs/book/html/`** instead of
+  `docs/book/`. Enabling the `linkcheck` backend causes mdBook to emit
+  each backend into its own subdirectory, so the HTML tree is now one
+  level deeper.
+
+### Fixed
+
+- **Release workflow `validate` job could never succeed**: the awk
+  extractor for `[workspace.package].version` used the greedy regex
+  `.*"` to strip the `version = "` prefix, which matched through the
+  closing quote and left an empty string. The job then always reported
+  "could not parse `[workspace.package].version`" and failed before
+  comparing against the tag. Replaced with `^[^"]*"` so the strip
+  stops at the first quote.
+- **`Deploy Book to GitHub Pages` workflow failed with "The command
+  `mdbook-linkcheck` wasn't found"**: `book.toml` enables
+  `[output.linkcheck]`, but the Pages workflow only installed `mdbook`
+  itself. The link checker is now installed alongside `mdBook`,
+  matching the existing `ci.yml` step.
+- **`is_process_alive` false positive on macOS**: `kill(0, 0)` returns
+  success on BSDs for PID 0 (the kernel swapper), which caused the
+  lockfile staleness check to treat a stale lock with PID 0 as still
+  held. The check now rejects PID 0 explicitly.
+- **macOS CI permissions test** that relied on `chmod 000` being
+  honoured when the test runs as root.
+- **`cargo-deny` `advisories` check now runs with `contents: read`
+  permissions** in CI; the previous implicit default blocked the step
+  on pull requests from forks.
+- **`BackupEvent::RepoCompleted` missing error field** and related
+  `dead_code` clippy errors surfaced by the mutation-testing work.
+- **Rustdoc intra-doc link ambiguity** for the `write` module and
+  several broken internal mdBook links that surfaced after the
+  link-check backend was added.
+
+### Security
+
+- **Dependency audit**: all advisories reviewed and either fixed,
+  upgraded away, or explicitly ignored with justification in
+  `.cargo/audit.toml`. The release pipeline now runs
+  `cargo-deny check licenses bans advisories sources` as a gating job
+  before any binary or crate artefact is produced.
+
+---
+
 ## [0.3.1] — 2026-03-29
 
 ### Added
@@ -283,7 +375,8 @@ _No unreleased changes._
   `cargo-audit`, `cargo-deny`.
 - Dependency policy in `deny.toml`: no OpenSSL, no reqwest, no native-tls.
 
-[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.1.0...v0.2.0

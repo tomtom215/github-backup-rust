@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version       = "0.3.1"
+version       = "0.3.2"
 edition       = "2021"
 rust-version  = "1.88"
 authors       = ["Tom F"]
@@ -68,12 +68,12 @@ zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 # Each entry carries an explicit `version =` so that `cargo publish` writes a
 # proper version requirement to the published `.crate` archive.  Local
 # development continues to use the `path =` source.
-github-backup-types  = { path = "crates/github-backup-types",  version = "0.3.1" }
-github-backup-client = { path = "crates/github-backup-client", version = "0.3.1" }
-github-backup-core   = { path = "crates/github-backup-core",   version = "0.3.1" }
-github-backup-mirror = { path = "crates/github-backup-mirror", version = "0.3.1" }
-github-backup-s3     = { path = "crates/github-backup-s3",     version = "0.3.1" }
-github-backup-tui    = { path = "crates/github-backup-tui",    version = "0.3.1" }
+github-backup-types  = { path = "crates/github-backup-types",  version = "0.3.2" }
+github-backup-client = { path = "crates/github-backup-client", version = "0.3.2" }
+github-backup-core   = { path = "crates/github-backup-core",   version = "0.3.2" }
+github-backup-mirror = { path = "crates/github-backup-mirror", version = "0.3.2" }
+github-backup-s3     = { path = "crates/github-backup-s3",     version = "0.3.2" }
+github-backup-tui    = { path = "crates/github-backup-tui",    version = "0.3.2" }
 
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

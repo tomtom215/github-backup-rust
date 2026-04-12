@@ -46,7 +46,7 @@ docker run --rm \
 Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](https://ratatui.rs) 0.30.
 
 ```
- github-backup v0.3.1  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
+ github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Owner          octocat                                                      │
 │  Output dir     /var/backup/github                                           │
