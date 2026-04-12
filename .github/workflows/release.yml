@@ -91,11 +91,15 @@ jobs:
 
           # All member crates inherit `version.workspace = true`, so we only
           # need to check `[workspace.package].version` in the root manifest.
+          #
+          # NOTE: the leading regex uses `^[^"]*"` (not `.*"`) because awk
+          # regexes are greedy — `.*"` would match through the closing quote
+          # and leave an empty string.
           WS_VER=$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/                     { in_section = 0 }
             in_section && /^[[:space:]]*version[[:space:]]*=/ {
-              gsub(/.*"/, "", $0); gsub(/".*/, "", $0); print; exit
+              gsub(/^[^"]*"/, "", $0); gsub(/".*/, "", $0); print; exit
             }
           ' Cargo.toml)
 
