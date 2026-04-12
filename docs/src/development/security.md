@@ -125,8 +125,11 @@ a similar technology.
 
 ## Unsafe Code Policy
 
-`github-backup` enforces `#![deny(unsafe_op_in_unsafe_fn)]` workspace-wide.
-There is **zero unsafe code** in the workspace.
+The workspace denies `unsafe_op_in_unsafe_fn`.  The only `unsafe` block in
+the codebase is a single FFI call to POSIX `kill(pid, 0)` in
+`crates/github-backup-core/src/lock.rs`, used to detect a stale lock file
+left behind by a crashed previous run.  Linux uses `/proc/<pid>` and avoids
+the FFI entirely.
 
 ---
 
@@ -138,4 +141,7 @@ Instead, use GitHub's private security advisory feature:
 1. Navigate to
    [github.com/tomtom215/github-backup-rust/security/advisories/new](https://github.com/tomtom215/github-backup-rust/security/advisories/new).
 2. Describe the vulnerability and steps to reproduce.
-3. We will acknowledge within 48 hours and aim to release a patch within 14 days.
+
+See [`SECURITY.md`](https://github.com/tomtom215/github-backup-rust/blob/main/SECURITY.md)
+for the full disclosure policy, expected response times, and the in-scope /
+out-of-scope vulnerability classes.

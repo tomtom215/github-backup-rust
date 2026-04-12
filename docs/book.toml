@@ -1,6 +1,6 @@
 [book]
 title = "github-backup"
-description = "Comprehensive GitHub backup tool written in Rust"
+description = "GitHub backup tool written in Rust"
 authors = ["Tom F"]
 language = "en"
 src = "src"

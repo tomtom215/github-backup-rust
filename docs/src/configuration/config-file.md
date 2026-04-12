@@ -94,6 +94,11 @@ actions          = true
 # ── Deployment environments ─────────────────────────────────────────────────
 environments     = true
 
+# ── Discussions, classic projects, packages ────────────────────────────────
+discussions      = true
+projects         = false
+packages         = false  # requires the read:packages OAuth scope
+
 # ── Organisation-specific ───────────────────────────────────────────────────
 org_members      = false
 org_teams        = false
@@ -134,7 +139,7 @@ GITHUB_TOKEN=ghp_xxx github-backup --config config.toml
 
 ## Full Automated Backup
 
-A production-ready config for nightly scheduled backups:
+A complete config for a nightly scheduled backup:
 
 ```toml
 owner       = "my-org"
@@ -236,6 +241,9 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
 | `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
 | `environments` | bool | `false` | Back up deployment environment configurations |
+| `discussions` | bool | `false` | Back up GitHub Discussions threads and comments |
+| `projects` | bool | `false` | Back up Classic Projects (v1) |
+| `packages` | bool | `false` | Back up GitHub Packages metadata for the target user |
 | `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
 | `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
 | `since` | string | — | ISO 8601 timestamp: only fetch issues/PRs updated after this |

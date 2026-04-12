@@ -7,34 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — 0.3.2
+## [Unreleased]
 
-### Added
-
-- **`--restore` mode** (labels + milestones): the `--restore` flag is now
-  fully implemented.  It reads every repository's `labels.json` and
-  `milestones.json` from the backup and re-creates them in the target
-  organisation via the GitHub REST API.  Existing resources (HTTP 422) are
-  silently skipped.  Issues and pull requests are informational-only — GitHub
-  does not expose a public bulk-import API; see the Restore documentation for
-  third-party options.  Requires `--restore-target-org` and a token with
-  repository write access.
-
-- **AES-256-GCM at-rest encryption for S3** (`--encrypt-key`): the
-  `--encrypt-key` flag is now fully wired up.  Provide a 32-byte hex key
-  (64 hex chars) and every file is encrypted with AES-256-GCM before upload.
-  The wire format is `[12-byte random nonce][ciphertext + 16-byte tag]`.
-  Encrypted objects receive a `.enc` suffix in S3.  Key can also be set via
-  `BACKUP_ENCRYPT_KEY`.  Decrypt offline with `openssl enc -d -aes-256-gcm`.
-
-- **`post_process` module** in the main binary: mirror push, S3 sync,
-  Prometheus metrics, diff, and retention logic have been extracted from
-  `main.rs` into a dedicated `post_process.rs`, keeping both files under the
-  500-line modular limit.
-
-- **Write endpoints for GitHub REST API**: `GitHubClient` now exposes
-  `create_label()` and `create_milestone()` using a new `post_json` internal
-  helper that handles rate limiting and 5xx retries identically to GET requests.
+_No unreleased changes._
 
 ---
 
@@ -42,114 +17,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Interactive TUI** (`--tui`): full-screen terminal user interface built with
-  [Ratatui](https://ratatui.rs) 0.30.  Five screens — Dashboard, Configure, Run,
-  Verify, Results — cover every end-to-end workflow without leaving the terminal.
-  The Configure screen exposes all 50+ backup settings across 8 tabbed panels with
-  real-time validation.  The Run screen shows a live progress gauge, auto-scrolling
-  repo list, and a structured log panel fed by a custom `tracing_subscriber::Layer`.
-  The Verify screen runs an offline integrity check against the stored JSON manifest.
-  The Results screen presents a formatted statistics table after each run.  A
-  cancellation channel (`tokio::sync::oneshot`) lets users abort mid-run with
-  `Ctrl+C`.  The TUI crate (`github-backup-tui`) ships 74 unit tests covering the
-  full state machine without requiring a real terminal.
+- **`--restore` mode (labels, milestones, and issues)**: the `--restore` flag
+  reads every repository's `labels.json`, `milestones.json`, and `issues.json`
+  from the backup and re-creates them in the target organisation via the
+  GitHub REST API.  Pull requests embedded in `issues.json` are skipped.
+  Existing resources (HTTP 422) are silently skipped.  Requires
+  `--restore-target-org` and a token with repository write access; an
+  interactive confirmation banner is printed unless `--restore-yes` is
+  supplied.
 
-- **Config file now covers S3 and mirror settings**: `s3_bucket`, `s3_region`, `s3_prefix`,
-  `s3_endpoint`, `s3_access_key`, `s3_secret_key`, `s3_include_assets`, `mirror_to`,
-  `mirror_token`, `mirror_owner`, and `mirror_private` are all new TOML config file keys.
-  Previously, S3 sync and mirror pushes could only be configured via CLI flags, making
-  scheduled/automated backups cumbersome.  All values are overridable from the command line.
+- **AES-256-GCM at-rest encryption for S3** (`--encrypt-key`): provide a
+  32-byte hex key (64 hex chars) and every file is encrypted with AES-256-GCM
+  before upload.  The wire format is
+  `[12-byte random nonce][ciphertext + 16-byte tag]`.  Encrypted objects
+  receive a `.enc` suffix in S3.  The key may also be supplied via the
+  `BACKUP_ENCRYPT_KEY` environment variable, and a `--decrypt` mode reverses
+  the process locally.
 
-- **Config file now covers clone behaviour**: `prefer_ssh`, `clone_type`, `lfs`, `no_prune`,
-  and `report` are new config file keys, eliminating the need to re-specify them on every run.
+- **`post_process` module**: mirror push, S3 sync, Prometheus metrics, diff,
+  and retention logic live in a dedicated `post_process.rs` module in the
+  main binary.
 
-- **`org` config key now applied**: the `org = true` key in the config file was silently
-  ignored due to a missing merge step.  Fixed — `org` from the config file is now correctly
-  applied when the CLI flag is absent.
+- **Write endpoints in `GitHubClient`**: `create_label()`,
+  `create_milestone()`, and `create_issue()` use a shared `post_json` helper
+  with the same rate-limit and 5xx retry behaviour as the GET path.
 
-- **`s3_region` / `s3_prefix` are now truly optional** in `Args`: changed from `String`
-  with hard-coded `default_value` to `Option<String>`, consistent with `concurrency`.  The
-  defaults (`us-east-1` and `""`) are applied at `build_s3_config` time, enabling the config
-  file to supply these values when the flags are absent.
+- **Interactive TUI** (`--tui`): full-screen terminal interface built with
+  [Ratatui](https://ratatui.rs) 0.30.  Five screens — Dashboard, Configure,
+  Run, Verify, Results — cover the end-to-end workflow without leaving the
+  terminal.  A custom `tracing_subscriber::Layer` routes log lines to the
+  Run screen's log panel; a `tokio::sync::oneshot` cancellation channel
+  aborts a running backup on `Ctrl+C`.  The TUI crate ships unit tests that
+  exercise the full state machine without a real terminal.
 
-- **5 new `merge_config` tests**: covering `org`, `prefer_ssh` / `no_prune`, mirror fields,
-  S3 fields, and CLI-wins-over-config for S3 bucket/region.
+- **Config file now covers S3 and mirror settings**: `s3_bucket`,
+  `s3_region`, `s3_prefix`, `s3_endpoint`, `s3_access_key`, `s3_secret_key`,
+  `s3_include_assets`, `mirror_to`, `mirror_token`, `mirror_owner`, and
+  `mirror_private` are valid TOML keys.  All values can be overridden by CLI
+  flags.
+
+- **Config file now covers clone behaviour**: `prefer_ssh`, `clone_type`,
+  `lfs`, `no_prune`, and `report` are valid TOML keys.
 
 ### Changed
 
-- **MSRV raised from 1.85 to 1.88**: `ratatui@0.30` and its transitive dependencies
-  (`darling@0.23`, `instability@0.3`, `time@0.3.47`) require Rust 1.88.  The workspace
-  `rust-version` in `Cargo.toml` has been updated accordingly.
+- **MSRV raised from 1.85 to 1.88**: `ratatui@0.30` and its transitive
+  dependencies require Rust 1.88.  The workspace `rust-version` in
+  `Cargo.toml` has been updated accordingly.
 
-- **`deny.toml` allows `Zlib` licence**: `foldhash@0.2` (transitive dep via
-  `hashbrown → indexmap → ratatui-core`) uses the Zlib licence, which is OSI-approved
-  and FSF-Free.  Added to the allowed list.
+- **`deny.toml` allows the `Zlib` licence**: `foldhash@0.2` (a transitive
+  dependency of `ratatui-core`) is Zlib-licensed.
+
+- **`s3_region` / `s3_prefix` are now `Option<String>`** in `Args`,
+  consistent with `concurrency`.  The defaults (`us-east-1` and `""`) are
+  applied at `build_s3_config` time so a config file can supply the values
+  when the CLI flags are absent.
 
 ### Fixed
 
-- **`org` merge bug**: `merge_config` now applies `cfg.org` when the CLI `--org` flag was
-  not passed.
+- **`org` merge bug**: `merge_config` now applies `cfg.org` when the CLI
+  `--org` flag was not passed.  Previously the config-file value was
+  silently ignored.
 
-### Internal — Refactoring & Tech Debt
+### Internal
 
-- **`repository.rs` split**: inline test module (390 lines) extracted to
-  `repository_tests.rs` via `#[path]` attribute; `repository.rs` trimmed from 562 → 175 lines.
+- **`repository.rs` split**: inline test module extracted to
+  `repository_tests.rs` via the `#[path]` attribute, separating production
+  code from its tests.
 
 ---
 
 ## [0.3.0] — 2026-03-29
 
-### Added (this session)
+### Added
 
-- **`--clone-host <HOST>`** (`GITHUB_CLONE_HOST` env var / `clone_host` in config): overrides the
-  hostname in every git clone URL returned by the API.  Intended for GitHub Enterprise Server
-  deployments where the API endpoint and the git clone endpoint are on separate hosts (e.g.
-  behind different load balancers).  Applied consistently to repository clones, wiki clones, and
-  gist clones.  Includes unit tests for HTTPS, `git@host:path`, and `ssh://` URL forms.
+- **`--clone-host <HOST>`** (`GITHUB_CLONE_HOST` env / `clone_host` config
+  key): overrides the hostname in every git clone URL returned by the API.
+  Intended for GitHub Enterprise Server deployments where the API endpoint
+  and the git clone endpoint are on separate hosts.  Applied to repository,
+  wiki, and gist clones.
 
-- **`--concurrency` now truly optional**: changed `Args::concurrency` from `usize` (with
-  `default_value = "4"`) to `Option<usize>`.  Previously, a config file value of `concurrency = 8`
-  was silently ignored when the user ran `--concurrency 4` explicitly, because the code couldn't
-  distinguish "user passed 4" from "still at default".  Now the default is applied at
-  `into_backup_options()` time so CLI always wins over the config file, regardless of the value.
+- **`--concurrency` is now truly optional**: `Args::concurrency` is
+  `Option<usize>`, so a config-file value such as `concurrency = 8` is no
+  longer overridden by the implicit CLI default.
 
-- **`BackupStats::add_gists(n)`**: O(1) batch increment replacing the previous `for _ in 0..n`
-  loop in the engine.
+- **`BackupStats::add_gists(n)`**: batch increment replacing the previous
+  per-item loop in the engine.
 
-- **`repos_discovered` in `BackupStats::Display`**: the summary line now shows
-  `N/M backed up` (backed-up / discovered) so users can immediately see if any repositories were
-  skipped or errored without reading individual log lines.
+- **`repos_discovered` in `BackupStats::Display`**: the summary line now
+  shows `N/M backed up` (backed-up / discovered) so operators can see at a
+  glance whether any repositories were skipped or errored.
 
 ### Fixed
 
-- **Dead code removed**: `FsStorage::write_bytes_owned` and the unused `use bytes::Bytes` import
-  in `storage.rs` have been deleted.  The method was never called outside the module.
+- **Dead code removed**: `FsStorage::write_bytes_owned` and an unused
+  `use bytes::Bytes` import in `storage.rs`.
 
-- **`run_git` signature simplified**: removed the confusing `in_cwd: bool` parameter.  All callers
-  now pass the actual working directory directly (`dest` when updating an existing repo, `.` when
-  running a fresh clone command).
+- **`run_git` signature simplified**: removed the `in_cwd: bool` parameter.
+  Callers now pass the working directory directly.
 
-### Internal — Refactoring & Tech Debt
+### Internal
 
-- **Module extraction**: all inline metadata backup blocks in `engine.rs`
-  (`labels`, `milestones`, `hooks`, `security_advisories`, `topics`, `branches`)
-  extracted into dedicated modules under `backup/` — each with unit tests.
-  All 18 source files in `backup/` now follow a single consistent pattern.
-- **`endpoints/` directory**: `client/endpoints.rs` (649 lines) split into eight
-  focused submodules (`actions`, `issues`, `keys`, `org`, `pulls`, `repo_meta`,
+- **Module extraction**: inline metadata backup blocks in `engine.rs`
+  (`labels`, `milestones`, `hooks`, `security_advisories`, `topics`,
+  `branches`) split into dedicated modules under `backup/`.
+- **`endpoints/` directory**: `client/endpoints.rs` split into eight focused
+  submodules (`actions`, `issues`, `keys`, `org`, `pulls`, `repo_meta`,
   `repos`, `social`).
-- **`api_client/` directory**: `api_client.rs` (546 lines) split into `mod.rs`
-  (trait definition) + `impl_github.rs` (blanket `impl BackupClient for GitHubClient`).
-- **`config/` directory**: `config.rs` (566 lines) split into `credential`,
-  `output`, `clone_type`, `options`, and `file` submodules with a separate
-  `tests` module.
-- **`report.rs`**: `write_report`, `unix_to_iso8601`, and `is_valid_iso8601`
-  extracted from `main.rs` into a dedicated module with 13 unit tests; fixed
-  wrong Unix timestamp in `known_timestamp_formats_correctly`.
-- **Test extraction**: `starred_repos.rs` tests moved to `starred_repos_tests.rs`
-  via `#[path]` attribute; source file trimmed from 564 → 318 lines.
+- **`api_client/` directory**: trait definition (`mod.rs`) split from the
+  blanket `impl BackupClient for GitHubClient` (`impl_github.rs`).
+- **`config/` directory**: `config.rs` split into `credential`, `output`,
+  `clone_type`, `options`, and `file` submodules.
+- **`report.rs`**: report-writing helpers extracted from `main.rs` into a
+  dedicated module with unit tests.
 - **Broken intra-doc link** fixed in `api_client/mod.rs`.
-- All 326+ tests pass; zero clippy warnings; rustdoc builds cleanly.
 
 ### Added
 
@@ -204,21 +185,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BackupStats::elapsed_secs()`**: wall-clock duration tracking using
   `std::time::Instant`; displayed in the `Display` output and included in the
   JSON report.
-- **GitHub Pages deployment** (`pages.yml`): new CI workflow builds the
-  mdBook and deploys it to `github-pages` environment on every push to `main`.
-- **Full mdBook documentation** in `docs/`:
-  - Installation, Quick Start, Authentication
-  - Backup Categories, Issues & PRs, Releases, Gists & Wikis, User Data
-  - Local Storage, S3 Storage, Mirroring
-  - CLI Reference, Config File, Environment Variables, Output Layout
-  - Docker, Systemd Timer, Cron
-  - **Monitoring & Reporting** (new): JSON report schema, Prometheus/Grafana
-    integration, Loki alerting, incremental backup patterns
-  - **Security** (new): token scopes, credential handling, TLS policy,
-    dependency policy, vulnerability reporting
-  - **Troubleshooting** (new): auth errors, rate limits, git failures, S3
-    issues, debug logging
-  - Architecture, Contributing, Changelog, FAQ
+- **GitHub Pages deployment** (`pages.yml`): CI workflow that builds the
+  mdBook and deploys it to the `github-pages` environment on every push to
+  `main`.
+- **Full mdBook documentation** in `docs/` covering installation, quick
+  start, authentication, all backup categories, storage backends,
+  configuration, deployment, monitoring, security, troubleshooting, and the
+  workspace architecture.
 
 - **GitHub Enterprise Server** support via `--api-url <URL>` (or
   `GITHUB_API_URL` environment variable / `api_url` config file key).  Pass

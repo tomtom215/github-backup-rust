@@ -5,12 +5,12 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
 
-A comprehensive, production-ready GitHub backup tool written in Rust.
+A GitHub backup tool written in Rust.
 
 Backs up repositories (mirror / bare / full / shallow), issues, pull requests,
 releases, gists, wikis, topics, branches, and relationship data for any GitHub
-user or organisation — with zero OpenSSL dependencies, first-class S3 storage
-support, and a full-screen interactive TUI.
+user or organisation. Uses `rustls` (no OpenSSL), pure-Rust S3 SigV4 (no AWS
+SDK), and ships an optional full-screen interactive TUI.
 
 > **Full documentation** → **[tomtom215.github.io/github-backup-rust](https://tomtom215.github.io/github-backup-rust/)**
 
@@ -103,7 +103,7 @@ Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](htt
 
 | Feature | Details |
 |---------|---------|
-| **Interactive TUI** | Full-screen Ratatui interface with live progress (`--tui`) |
+| Interactive TUI | Full-screen Ratatui interface with live progress (`--tui`) |
 | Repositories | Mirror, bare, full, or shallow clone |
 | Issues & PRs | Full JSON: metadata, comments, reviews, events |
 | Releases | Metadata + optional binary asset download |
@@ -111,29 +111,30 @@ Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](htt
 | Wikis | Repository wiki clones |
 | Topics & branches | Repository tags and branch list with protection status |
 | Deploy keys & collaborators | Per-repository key and permission metadata |
-| **GitHub Actions** | Workflow metadata + optional run history (`--actions`, `--action-runs`) |
-| **Environments** | Deployment environments with protection rules (`--environments`) |
+| GitHub Actions | Workflow metadata + optional run history (`--actions`, `--action-runs`) |
+| Environments | Deployment environments with protection rules (`--environments`) |
+| Discussions / Projects / Packages | `--discussions`, `--projects`, `--packages` |
 | User / org data | Starred, watched, followers, following, org members, teams |
-| **Repo filters** | `--include-repos` / `--exclude-repos` glob patterns |
-| **Incremental** | `--since` to limit issues/PR fetching by date |
-| **S3 sync** | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
-| **At-rest encryption** | AES-256-GCM encryption before S3 upload (`--encrypt-key`) |
-| **Git mirroring** | Push to Gitea, Codeberg, Forgejo |
-| **Restore mode** | Re-create labels and milestones in target org (`--restore`) |
-| **Auth** | PAT or OAuth device flow |
-| **GitHub Enterprise** | `--api-url` + `--clone-host` for GHES instances |
-| **Config file** | TOML config with CLI override |
-| **Concurrency** | Configurable parallel backup |
-| **Dry-run** | Preview without writing |
-| **Report** | JSON summary with duration, counters, timestamps |
-| **Docker** | ~15 MB Alpine image |
+| Repo filters | `--include-repos` / `--exclude-repos` glob patterns |
+| Incremental | `--since` to limit issues/PR fetching by date |
+| S3 sync | AWS S3, B2, MinIO, R2, Spaces, Wasabi |
+| At-rest encryption | AES-256-GCM encryption before S3 upload (`--encrypt-key`) |
+| Git mirroring | Push to Gitea, Codeberg, Forgejo, or GitLab |
+| Restore mode | Re-create labels, milestones, and issues in target org (`--restore`) |
+| Auth | PAT or OAuth device flow |
+| GitHub Enterprise | `--api-url` + `--clone-host` for GHES instances |
+| Config file | TOML config with CLI override |
+| Concurrency | Configurable parallel backup |
+| Dry-run | Preview without writing |
+| Report | JSON summary with duration, counters, timestamps |
+| Docker | Multi-stage Alpine image |
 
 ## Design Principles
 
-- **Minimal dependencies** — 14 direct runtime crates; no OpenSSL, no reqwest, no AWS SDK
-- **Zero unsafe code** — `#![deny(unsafe_op_in_unsafe_fn)]` workspace-wide
-- **RAII credential cleanup** — `GIT_ASKPASS` scripts auto-deleted even on panic
-- **Pure-Rust SigV4** — S3 authentication without any AWS SDK
+- **No OpenSSL, no reqwest, no AWS SDK** — TLS via `rustls`, HTTP via `hyper`
+- **`unsafe` is restricted to a single FFI call** (`kill(2)` for stale-lock detection); the workspace denies `unsafe_op_in_unsafe_fn`
+- **RAII credential cleanup** — `GIT_ASKPASS` scripts are removed even on panic
+- **Pure-Rust SigV4** — S3 authentication implemented from `sha2` + `hmac`
 - **Rate-limit aware** — automatic backoff on GitHub API limits
 
 ## Documentation

@@ -133,6 +133,14 @@ github-backup myorg \
 |------|---------|-------------|
 | `--environments` | `false` | Back up deployment environment configs (protection rules, branch policies) |
 
+## Discussions, Classic Projects, and Packages
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--discussions` | `false` | Back up GitHub Discussions threads and their comments |
+| `--projects` | `false` | Back up Classic Projects (v1) and their column structure |
+| `--packages` | `false` | Back up GitHub Packages metadata for the target user (requires `read:packages`) |
+
 ## Organisation Data
 
 | Flag | Default | Description |
@@ -145,6 +153,7 @@ github-backup myorg \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--starred` | `false` | Back up starred repositories |
+| `--clone-starred` | `false` | Clone every starred repository as a bare mirror (durable queue, opt-in) |
 | `--watched` | `false` | Back up watched repositories |
 | `--followers` | `false` | Back up follower list |
 | `--following` | `false` | Back up following list |
@@ -186,10 +195,11 @@ github-backup octocat --token $TOKEN --output /backup \
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--mirror-to <URL>` | — | — | Gitea-compatible base URL |
-| `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | — | API token for mirror destination |
-| `--mirror-owner <OWNER>` | — | Same as OWNER | Username/org at mirror destination |
-| `--mirror-private` | — | `false` | Create repos as private at destination |
+| `--mirror-to <URL>` | — | — | Mirror destination base URL (e.g. `https://codeberg.org` or `https://gitlab.com`) |
+| `--mirror-type <TYPE>` | — | `gitea` | `gitea` (Gitea / Codeberg / Forgejo) or `gitlab` |
+| `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | — | API token for the mirror destination |
+| `--mirror-owner <OWNER>` | — | Same as OWNER | Username, org, or namespace at the mirror destination |
+| `--mirror-private` | — | `false` | Create repositories as private at the destination |
 
 ## S3 Storage Options
 
@@ -202,16 +212,49 @@ github-backup octocat --token $TOKEN --output /backup \
 | `--s3-access-key <KEY>` | `AWS_ACCESS_KEY_ID` | — | AWS access key ID |
 | `--s3-secret-key <SECRET>` | `AWS_SECRET_ACCESS_KEY` | — | AWS secret access key |
 | `--s3-include-assets` | — | `false` | Upload binary release assets to S3 |
+| `--s3-delete-stale` | — | `false` | Delete S3 objects no longer in the local backup (use with caution) |
+
+## At-Rest Encryption
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
 | `--encrypt-key <HEX_KEY>` | `BACKUP_ENCRYPT_KEY` | *(none)* | 64-hex-char AES-256-GCM key for at-rest encryption before S3 upload |
+| `--decrypt` | — | `false` | Decrypt a single file produced by `--encrypt-key` and exit |
+| `--decrypt-input <FILE>` | — | — | Path to the encrypted input file (with `--decrypt`) |
+| `--decrypt-output <FILE>` | — | — | Path to write the decrypted plaintext (with `--decrypt`) |
 
 ## Restore
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--restore` | `false` | Restore labels and milestones from backup to target organisation |
+| `--restore` | `false` | Re-create labels, milestones, and issues from the backup in a target organisation |
 | `--restore-target-org <ORG>` | *(source owner)* | Target organisation for `--restore` |
+| `--restore-yes` | `false` | Skip the interactive confirmation prompt (required in non-interactive environments) |
 
-See the [Restore guide](../development/restore.md) for usage details.
+See the [Restore guide](../restore.md) for usage details.
+
+## Manifest & Verify
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--manifest` | `false` | Write a SHA-256 hash manifest after the backup completes |
+| `--verify` | `false` | Verify an existing manifest instead of running a backup |
+
+## Retention
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep-last <N>` | — | Keep only the N most recent dated snapshot directories under `--output` |
+| `--max-age-days <DAYS>` | — | Delete dated snapshot directories older than this many days |
+
+## Monitoring
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--prometheus-metrics <FILE>` | — | — | Write Prometheus textfile-format metrics to this path |
+| `--diff-with <PREV_JSON_DIR>` | — | — | Compare the current backup with a previous backup directory |
+| `--notify-webhook <URL>` | `BACKUP_NOTIFY_WEBHOOK` | — | POST a JSON status payload to this URL after the backup |
+| `--history-size <N>` | — | `20` | Maximum number of entries kept in `backup_history.json` |
 
 ## Execution Options
 

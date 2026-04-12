@@ -178,6 +178,48 @@ Output: `<output>/<owner>/json/repos/<repo>/environments.json`
 
 ---
 
+## Discussions
+
+| Flag | Description |
+|------|-------------|
+| `--discussions` | GitHub Discussions threads and their comments |
+
+Saves `discussions.json` plus per-thread `discussion_comments_<n>.json` files
+to each repository's metadata directory.  Repositories without Discussions
+enabled return 404, which is logged and skipped.
+
+Output: `<output>/<owner>/json/repos/<repo>/discussions.json`
+
+---
+
+## Classic Projects
+
+| Flag | Description |
+|------|-------------|
+| `--projects` | Classic Projects (v1) and their column structure |
+
+Saves `projects.json` and per-project `project_columns_<id>.json` files to
+each repository's metadata directory.  Classic Projects must be enabled on
+the repository; otherwise the call returns 404 and is skipped.
+
+Output: `<output>/<owner>/json/repos/<repo>/projects.json`
+
+---
+
+## GitHub Packages
+
+| Flag | Description |
+|------|-------------|
+| `--packages` | GitHub Packages metadata for the target user |
+
+Iterates over the supported package ecosystems (container, npm, maven,
+rubygems, nuget, docker) and saves the package list and version metadata to
+the owner's JSON directory.  Requires the `read:packages` OAuth scope.
+
+Output: `<output>/<owner>/json/packages_<type>.json`
+
+---
+
 ## The `--all` Flag
 
 `--all` enables every category above except:

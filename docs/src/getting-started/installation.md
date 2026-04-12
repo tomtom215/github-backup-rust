@@ -51,8 +51,6 @@ See the [Docker guide](../docker.md) for compose examples, scheduled backups, an
 
 ```bash
 github-backup --version
-# github-backup 0.2.0
-
 github-backup --help
 ```
 

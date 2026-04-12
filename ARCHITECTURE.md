@@ -8,8 +8,8 @@ github-backup-rust/
 │   ├── github-backup-types/    # GitHub API types + backup configuration
 │   ├── github-backup-client/   # Async HTTP client (GitHub API + OAuth)
 │   ├── github-backup-core/     # Backup engine: orchestration, storage, git
-│   ├── github-backup-mirror/   # Push-mirror to Gitea/Codeberg/Forgejo
-│   ├── github-backup-s3/       # S3/B2/MinIO storage backend
+│   ├── github-backup-mirror/   # Push-mirror to Gitea / GitLab
+│   ├── github-backup-s3/       # S3-compatible storage backend
 │   ├── github-backup-tui/      # Ratatui TUI front-end (--tui flag)
 │   └── github-backup/          # CLI binary (main entry point)
 ├── Dockerfile
@@ -193,11 +193,20 @@ the git subprocess exits, even on panic.
 Governed by `deny.toml`:
 
 - **Banned**: `openssl`, `openssl-sys`, `reqwest`, `native-tls`
-- **Allowed licenses**: MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0
+- **Allowed licenses**: MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0,
+  Zlib
 
 TLS is handled exclusively by `rustls` with the platform CA bundle via
 `rustls-native-certs`.  Cryptography for S3 SigV4 uses `sha2` + `hmac` from
 the RustCrypto project (no OpenSSL).
+
+## Unsafe Code Policy
+
+The workspace denies `unsafe_op_in_unsafe_fn`.  The only `unsafe` block in
+the codebase is a single FFI call to POSIX `kill(pid, 0)` in
+`crates/github-backup-core/src/lock.rs`, used to detect a stale lock file
+left behind by a crashed previous run.  Linux uses `/proc/<pid>` and avoids
+the FFI entirely.
 
 ## Testing Strategy
 

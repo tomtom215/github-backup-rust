@@ -1,6 +1,7 @@
 # Architecture
 
-`github-backup` is a Rust workspace of six focused crates. This page describes how they fit together.
+`github-backup` is a Rust workspace of seven crates. This page describes how
+they fit together.
 
 ## Workspace Layout
 
@@ -9,8 +10,9 @@ crates/
 ├── github-backup-types/     Pure data types (no I/O)
 ├── github-backup-client/    Async GitHub API client
 ├── github-backup-core/      Backup engine and storage traits
-├── github-backup-mirror/    Gitea push-mirror integration
+├── github-backup-mirror/    Push-mirror integration (Gitea / GitLab)
 ├── github-backup-s3/        S3-compatible storage backend
+├── github-backup-tui/       Ratatui terminal user interface (--tui)
 └── github-backup/           CLI binary (entry point)
 ```
 
@@ -32,9 +34,10 @@ Async HTTP client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
 
 - `GitHubClient::new()` — standard GitHub.com client
 - `GitHubClient::with_api_url()` — GitHub Enterprise Server support (custom API base URL)
-- `BackupClient` — trait abstracting the API (enables mock clients in tests)
-- `OAuthClient` — GitHub device flow authentication
-- `RateLimitTracker` — respects `X-RateLimit-*` response headers
+- `BackupClient` trait — abstracts the API (enables mock clients in tests)
+- `oauth::device_flow` — GitHub OAuth device authorisation flow
+- `RateLimitInfo` — parsed `X-RateLimit-*` response headers; the client backs off on `Remaining: 0`
+- `proxy` module — HTTP `CONNECT` proxy connector for `HTTPS_PROXY` / `https_proxy`
 
 ### `github-backup-core`
 
@@ -55,11 +58,13 @@ The backup orchestration engine and key abstractions.
 
 ### `github-backup-mirror`
 
-Gitea REST API v1 client for push-mirror integration.
+Push-mirror integration for self-hosted Git services.
 
-- `GiteaClient` — create/check repositories via API
-- `push_mirrors()` — iterates local mirror clones and pushes each to Gitea
-- Supports Gitea, Forgejo, and Codeberg
+- `GiteaClient` — Gitea REST API v1 client (Gitea, Codeberg, Forgejo)
+- `GitLabClient` — GitLab REST API v4 client
+- `runner::push_mirrors` / `gitlab_runner::push_mirrors_gitlab` — walk the
+  cloned `*.git` directories, ensure the destination repo exists, and run
+  `git push --mirror`
 
 ### `github-backup-s3`
 
@@ -70,14 +75,23 @@ Pure-Rust S3-compatible storage client.
 - `sync_to_s3()` — incremental sync: skip existing objects via `HeadObject`
 - Works with AWS S3, Backblaze B2, Cloudflare R2, MinIO, DigitalOcean Spaces, Wasabi
 
+### `github-backup-tui`
+
+Optional Ratatui terminal user interface, enabled with the `--tui` flag.
+Drives the same `BackupEngine` used by the CLI; does not embed its own
+backup logic.  See [Interactive TUI](../tui.md) for the user-facing guide.
+
 ### `github-backup` (binary)
 
 CLI entry point using `clap`.
 
-- `cli/args.rs` — `Args` struct with all flags including `--api-url`
+- `cli/args.rs` — `Args` struct with all CLI flags
 - `cli/args_impl.rs` — `merge_config()` and `into_backup_options()` implementations
 - `cli/clone_type.rs` — `CliCloneType` parser (`mirror`, `bare`, `full`, `shallow:N`)
-- `main.rs` — orchestration: auth → `--since` validation → backup → report → mirror → S3
+- `main.rs` — orchestration: auth → `--since` validation → backup → post-processing
+- `post_process.rs` — Prometheus metrics, diff, mirror push, S3 sync, retention
+- `restore.rs` — `--restore` mode (labels, milestones, issues)
+- `report.rs` — JSON summary report writer
 
 ## Data Flow
 
@@ -159,7 +173,16 @@ Maintained in `deny.toml`:
 | `reqwest` | Too many transitive deps | `hyper` + `hyper-rustls` |
 | `native-tls` | Platform-specific | `rustls` + `rustls-native-certs` |
 
-Direct runtime dependencies: 14 crates. No OpenSSL. No AWS SDK.
+No OpenSSL.  No AWS SDK.  TLS verification uses the platform CA bundle via
+`rustls-native-certs`.
+
+## Unsafe Code Policy
+
+The workspace denies `unsafe_op_in_unsafe_fn`.  The only `unsafe` block in
+the codebase is a single FFI call to POSIX `kill(pid, 0)` in
+`crates/github-backup-core/src/lock.rs`, used to detect a stale lock file
+left behind by a crashed previous run.  Linux uses `/proc/<pid>` and avoids
+the FFI entirely.
 
 ## Testing Strategy
 

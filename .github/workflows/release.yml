@@ -1,18 +1,208 @@
+# SPDX-License-Identifier: MIT
+# Copyright 2026 Tom F
+#
+# Release pipeline for github-backup-rust.
+#
+# Triggered by pushing a semver tag, e.g.:
+#
+#     git tag -a v0.4.0 -m "Release v0.4.0"
+#     git push origin v0.4.0
+#
+# Job dependency graph:
+#
+#   validate ──┬──► ci (matrix) ──┬──► binaries ──┐
+#              └──► security ─────┤               ├──► github-release ──► publish
+#                                 ├──► package ───┤                       (crates-io env)
+#                                 └──► publish-dry-run ─┘
+#                                                 │
+#                                                 └──► docker
+#
+# The `publish` job targets a protected GitHub Environment named `crates-io`
+# that requires manual reviewer approval before any crate is uploaded.
+
 name: Release
 
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"
+      - "v[0-9]+.[0-9]+.[0-9]+"        # stable:      v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-*"      # pre-release: v1.2.3-alpha.1
+
+# Prevent concurrent releases for the same ref.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Minimal default permissions — individual jobs escalate only what they need.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── Build binaries ──────────────────────────────────────────────────────────
-  build:
-    name: Build (${{ matrix.target }})
+  # ── Job 1: Validate tag, version consistency, and changelog entry ───────────
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version:       ${{ steps.meta.outputs.version }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          echo "::group::Tag metadata"
+          printf 'Tag:        %s\n' "$TAG"
+          printf 'Version:    %s\n' "$VERSION"
+
+          # Validate semver (X.Y.Z with optional pre-release and build metadata).
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?(\+[A-Za-z0-9.]+)?$'
+          if [[ ! "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::Tag '$TAG' is not a valid semantic version."
+            echo "Expected format: vX.Y.Z  or  vX.Y.Z-pre.1"
+            exit 1
+          fi
+
+          # A pre-release is anything with a hyphen after X.Y.Z.
+          if [[ "$VERSION" =~ - ]]; then
+            IS_PRE=true
+          else
+            IS_PRE=false
+          fi
+
+          printf 'Pre-release: %s\n' "$IS_PRE"
+          echo "::endgroup::"
+
+          echo "version=$VERSION"      >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+
+      - name: Verify workspace version matches tag
+        shell: bash
+        run: |
+          TAG_VER="${{ steps.meta.outputs.version }}"
+
+          # All member crates inherit `version.workspace = true`, so we only
+          # need to check `[workspace.package].version` in the root manifest.
+          WS_VER=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/                     { in_section = 0 }
+            in_section && /^[[:space:]]*version[[:space:]]*=/ {
+              gsub(/.*"/, "", $0); gsub(/".*/, "", $0); print; exit
+            }
+          ' Cargo.toml)
+
+          if [[ -z "$WS_VER" ]]; then
+            echo "::error file=Cargo.toml::could not parse [workspace.package].version"
+            exit 1
+          fi
+
+          if [[ "$WS_VER" != "$TAG_VER" ]]; then
+            echo "::error file=Cargo.toml::workspace.package.version ($WS_VER) does not match tag ($TAG_VER)"
+            echo "Bump the version in Cargo.toml before tagging."
+            exit 1
+          fi
+
+          # Ensure intra-workspace dependency `version =` requirements line up
+          # with the tag (cargo publish writes this verbatim into .crate files).
+          DEP_MISMATCH=0
+          while IFS= read -r line; do
+            DEP_VER=$(printf '%s\n' "$line" | sed -n 's/.*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')
+            if [[ -n "$DEP_VER" && "$DEP_VER" != "$TAG_VER" ]]; then
+              echo "::error file=Cargo.toml::workspace dependency line has version '$DEP_VER', expected '$TAG_VER': $line"
+              DEP_MISMATCH=1
+            fi
+          done < <(grep -E '^github-backup-' Cargo.toml || true)
+
+          if [[ "$DEP_MISMATCH" -eq 1 ]]; then
+            exit 1
+          fi
+
+          echo "::notice::Workspace and intra-workspace deps both report v$TAG_VER"
+
+      - name: Verify CHANGELOG entry exists
+        shell: bash
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          if ! grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no '## [$VERSION]' entry in CHANGELOG.md."
+            echo "Add release notes for v$VERSION before tagging."
+            exit 1
+          fi
+          echo "::notice::CHANGELOG.md entry found for v$VERSION"
+
+  # ── Job 2: Full CI gate (parallel matrix) ──────────────────────────────────
+  ci:
+    name: CI / ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: "test · Linux"
+            os: ubuntu-latest
+            toolchain: stable
+            command: cargo test --workspace --all-targets
+          - name: "test · macOS"
+            os: macos-latest
+            toolchain: stable
+            command: cargo test --workspace --all-targets
+          - name: "clippy"
+            os: ubuntu-latest
+            toolchain: stable
+            components: clippy
+            command: cargo clippy --workspace --all-targets -- -D warnings
+          - name: "fmt"
+            os: ubuntu-latest
+            toolchain: stable
+            components: rustfmt
+            command: cargo fmt --all -- --check
+          - name: "doc"
+            os: ubuntu-latest
+            toolchain: stable
+            command: cargo doc --workspace --no-deps
+          - name: "MSRV 1.88"
+            os: ubuntu-latest
+            toolchain: "1.88"
+            command: cargo build --workspace
+    env:
+      # Doc-warnings-as-errors only affects `cargo doc`; harmless for other steps.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.components || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.command }}
+
+  # ── Job 3: Security audit ──────────────────────────────────────────────────
+  security:
+    name: Security audit (cargo-deny)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans advisories sources
+
+  # ── Job 4: Build release binaries for every supported target ──────────────
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: [ci, security]
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,18 +224,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: github-backup-windows-x86_64
             ext: .exe
-
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
       - name: Install cross (Linux cross-compilation)
         if: matrix.cross
@@ -59,70 +245,208 @@ jobs:
         if: matrix.cross
         run: cross build --release --package github-backup --target ${{ matrix.target }}
 
-      - name: Stage binary
+      - name: Stage binary and checksum
         shell: bash
         run: |
+          mkdir -p staging
           src="target/${{ matrix.target }}/release/github-backup${{ matrix.ext }}"
-          dst="${{ matrix.artifact }}${{ matrix.ext }}"
+          dst="staging/${{ matrix.artifact }}${{ matrix.ext }}"
           cp "$src" "$dst"
+          # Compute the SHA-256 next to the binary so users can verify downloads.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd staging && sha256sum "$(basename "$dst")" > "$(basename "$dst").sha256")
+          else
+            (cd staging && shasum -a 256 "$(basename "$dst")" > "$(basename "$dst").sha256")
+          fi
+          ls -lh staging/
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}${{ matrix.ext }}
+          path: staging/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
-  # ── Create GitHub Release ───────────────────────────────────────────────────
-  release:
-    name: Create GitHub Release
-    needs: build
+  # ── Job 5: Package every publishable crate ─────────────────────────────────
+  package:
+    name: Package crates
+    needs: [ci, security]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      id-token: write      # OIDC token for SLSA build provenance
+      attestations: write  # write attestation back to the repository
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build .crate archives for every workspace member
+        shell: bash
+        run: |
+          echo "::group::cargo package --workspace"
+          cargo package --workspace --no-verify
+          echo "::endgroup::"
+
+          echo "::group::Archive sizes"
+          ls -lh target/package/*.crate
+          echo "::endgroup::"
+
+      - name: Generate SHA-256 checksums for the .crate archives
+        shell: bash
+        run: |
+          cd target/package
+          sha256sum ./*.crate | tee SHA256SUMS-crates.txt
+
+      # SLSA Level 2 build provenance — links the .crate artefacts to this
+      # workflow run; verifiable later with `gh attestation verify`.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: target/package/*.crate
+
+      - name: Upload .crate archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: crate-archives
+          path: |
+            target/package/*.crate
+            target/package/SHA256SUMS-crates.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # ── Job 6: Publish dry-run (catches packaging errors before crates.io) ─────
+  publish-dry-run:
+    name: Publish dry-run
+    needs: [ci, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify packages are publishable
+        shell: bash
+        run: |
+          # Use `cargo package --workspace` instead of `cargo publish --dry-run`
+          # because publish --dry-run resolves dependencies from the live
+          # crates.io index, which fails for intra-workspace crates whose new
+          # versions aren't published yet. `cargo package` resolves workspace
+          # dependencies locally.
+          echo "::group::cargo package --workspace"
+          cargo package --workspace
+          echo "::endgroup::"
+          echo "::notice::All workspace crates pass package validation"
+
+  # ── Job 7: Create the GitHub release with binaries, .crate archives, notes ─
+  github-release:
+    name: Create GitHub release
+    needs: [validate, binaries, package, publish-dry-run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create release, upload assets
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download all artifacts
+      - name: Download all binary artefacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
+          pattern: github-backup-*
+          merge-multiple: true
 
-      - name: Compute checksums
+      - name: Download .crate archives
+        uses: actions/download-artifact@v4
+        with:
+          name: crate-archives
+          path: dist/
+
+      - name: Compute combined SHA256SUMS
+        shell: bash
         working-directory: dist
         run: |
-          find . -type f -not -name "*.sha256" | sort | while read f; do
+          # Sort for stable output regardless of upload order.
+          find . -maxdepth 1 -type f \
+            ! -name '*.sha256' ! -name 'SHA256SUMS*' \
+            -printf '%f\n' | sort | while read -r f; do
             sha256sum "$f" >> SHA256SUMS.txt
           done
           cat SHA256SUMS.txt
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract changelog entry
-        id: changelog
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        shell: bash
         run: |
-          # Pull the section for this release from CHANGELOG.md
-          version="${{ steps.version.outputs.version }}"
-          awk "/^## \[${version}\]/{found=1; next} found && /^## /{exit} found{print}" \
-            CHANGELOG.md > release_notes.txt
-          if [ ! -s release_notes.txt ]; then
-            echo "Release ${version}" > release_notes.txt
+          VERSION="${{ needs.validate.outputs.version }}"
+          echo "::group::Extracting release notes for v$VERSION"
+          awk "
+            /^## \[$VERSION\]/ { found=1; next }
+            found && /^## \[/  { exit }
+            found              { print }
+          " CHANGELOG.md > release_notes.md
+
+          if [[ ! -s release_notes.md ]]; then
+            echo "::error::empty release notes extracted for $VERSION"
+            exit 1
+          fi
+          echo "Preview:"
+          cat release_notes.md
+          echo "::endgroup::"
+
+      - name: List release artefacts
+        shell: bash
+        run: ls -lh dist/
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          IS_PRE="${{ needs.validate.outputs.is_prerelease }}"
+          TAG="v${VERSION}"
+
+          PRE_FLAG=""
+          [[ "$IS_PRE" == "true" ]] && PRE_FLAG="--prerelease"
+
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+
+          if gh release view "$TAG" &>/dev/null; then
+            echo "::warning::release ${TAG} already exists — updating it in place."
+            gh release edit "$TAG" \
+              $PRE_FLAG \
+              --title "github-backup ${TAG}" \
+              --notes-file release_notes.md
+            gh release upload "$TAG" --clobber dist/*
+          else
+            gh release create "$TAG" \
+              $PRE_FLAG \
+              --title "github-backup ${TAG}" \
+              --notes-file release_notes.md \
+              dist/*
           fi
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          body_path: release_notes.txt
-          files: |
-            dist/**/*
-          generate_release_notes: false
-          fail_on_unmatched_files: true
+          {
+            echo "## github-backup ${TAG}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Pre-release | \`${IS_PRE}\` |"
+            echo "| Release | [${TAG}](${RELEASE_URL}) |"
+            echo ""
+            echo "### Artefacts"
+            echo "\`\`\`"
+            ls -lh dist/
+            echo "\`\`\`"
+            echo ""
+            echo "### Next step"
+            echo "Approve the **crates-io** deployment environment to publish to crates.io."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Docker image → GHCR ────────────────────────────────────────────────────
+  # ── Job 8: Publish container image to GHCR ─────────────────────────────────
   docker:
-    name: Docker → GHCR
-    needs: build
+    name: Build and push image to GHCR
+    needs: [validate, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -145,7 +469,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ needs.validate.outputs.is_prerelease == 'false' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -155,3 +479,110 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+
+  # ── Job 9: Publish to crates.io (protected environment, requires approval) ─
+  publish:
+    name: Publish to crates.io
+    needs: [validate, github-release]
+    runs-on: ubuntu-latest
+    # The 'crates-io' environment requires a manual approval step.
+    # Configure it at: Settings → Environments → crates-io → Required reviewers
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/github-backup/${{ needs.validate.outputs.version }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish workspace crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+
+          # Helper: idempotent publish with retry and yank-recovery.
+          #
+          #   1. "already uploaded"  → unyank if needed and treat as success.
+          #   2. dependency "is yanked" → wait for index propagation and retry.
+          #   3. transient failures → exponential backoff up to 5 attempts.
+          publish_crate() {
+            local crate="$1"
+            local max_attempts=5
+            local attempt=1
+
+            echo "::group::cargo publish — $crate v$VERSION"
+            while (( attempt <= max_attempts )); do
+              echo "Attempt $attempt/$max_attempts: publishing $crate v$VERSION"
+
+              if cargo publish -p "$crate" 2>&1 | tee /tmp/publish-${crate}.log; then
+                echo "::endgroup::"
+                return 0
+              fi
+
+              if grep -q "already uploaded" /tmp/publish-${crate}.log; then
+                echo "::warning::$crate v$VERSION is already published — unyanking (if yanked) and skipping."
+                cargo yank --undo "$crate@$VERSION" 2>&1 || true
+                echo "Waiting 30s for crates.io index to propagate unyank..."
+                sleep 30
+                echo "::endgroup::"
+                return 0
+              fi
+
+              if grep -q "is yanked" /tmp/publish-${crate}.log; then
+                local wait=$(( 15 * attempt ))
+                echo "::warning::dependency appears yanked in index — waiting ${wait}s for propagation (attempt $attempt/$max_attempts)."
+                sleep "$wait"
+                attempt=$(( attempt + 1 ))
+                continue
+              fi
+
+              local wait=$(( 2 ** attempt ))
+              if (( attempt < max_attempts )); then
+                echo "::warning::publish failed — retrying in ${wait}s (attempt $attempt/$max_attempts)."
+                sleep "$wait"
+                attempt=$(( attempt + 1 ))
+              else
+                echo "::error::cargo publish -p $crate failed after $max_attempts attempts"
+                cat /tmp/publish-${crate}.log
+                echo "::endgroup::"
+                exit 1
+              fi
+            done
+          }
+
+          # Publish in topological dependency order. `cargo publish` waits for
+          # each crate to appear in the crates.io index before returning, so no
+          # explicit sleep is needed between non-recovery steps.
+          #
+          # Dependency graph:
+          #   types  ──►  client  ──►  core  ──┐
+          #          ──►  mirror  ─────────────┤
+          #               s3      ─────────────┼──►  tui  ──►  github-backup
+          #                                    ┘
+          publish_crate github-backup-types
+          publish_crate github-backup-s3
+          publish_crate github-backup-client
+          publish_crate github-backup-mirror
+          publish_crate github-backup-core
+          publish_crate github-backup-tui
+          publish_crate github-backup
+
+          {
+            echo "## Published to crates.io"
+            echo ""
+            echo "| Crate | Link |"
+            echo "|-------|------|"
+            echo "| github-backup-types  | [crates.io](https://crates.io/crates/github-backup-types/${VERSION}) |"
+            echo "| github-backup-s3     | [crates.io](https://crates.io/crates/github-backup-s3/${VERSION}) |"
+            echo "| github-backup-client | [crates.io](https://crates.io/crates/github-backup-client/${VERSION}) |"
+            echo "| github-backup-mirror | [crates.io](https://crates.io/crates/github-backup-mirror/${VERSION}) |"
+            echo "| github-backup-core   | [crates.io](https://crates.io/crates/github-backup-core/${VERSION}) |"
+            echo "| github-backup-tui    | [crates.io](https://crates.io/crates/github-backup-tui/${VERSION}) |"
+            echo "| github-backup        | [crates.io](https://crates.io/crates/github-backup/${VERSION}) |"
+            echo ""
+            echo "> docs.rs may take a few minutes to build and index the documentation."
+          } >> "$GITHUB_STEP_SUMMARY"

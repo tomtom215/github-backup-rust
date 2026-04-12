@@ -108,7 +108,7 @@ github-backup octocat --token $GITHUB_TOKEN --output /backup --all
 
 `github-backup` reads `HTTPS_PROXY` (or the lowercase `https_proxy`) at startup and routes all GitHub API calls through the proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL (`http://user:pass@host:port`) are forwarded automatically as a `Proxy-Authorization` header.
 
-> **Note**: git clone operations are performed by the system `git` binary, which honours `HTTPS_PROXY` / `GIT_PROXY_COMMAND` from the environment separately.  Set them together for consistent behaviour.
+> **Note:** git clone and push operations are performed by the system `git` binary, which honours `HTTPS_PROXY` / `GIT_PROXY_COMMAND` from the environment independently.  Export them together for consistent behaviour.
 
 See [Environment Variables → Proxy](environment.md#proxy) for the full variable reference.
 

@@ -1,12 +1,16 @@
 [package]
-name = "github-backup-tui"
-description = "Ratatui TUI interface for github-backup"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+name        = "github-backup-tui"
+description = "Ratatui terminal user interface for github-backup-rust"
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [dependencies]
 # TUI framework

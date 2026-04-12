@@ -108,10 +108,10 @@ openssl enc -d -aes-256-gcm \
 echo "Decrypted to labels.json"
 ```
 
-Or using Python (no external dependencies beyond the standard library):
+Or using Python with the [`cryptography`](https://pypi.org/project/cryptography/)
+package (`pip install cryptography`):
 
 ```python
-import sys, struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 key = bytes.fromhex("your_64_hex_char_key")

@@ -11,15 +11,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
-edition = "2021"
-rust-version = "1.88"
-authors = ["Tom F"]
-license = "MIT"
-repository = "https://github.com/tomtom215/github-backup-rust"
-homepage = "https://github.com/tomtom215/github-backup-rust"
-keywords = ["github", "backup", "git"]
-categories = ["command-line-utilities", "development-tools"]
+version       = "0.3.1"
+edition       = "2021"
+rust-version  = "1.88"
+authors       = ["Tom F"]
+license       = "MIT"
+repository    = "https://github.com/tomtom215/github-backup-rust"
+homepage      = "https://github.com/tomtom215/github-backup-rust"
+documentation = "https://tomtom215.github.io/github-backup-rust/"
+readme        = "README.md"
+keywords      = ["github", "backup", "git", "mirror", "archive"]
+categories    = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 # Async runtime
@@ -61,13 +63,17 @@ hmac = "0.12"
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 
-# Workspace crates
-github-backup-types = { path = "crates/github-backup-types" }
-github-backup-client = { path = "crates/github-backup-client" }
-github-backup-core = { path = "crates/github-backup-core" }
-github-backup-mirror = { path = "crates/github-backup-mirror" }
-github-backup-s3 = { path = "crates/github-backup-s3" }
-github-backup-tui = { path = "crates/github-backup-tui" }
+# Workspace crates.
+#
+# Each entry carries an explicit `version =` so that `cargo publish` writes a
+# proper version requirement to the published `.crate` archive.  Local
+# development continues to use the `path =` source.
+github-backup-types  = { path = "crates/github-backup-types",  version = "0.3.1" }
+github-backup-client = { path = "crates/github-backup-client", version = "0.3.1" }
+github-backup-core   = { path = "crates/github-backup-core",   version = "0.3.1" }
+github-backup-mirror = { path = "crates/github-backup-mirror", version = "0.3.1" }
+github-backup-s3     = { path = "crates/github-backup-s3",     version = "0.3.1" }
+github-backup-tui    = { path = "crates/github-backup-tui",    version = "0.3.1" }
 
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

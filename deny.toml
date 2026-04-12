@@ -26,8 +26,8 @@ exceptions = []
 
 [bans]
 multiple-versions = "warn"
-# Workspace path deps (github-backup-{types,client,core}) use `{ workspace = true }`
-# without an explicit version — this is intentional for intra-workspace crates.
+# Intra-workspace crates use `{ workspace = true }` without an explicit
+# version requirement; allow wildcard matches so cargo-deny does not flag them.
 wildcards = "allow"
 highlight = "all"
 

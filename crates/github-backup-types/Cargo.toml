@@ -1,12 +1,16 @@
 [package]
-name = "github-backup-types"
+name        = "github-backup-types"
 description = "GitHub API response types and backup configuration for github-backup-rust"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+authors.workspace       = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+keywords.workspace      = true
+categories.workspace    = true
 
 [dependencies]
 serde = { workspace = true }
