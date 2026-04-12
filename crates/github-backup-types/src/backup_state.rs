@@ -352,4 +352,55 @@ mod tests {
         let h = BackupRunHistory::load(&dir.path().join("none.json")).expect("no error");
         assert!(h.entries.is_empty());
     }
+
+    #[test]
+    fn checkpoint_is_complete_false_for_unknown_repo() {
+        // Pin down `is_complete` so a mutant returning the constant `true`
+        // is observable.
+        let cp = BackupCheckpoint::default();
+        assert!(!cp.is_complete("owner/never-seen"));
+    }
+
+    #[test]
+    fn checkpoint_is_complete_true_only_for_inserted_repo() {
+        let mut cp = BackupCheckpoint::default();
+        cp.completed_repos.insert("owner/a".into());
+        cp.completed_repos.insert("owner/b".into());
+        assert!(cp.is_complete("owner/a"));
+        assert!(cp.is_complete("owner/b"));
+        assert!(!cp.is_complete("owner/c"));
+        assert!(!cp.is_complete("owner/A")); // case-sensitive
+    }
+
+    #[test]
+    fn checkpoint_delete_missing_is_ok() {
+        let dir = tempdir().expect("tempdir");
+        // Delete on a path that does not exist must not error.
+        BackupCheckpoint::delete(&dir.path().join("nope.json")).expect("noop ok");
+    }
+
+    #[test]
+    fn history_push_does_not_alter_other_entries() {
+        // Pin down the `truncate(max_entries)` mutation so the test
+        // observes the boundary precisely.
+        let mut h = BackupRunHistory::default();
+        for i in 0..3 {
+            h.push(make_entry(&format!("2026-01-0{}T00:00:00Z", i + 1)), 5);
+        }
+        assert_eq!(h.entries.len(), 3);
+        assert_eq!(h.entries[0].timestamp, "2026-01-03T00:00:00Z");
+        assert_eq!(h.entries[1].timestamp, "2026-01-02T00:00:00Z");
+        assert_eq!(h.entries[2].timestamp, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn history_push_truncates_at_exactly_max_not_max_minus_one() {
+        // Pin down the off-by-one in `truncate(max_entries)` — pushing
+        // exactly `max` items must keep all of them.
+        let mut h = BackupRunHistory::default();
+        for i in 0..3 {
+            h.push(make_entry(&format!("2026-01-0{}T00:00:00Z", i + 1)), 3);
+        }
+        assert_eq!(h.entries.len(), 3, "must keep all when count == max");
+    }
 }

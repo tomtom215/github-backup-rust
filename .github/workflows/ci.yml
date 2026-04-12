@@ -90,11 +90,29 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check creates a check run and (optionally) an issue when an
+    # advisory is found, so it needs explicit write permission for both. Without
+    # these, the action errors out with
+    #   "Resource not accessible by integration"
+    # on the GitHub `checks` REST endpoint.
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2026-0097: `rand` is unsound when a custom logger calls
+          # `rand::rng()` from inside its `log` callback. Our runtime tree
+          # uses `rand >= 0.9.3` (patched). The remaining `rand 0.8.5` lock
+          # entry is pulled in transitively by `phf_generator`, which is a
+          # *build-time* proc macro used by `terminfo`/`termwiz` and is not
+          # compiled into our binary (we explicitly disable the termwiz
+          # backend in `crates/github-backup-tui/Cargo.toml`). The advisory
+          # therefore does not apply to any code we ship.
+          ignore: RUSTSEC-2026-0097
 
   # ── cargo-deny ──────────────────────────────────────────────────────────────
   deny:

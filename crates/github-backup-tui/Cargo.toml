@@ -14,7 +14,20 @@ categories.workspace    = true
 
 [dependencies]
 # TUI framework
-ratatui = "0.30"
+#
+# Disable default features and re-enable only what we use, so the heavy
+# `ratatui-termwiz` backend (and its transitive `phf_generator` -> `rand 0.8`
+# tree) is excluded from the build. We only render through the crossterm
+# backend, so termwiz is dead weight.
+ratatui = { version = "0.30", default-features = false, features = [
+    "crossterm",
+    "macros",
+    "all-widgets",
+    "layout-cache",
+    "underline-color",
+    "widget-calendar",
+    "std",
+] }
 
 # Workspace dependencies
 github-backup-types  = { workspace = true }

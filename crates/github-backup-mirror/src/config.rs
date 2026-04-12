@@ -161,4 +161,62 @@ mod tests {
             "https://codeberg.org/alice/my-repo.git"
         );
     }
+
+    // ── GitLabConfig pure-function tests ──────────────────────────────────
+
+    fn sample_gitlab_config() -> GitLabConfig {
+        GitLabConfig {
+            base_url: "https://gitlab.com".to_string(),
+            token: "glpat-secret".to_string(),
+            namespace: "octocat".to_string(),
+            private: true,
+        }
+    }
+
+    #[test]
+    fn gitlab_api_base_appends_api_v4() {
+        let cfg = sample_gitlab_config();
+        assert_eq!(cfg.api_base(), "https://gitlab.com/api/v4");
+        assert!(!cfg.api_base().is_empty());
+    }
+
+    #[test]
+    fn gitlab_api_base_strips_trailing_slash() {
+        let mut cfg = sample_gitlab_config();
+        cfg.base_url = "https://gitlab.example.com/".to_string();
+        assert_eq!(cfg.api_base(), "https://gitlab.example.com/api/v4");
+    }
+
+    #[test]
+    fn gitlab_api_base_uses_self_hosted_url() {
+        let mut cfg = sample_gitlab_config();
+        cfg.base_url = "https://git.internal.example".to_string();
+        assert_eq!(cfg.api_base(), "https://git.internal.example/api/v4");
+    }
+
+    #[test]
+    fn gitlab_repo_clone_url_uses_namespace_and_repo() {
+        let cfg = sample_gitlab_config();
+        assert_eq!(
+            cfg.repo_clone_url("my-mirror"),
+            "https://gitlab.com/octocat/my-mirror.git"
+        );
+    }
+
+    #[test]
+    fn gitlab_repo_clone_url_strips_trailing_slash_from_base() {
+        let mut cfg = sample_gitlab_config();
+        cfg.base_url = "https://gitlab.com/".to_string();
+        assert_eq!(
+            cfg.repo_clone_url("hello"),
+            "https://gitlab.com/octocat/hello.git"
+        );
+    }
+
+    #[test]
+    fn gitlab_repo_clone_url_distinct_for_distinct_repos() {
+        let cfg = sample_gitlab_config();
+        assert_ne!(cfg.repo_clone_url("a"), cfg.repo_clone_url("b"));
+        assert!(!cfg.repo_clone_url("foo").is_empty());
+    }
 }

@@ -4,3 +4,4 @@
 *.pem
 *.key
 docs/book
+mutants.out/

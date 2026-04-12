@@ -291,4 +291,128 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
+
+    #[test]
+    fn sha256_hex_known_short_message() {
+        // SHA-256 of "abc"
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    // ── VerifyReport::is_clean ────────────────────────────────────────────
+    //
+    // The CI mutation report shows three surviving mutants on
+    // `is_clean`: replacing the && operators and the constant return.
+    // These tests pin down the boolean composition.
+
+    #[test]
+    fn verify_report_default_is_clean() {
+        let r = VerifyReport::default();
+        assert!(r.is_clean(), "empty report must be clean");
+    }
+
+    #[test]
+    fn verify_report_with_only_tampered_is_not_clean() {
+        let r = VerifyReport {
+            ok: 1,
+            tampered: vec!["a.json".into()],
+            missing: vec![],
+            unexpected: vec![],
+        };
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn verify_report_with_only_missing_is_not_clean() {
+        let r = VerifyReport {
+            ok: 1,
+            tampered: vec![],
+            missing: vec!["b.json".into()],
+            unexpected: vec![],
+        };
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn verify_report_with_only_unexpected_is_not_clean() {
+        let r = VerifyReport {
+            ok: 1,
+            tampered: vec![],
+            missing: vec![],
+            unexpected: vec!["c.json".into()],
+        };
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn verify_report_with_all_three_categories_is_not_clean() {
+        let r = VerifyReport {
+            ok: 5,
+            tampered: vec!["a".into()],
+            missing: vec!["b".into()],
+            unexpected: vec!["c".into()],
+        };
+        assert!(!r.is_clean());
+    }
+
+    // ── verify_manifest counts and detection ──────────────────────────────
+
+    #[test]
+    fn verify_detects_unexpected_file_added_after_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        std::fs::write(root.join("a.json"), b"x").expect("write");
+        write_manifest(root, &iso_now()).expect("write manifest");
+
+        // Add an unexpected file after the manifest was written.
+        std::fs::write(root.join("b.json"), b"y").expect("write");
+
+        let report = verify_manifest(root).expect("verify");
+        assert!(!report.is_clean());
+        assert_eq!(report.unexpected.len(), 1);
+        assert_eq!(report.tampered.len(), 0);
+        assert_eq!(report.missing.len(), 0);
+        assert_eq!(report.ok, 1);
+    }
+
+    #[test]
+    fn write_manifest_returns_entry_count() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("one.json"), b"1").expect("write");
+        std::fs::write(root.join("two.json"), b"2").expect("write");
+        std::fs::write(root.join("three.json"), b"3").expect("write");
+
+        let count = write_manifest(root, &iso_now()).expect("write manifest");
+        assert_eq!(count, 3, "must report exact entry count, not 0/1");
+    }
+
+    #[test]
+    fn write_manifest_excludes_manifest_file_itself() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("a.json"), b"x").expect("write");
+
+        let count = write_manifest(root, &iso_now()).expect("write manifest");
+        assert_eq!(count, 1, "manifest must not include itself");
+        assert!(root.join(MANIFEST_FILENAME).exists());
+    }
+
+    #[test]
+    fn verify_clean_backup_reports_correct_ok_count() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        for name in &["a.json", "b.json", "c.json", "d.json"] {
+            std::fs::write(root.join(name), name.as_bytes()).expect("write");
+        }
+        write_manifest(root, &iso_now()).expect("write");
+
+        let report = verify_manifest(root).expect("verify");
+        assert!(report.is_clean());
+        assert_eq!(report.ok, 4, "ok counter must increment per matching file");
+    }
 }

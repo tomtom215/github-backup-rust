@@ -233,4 +233,63 @@ mod tests {
         let lock = BackupLock::acquire(dir.path()).expect("acquire after stale removal");
         drop(lock);
     }
+
+    #[test]
+    fn lock_error_display_includes_pid_when_known() {
+        // Pins down the `Some(p)` arm of the Display impl so a mutant
+        // returning the constant `Default::default()` `fmt::Result` is
+        // observable (the formatter buffer would be empty).
+        let err = LockError::AlreadyRunning { pid: Some(1234) };
+        let s = format!("{err}");
+        assert!(s.contains("1234"), "should contain the pid: {s}");
+        assert!(s.contains("already running"), "should describe error: {s}");
+    }
+
+    #[test]
+    fn lock_error_display_handles_unknown_pid() {
+        let err = LockError::AlreadyRunning { pid: None };
+        let s = format!("{err}");
+        assert!(s.contains("already running"));
+        assert!(s.contains("lock file"));
+        assert!(!s.contains("PID "), "should not mention a PID number: {s}");
+    }
+
+    #[test]
+    fn lock_error_display_dir_create_includes_inner() {
+        let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = LockError::DirCreate(inner);
+        let s = format!("{err}");
+        assert!(s.contains("lock directory"), "got: {s}");
+        assert!(s.contains("denied"), "should propagate inner error: {s}");
+    }
+
+    #[test]
+    fn lock_error_display_write_includes_inner() {
+        let inner = std::io::Error::other("boom");
+        let err = LockError::Write(inner);
+        let s = format!("{err}");
+        assert!(s.contains("lock file"), "got: {s}");
+        assert!(s.contains("boom"), "should propagate inner error: {s}");
+    }
+
+    #[test]
+    fn is_process_alive_current_pid_is_true() {
+        // Our own PID is always alive. Pins down the `pid == 0` early-return
+        // (so the body is exercised) and the equality check itself.
+        assert!(
+            is_process_alive(std::process::id()),
+            "current process should be observed as alive"
+        );
+    }
+
+    #[test]
+    fn is_process_alive_pid_zero_is_false() {
+        // PID 0 is the magic "process group" sentinel; the function must
+        // explicitly reject it. Pins down the `== 0` guard against
+        // mutations to `!=`.
+        assert!(
+            !is_process_alive(0),
+            "PID 0 must never be reported as alive"
+        );
+    }
 }

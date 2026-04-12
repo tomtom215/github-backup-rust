@@ -250,3 +250,65 @@ fn compute_rate_eta_reasonable_values() {
     assert!((rate - 10.0).abs() < 0.01, "rate should be 10.0 repos/min");
     assert_eq!(eta, Some(600));
 }
+
+#[test]
+fn compute_rate_eta_zero_cloned_returns_no_eta() {
+    // 0 cloned but plenty of elapsed time: cannot estimate a rate.
+    // Pins down the `cloned == 0` half of the early-return guard.
+    let (rate, eta) = compute_rate_eta(0, std::time::Duration::from_secs(120), 50);
+    assert_eq!(rate, 0.0);
+    assert!(eta.is_none());
+}
+
+#[test]
+fn compute_rate_eta_subsecond_elapsed_returns_no_eta() {
+    // 5 cloned but only 0.5s elapsed: pins down the `elapsed_secs < 1.0`
+    // half of the early-return guard. Distinguishes `<` from `<=` and `==`.
+    let (rate, eta) = compute_rate_eta(5, std::time::Duration::from_millis(500), 50);
+    assert_eq!(rate, 0.0);
+    assert!(eta.is_none());
+}
+
+#[test]
+fn compute_rate_eta_exactly_one_second_returns_real_rate() {
+    // Boundary: elapsed == 1.0s exactly. The guard is `< 1.0`, so this
+    // value is *included* (rate computed). Distinguishes `<` from `<=`.
+    let (rate, eta) = compute_rate_eta(1, std::time::Duration::from_secs(1), 0);
+    assert!((rate - 60.0).abs() < 0.01, "1 repo/sec = 60 repos/min");
+    assert_eq!(eta, Some(0));
+}
+
+#[test]
+fn compute_rate_eta_exactly_one_cloned_with_real_rate() {
+    // Pins down the `pending` arithmetic for ETA.
+    // 2 cloned in 60s → 2 repo/min; 4 pending → ETA = 120s.
+    let (rate, eta) = compute_rate_eta(2, std::time::Duration::from_secs(60), 4);
+    assert!((rate - 2.0).abs() < 0.01, "rate should be 2.0 repos/min");
+    assert_eq!(eta, Some(120));
+}
+
+#[test]
+fn compute_rate_eta_zero_pending_yields_zero_eta() {
+    // 5 cloned, 60s, nothing pending → rate is real, ETA == 0.
+    let (rate, eta) = compute_rate_eta(5, std::time::Duration::from_secs(60), 0);
+    assert!((rate - 5.0).abs() < 0.01);
+    assert_eq!(eta, Some(0));
+}
+
+#[test]
+fn format_rate_one_decimal_place() {
+    // Pins down `format_rate` so the constant-string and empty-string
+    // mutants are both observable.
+    assert_eq!(format_rate(0.0), "0.0");
+    assert_eq!(format_rate(1.0), "1.0");
+    assert_eq!(format_rate(12.345), "12.3");
+    assert_eq!(format_rate(0.05), "0.1"); // round half-up via {:.1}
+}
+
+#[test]
+fn format_rate_is_not_constant_string() {
+    // Two distinct inputs must produce two distinct outputs.
+    assert_ne!(format_rate(1.0), format_rate(2.0));
+    assert_ne!(format_rate(7.5), "");
+    assert_ne!(format_rate(7.5), "xyzzy");
+}

@@ -203,4 +203,91 @@ mod tests {
         let headers = make_headers(&[]);
         assert!(RateLimitInfo::oauth_scopes(&headers).is_empty());
     }
+
+    // ── Additional edge cases pinned down for mutation testing ────────────
+
+    #[test]
+    fn rate_limit_info_is_exhausted_false_when_remaining_positive() {
+        // Pin down the negative case for `is_exhausted` so a mutant
+        // returning the constant `true` is observable.
+        let info = RateLimitInfo {
+            limit: 5000,
+            remaining: 1,
+            reset_timestamp: 9_999_999_999,
+            used: 4999,
+        };
+        assert!(!info.is_exhausted());
+    }
+
+    #[test]
+    fn rate_limit_info_is_exhausted_false_when_full() {
+        let info = RateLimitInfo {
+            limit: 5000,
+            remaining: 5000,
+            reset_timestamp: 9_999_999_999,
+            used: 0,
+        };
+        assert!(!info.is_exhausted());
+    }
+
+    #[test]
+    fn rate_limit_info_used_defaults_to_limit_minus_remaining() {
+        // When the `x-ratelimit-used` header is absent, `from_headers`
+        // computes `used = limit - remaining`. Pins down that arithmetic.
+        let headers = make_headers(&[
+            ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-remaining", "4250"),
+            ("x-ratelimit-reset", "1714521600"),
+        ]);
+        let info = RateLimitInfo::from_headers(&headers).expect("parse");
+        assert_eq!(info.used, 750);
+    }
+
+    #[test]
+    fn rate_limit_info_from_headers_returns_none_for_non_numeric_value() {
+        let headers = make_headers(&[
+            ("x-ratelimit-limit", "abc"),
+            ("x-ratelimit-remaining", "4999"),
+            ("x-ratelimit-reset", "1714521600"),
+        ]);
+        assert!(RateLimitInfo::from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn retry_after_returns_none_for_non_numeric() {
+        let headers = make_headers(&[("retry-after", "soon")]);
+        assert!(RateLimitInfo::retry_after(&headers).is_none());
+    }
+
+    #[test]
+    fn oauth_scopes_filters_empty_entries() {
+        // Trailing comma or double comma should not produce empty scope strings.
+        let headers = make_headers(&[("x-oauth-scopes", "repo,, gist,")]);
+        let scopes = RateLimitInfo::oauth_scopes(&headers);
+        assert_eq!(scopes, vec!["repo", "gist"]);
+    }
+
+    #[test]
+    fn seconds_until_reset_zero_at_reset_returns_buffer() {
+        // Boundary: now == reset → no wait + the buffer.
+        let info = RateLimitInfo {
+            limit: 5000,
+            remaining: 0,
+            reset_timestamp: 500,
+            used: 5000,
+        };
+        assert_eq!(info.seconds_until_reset(500), RESET_BUFFER_SECS);
+    }
+
+    #[test]
+    fn seconds_until_reset_one_second_before() {
+        let info = RateLimitInfo {
+            limit: 5000,
+            remaining: 0,
+            reset_timestamp: 1001,
+            used: 5000,
+        };
+        // 1 + RESET_BUFFER_SECS
+        assert_eq!(info.seconds_until_reset(1000), 1 + RESET_BUFFER_SECS);
+    }
 }
