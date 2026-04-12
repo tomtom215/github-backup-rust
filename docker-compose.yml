@@ -3,52 +3,68 @@
 #
 # Docker Compose configurations for github-backup-rust.
 #
+# By default, every service pulls the published multi-arch image from
+# GHCR (`ghcr.io/tomtom215/github-backup-rust:latest`). To build from a
+# local checkout instead, uncomment the `build: .` line under any
+# service and comment out the `image:` line, or override with:
+#
+#     docker compose build
+#
+# Environment variables are loaded from `.env` in the same directory as
+# this file. Copy `compose.example.env` to `.env` and fill in your
+# secrets before running any of the services below.
+#
 # Profiles:
-#   (default)  – local filesystem backup
-#   s3         – backup JSON metadata to AWS S3
-#   b2         – backup JSON metadata to Backblaze B2 (S3-compatible)
-#   minio      – backup to self-hosted MinIO
+#   (default)  – local filesystem backup (mounts ./backups and ./config.toml)
+#   s3         – backup to AWS S3
+#   b2         – backup to Backblaze B2 (S3-compatible)
+#   minio      – backup to self-hosted MinIO (bundled as a side service)
 #   codeberg   – push mirrors to Codeberg after backup
 #
 # Usage:
-#   # Local backup:
-#   GITHUB_TOKEN=ghp_xxx docker compose run --rm backup octocat --all
+#   # Local backup to ./backups/, reading ./config.toml:
+#   docker compose run --rm backup octocat --all
 #
 #   # S3 backup:
-#   GITHUB_TOKEN=ghp_xxx \
-#   AWS_ACCESS_KEY_ID=AKID AWS_SECRET_ACCESS_KEY=SECRET \
 #   docker compose --profile s3 run --rm backup-s3 octocat --all
 #
 #   # Codeberg mirror:
-#   GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_token \
 #   docker compose --profile codeberg run --rm backup-codeberg octocat --all
+
+# Shared anchor: every service uses the same base image and volume layout.
+x-image: &image ghcr.io/tomtom215/github-backup-rust:latest
+
+x-common: &common
+  image: *image
+  # build: .                         # uncomment to build from local checkout
+  volumes:
+    - ./backups:/backup              # where backup output is written
+    - ./config.toml:/etc/github-backup/config.toml:ro  # optional config file
+  environment:
+    GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required — see compose.example.env}
 
 services:
   # ── Local filesystem backup ────────────────────────────────────────────────
   backup:
-    build: .
-    image: github-backup-rust:latest
-    volumes:
-      - ./data:/backup
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-    # Pass remaining arguments via the command:
-    # docker compose run --rm backup octocat --all
-    #
-    # Or use --output inside the container:
-    command: ["--output", "/backup"]
+    <<: *common
+    # Pass the owner and additional flags on the command line:
+    #   docker compose run --rm backup octocat --all
+    # The default command just points --output at the mounted volume; any
+    # arguments after the service name are appended by Compose.
+    command:
+      - "--config"
+      - "/etc/github-backup/config.toml"
+      - "--output"
+      - "/backup"
 
   # ── AWS S3 metadata sync ───────────────────────────────────────────────────
   backup-s3:
+    <<: *common
     profiles: [s3]
-    build: .
-    image: github-backup-rust:latest
-    volumes:
-      - ./data:/backup
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
     command:
       - "--output"
       - "/backup"
@@ -59,15 +75,12 @@ services:
 
   # ── Backblaze B2 (S3-compatible) ───────────────────────────────────────────
   backup-b2:
+    <<: *common
     profiles: [b2]
-    build: .
-    image: github-backup-rust:latest
-    volumes:
-      - ./data:/backup
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      AWS_ACCESS_KEY_ID: ${B2_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${B2_APP_KEY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      AWS_ACCESS_KEY_ID: ${B2_KEY_ID:?B2_KEY_ID is required}
+      AWS_SECRET_ACCESS_KEY: ${B2_APP_KEY:?B2_APP_KEY is required}
     command:
       - "--output"
       - "/backup"
@@ -98,16 +111,13 @@ services:
       retries: 5
 
   backup-minio:
+    <<: *common
     profiles: [minio]
-    build: .
-    image: github-backup-rust:latest
     depends_on:
       minio:
         condition: service_healthy
-    volumes:
-      - ./data:/backup
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
     command:
@@ -122,21 +132,18 @@ services:
 
   # ── Codeberg mirror ────────────────────────────────────────────────────────
   backup-codeberg:
+    <<: *common
     profiles: [codeberg]
-    build: .
-    image: github-backup-rust:latest
-    volumes:
-      - ./data:/backup
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      MIRROR_TOKEN: ${MIRROR_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      MIRROR_TOKEN: ${MIRROR_TOKEN:?MIRROR_TOKEN is required}
     command:
       - "--output"
       - "/backup"
       - "--mirror-to"
       - "${MIRROR_URL:-https://codeberg.org}"
       - "--mirror-owner"
-      - "${MIRROR_OWNER}"
+      - "${MIRROR_OWNER:?MIRROR_OWNER is required}"
 
 volumes:
   minio-data:

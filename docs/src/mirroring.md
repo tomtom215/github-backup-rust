@@ -75,7 +75,7 @@ github-backup octocat \
 ```yaml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
       MIRROR_TOKEN: "${CODEBERG_TOKEN}"

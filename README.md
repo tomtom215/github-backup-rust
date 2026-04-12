@@ -16,29 +16,89 @@ SDK), and ships an optional full-screen interactive TUI.
 
 ---
 
+## Install
+
+`github-backup` is **not published to crates.io**. Releases ship as
+pre-built binaries on GitHub Releases, multi-arch container images on
+GHCR, and source install from Git. Pick whichever suits your host.
+
+### 1. Pre-built binary (recommended)
+
+Download the latest binary for your platform from the
+[**Releases page**](https://github.com/tomtom215/github-backup-rust/releases),
+verify the SHA-256 checksum, and place the binary on your `$PATH`.
+
+```bash
+# Linux x86_64 example (replace VERSION and target as needed)
+VERSION=0.3.2
+TARGET=linux-x86_64
+curl -LO "https://github.com/tomtom215/github-backup-rust/releases/download/v${VERSION}/github-backup-${TARGET}"
+curl -LO "https://github.com/tomtom215/github-backup-rust/releases/download/v${VERSION}/github-backup-${TARGET}.sha256"
+sha256sum -c "github-backup-${TARGET}.sha256"
+install -m 0755 "github-backup-${TARGET}" /usr/local/bin/github-backup
+```
+
+Supported targets: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
+`macos-aarch64`, `windows-x86_64.exe`. Every release is signed with
+[SLSA Level 2 build provenance](https://slsa.dev/); verify with:
+
+```bash
+gh attestation verify "github-backup-${TARGET}" \
+  --repo tomtom215/github-backup-rust
+```
+
+### 2. Docker / Docker Compose
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR
+on every release.
+
+```bash
+docker pull ghcr.io/tomtom215/github-backup-rust:latest
+
+docker run --rm \
+  -e GITHUB_TOKEN="$GITHUB_TOKEN" \
+  -v "$PWD/backups:/backup" \
+  ghcr.io/tomtom215/github-backup-rust:latest \
+  octocat --output /backup --all
+```
+
+For a persistent, reproducible setup, use the bundled Compose file:
+
+```bash
+cp compose.example.env .env
+$EDITOR .env                                # set GITHUB_TOKEN etc.
+docker compose run --rm backup octocat --all
+```
+
+The Compose file ships profiles for S3 (`--profile s3`), Backblaze B2
+(`--profile b2`), self-hosted MinIO (`--profile minio`, bundles a
+side service), and Codeberg / Forgejo / Gitea mirroring (`--profile
+codeberg`). See `docker-compose.yml` for the full list.
+
+### 3. Build from source
+
+Requires a Rust toolchain meeting the MSRV in `Cargo.toml`
+(currently **1.88**).
+
+```bash
+cargo install --git https://github.com/tomtom215/github-backup-rust \
+  --tag v0.3.2 \
+  github-backup
+```
+
+Omit `--tag` to track `main`. The binary lands in `$CARGO_HOME/bin`
+(by default `~/.cargo/bin`), which should already be on your `$PATH`
+after a standard `rustup` install.
+
 ## Quick Start
 
 ```bash
-# Install from source (requires Rust toolchain)
-cargo install --git https://github.com/tomtom215/github-backup-rust github-backup
-
-# Or download a pre-built binary from the GitHub Releases page
-# https://github.com/tomtom215/github-backup-rust/releases
-
 # Launch the interactive TUI (recommended first-run experience)
 export GITHUB_TOKEN=ghp_your_token_here
 github-backup octocat --tui
 
 # Or run non-interactively
 github-backup octocat --output /var/backup/github --all
-
-# Or build and run with Docker
-docker build -t github-backup .
-docker run --rm \
-  -e GITHUB_TOKEN="$GITHUB_TOKEN" \
-  -v /var/backup/github:/backup \
-  github-backup \
-  octocat --output /backup --all
 ```
 
 ## Interactive TUI

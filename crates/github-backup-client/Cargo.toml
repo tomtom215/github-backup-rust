@@ -12,6 +12,9 @@ documentation.workspace = true
 keywords.workspace      = true
 categories.workspace    = true
 
+# Internal workspace crate. Not published to crates.io.
+publish                 = false
+
 [dependencies]
 github-backup-types = { workspace = true }
 tokio = { workspace = true }
