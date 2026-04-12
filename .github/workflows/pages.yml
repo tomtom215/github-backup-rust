@@ -25,16 +25,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install mdBook
-        run: cargo install mdbook --locked
+      - name: Install mdBook and link checker
+        # Pin mdBook to match the version used in ci.yml. book.toml enables
+        # [output.linkcheck], so mdbook-linkcheck must be installed or the
+        # build fails with "The command `mdbook-linkcheck` wasn't found".
+        run: |
+          cargo install mdbook --version "0.4.40" --locked
+          cargo install mdbook-linkcheck --locked
 
       - name: Build book
         run: mdbook build docs
 
       - name: Upload Pages artifact
+        # With the linkcheck backend enabled, mdBook emits each backend into
+        # its own subdirectory (docs/book/html/ for HTML, docs/book/linkcheck/
+        # for the link-check report). Publish only the HTML tree.
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/book/
+          path: docs/book/html/
 
   deploy:
     name: Deploy to GitHub Pages

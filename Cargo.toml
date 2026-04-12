@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version       = "0.3.1"
+version       = "0.3.2"
 edition       = "2021"
 rust-version  = "1.88"
 authors       = ["Tom F"]
@@ -65,15 +65,17 @@ zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 
 # Workspace crates.
 #
-# Each entry carries an explicit `version =` so that `cargo publish` writes a
-# proper version requirement to the published `.crate` archive.  Local
-# development continues to use the `path =` source.
-github-backup-types  = { path = "crates/github-backup-types",  version = "0.3.1" }
-github-backup-client = { path = "crates/github-backup-client", version = "0.3.1" }
-github-backup-core   = { path = "crates/github-backup-core",   version = "0.3.1" }
-github-backup-mirror = { path = "crates/github-backup-mirror", version = "0.3.1" }
-github-backup-s3     = { path = "crates/github-backup-s3",     version = "0.3.1" }
-github-backup-tui    = { path = "crates/github-backup-tui",    version = "0.3.1" }
+# No `version =` pin is required: every member is marked `publish = false`
+# in its own `Cargo.toml`, so these dependencies are only ever resolved via
+# the local `path =` source. This project does not publish to crates.io —
+# releases are pre-built binaries on GitHub Releases, multi-arch container
+# images on GHCR, and source install via `cargo install --git`.
+github-backup-types  = { path = "crates/github-backup-types"  }
+github-backup-client = { path = "crates/github-backup-client" }
+github-backup-core   = { path = "crates/github-backup-core"   }
+github-backup-mirror = { path = "crates/github-backup-mirror" }
+github-backup-s3     = { path = "crates/github-backup-s3"     }
+github-backup-tui    = { path = "crates/github-backup-tui"    }
 
 # TOML config file parsing
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

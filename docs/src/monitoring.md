@@ -23,7 +23,7 @@ github-backup octocat \
 
 ```json
 {
-  "tool_version": "0.3.1",
+  "tool_version": "0.3.2",
   "owner": "octocat",
   "started_at": "2026-01-15T04:00:00Z",
   "duration_secs": 142.7,

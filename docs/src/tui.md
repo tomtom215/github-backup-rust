@@ -28,7 +28,7 @@ The title bar lists five screens.  Press the corresponding number key to
 switch at any time.
 
 ```
- github-backup v0.3.1  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
+ github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
 ```
 
 ### 1 — Dashboard

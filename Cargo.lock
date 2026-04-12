@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-client"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64",
  "bytes",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-mirror"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bytes",
  "github-backup-types",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-s3"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-tui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "github-backup-client",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-types"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "criterion",
  "proptest",

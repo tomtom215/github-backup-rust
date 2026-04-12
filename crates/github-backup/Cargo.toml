@@ -12,6 +12,11 @@ documentation.workspace = true
 keywords.workspace      = true
 categories.workspace    = true
 
+# Not published to crates.io. This project ships as pre-built binaries
+# on GitHub Releases, multi-arch container images on GHCR, and source
+# install via `cargo install --git`. See docs/src/getting-started/installation.md.
+publish                 = false
+
 [[bin]]
 name = "github-backup"
 path = "src/main.rs"

@@ -8,7 +8,7 @@
 docker run --rm \
   -e GITHUB_TOKEN=ghp_xxx \
   -v /var/backup/github:/backup \
-  ghcr.io/tomtom215/github-backup:latest \
+  ghcr.io/tomtom215/github-backup-rust:latest \
   octocat --output /backup --all
 ```
 
@@ -28,7 +28,7 @@ docker build -t github-backup .
 # docker-compose.yml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
     command: >
@@ -48,7 +48,7 @@ services:
 ```yaml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
       MIRROR_TOKEN: "${CODEBERG_TOKEN}"
@@ -67,7 +67,7 @@ services:
 ```yaml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
@@ -87,7 +87,7 @@ services:
 ```yaml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
       AWS_ACCESS_KEY_ID: "${B2_KEY_ID}"
@@ -120,7 +120,7 @@ services:
       - minio_data:/data
 
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     depends_on:
       - minio
     environment:
@@ -148,7 +148,7 @@ volumes:
 ```yaml
 services:
   backup-cron:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
     # Use a shell wrapper to run on schedule
@@ -175,7 +175,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     labels:
       ofelia.enabled: "true"
       ofelia.job-exec.backup.schedule: "@daily"
@@ -194,7 +194,7 @@ Mount a config file instead of long command lines:
 ```yaml
 services:
   backup:
-    image: ghcr.io/tomtom215/github-backup:latest
+    image: ghcr.io/tomtom215/github-backup-rust:latest
     environment:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
     command: --config /config/backup.toml

@@ -10,15 +10,15 @@
 #
 # Job dependency graph:
 #
-#   validate ──┬──► ci (matrix) ──┬──► binaries ──┐
-#              └──► security ─────┤               ├──► github-release ──► publish
-#                                 ├──► package ───┤                       (crates-io env)
-#                                 └──► publish-dry-run ─┘
-#                                                 │
-#                                                 └──► docker
+#   validate ──┬──► ci (matrix) ──┐
+#              └──► security ─────┼──► binaries ──┬──► github-release
+#                                 └──────────────►└──► docker
 #
-# The `publish` job targets a protected GitHub Environment named `crates-io`
-# that requires manual reviewer approval before any crate is uploaded.
+# This project does NOT publish to crates.io. Releases ship as:
+#   * pre-built binaries for five targets, attached to the GitHub Release
+#   * multi-arch container images on GHCR (`ghcr.io/<repo>:<tag>`)
+#   * source install via `cargo install --git`
+# Every workspace crate is marked `publish = false` in its `Cargo.toml`.
 
 name: Release
 
@@ -91,11 +91,15 @@ jobs:
 
           # All member crates inherit `version.workspace = true`, so we only
           # need to check `[workspace.package].version` in the root manifest.
+          #
+          # NOTE: the leading regex uses `^[^"]*"` (not `.*"`) because awk
+          # regexes are greedy — `.*"` would match through the closing quote
+          # and leave an empty string.
           WS_VER=$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/                     { in_section = 0 }
             in_section && /^[[:space:]]*version[[:space:]]*=/ {
-              gsub(/.*"/, "", $0); gsub(/".*/, "", $0); print; exit
+              gsub(/^[^"]*"/, "", $0); gsub(/".*/, "", $0); print; exit
             }
           ' Cargo.toml)
 
@@ -267,80 +271,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ── Job 5: Package every publishable crate ─────────────────────────────────
-  package:
-    name: Package crates
-    needs: [ci, security]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write      # OIDC token for SLSA build provenance
-      attestations: write  # write attestation back to the repository
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build .crate archives for every workspace member
-        shell: bash
-        run: |
-          echo "::group::cargo package --workspace"
-          cargo package --workspace --no-verify
-          echo "::endgroup::"
-
-          echo "::group::Archive sizes"
-          ls -lh target/package/*.crate
-          echo "::endgroup::"
-
-      - name: Generate SHA-256 checksums for the .crate archives
-        shell: bash
-        run: |
-          cd target/package
-          sha256sum ./*.crate | tee SHA256SUMS-crates.txt
-
-      # SLSA Level 2 build provenance — links the .crate artefacts to this
-      # workflow run; verifiable later with `gh attestation verify`.
-      - name: Attest build provenance (SLSA)
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: target/package/*.crate
-
-      - name: Upload .crate archives
-        uses: actions/upload-artifact@v7
-        with:
-          name: crate-archives
-          path: |
-            target/package/*.crate
-            target/package/SHA256SUMS-crates.txt
-          retention-days: 90
-          if-no-files-found: error
-
-  # ── Job 6: Publish dry-run (catches packaging errors before crates.io) ─────
-  publish-dry-run:
-    name: Publish dry-run
-    needs: [ci, security]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Verify packages are publishable
-        shell: bash
-        run: |
-          # Use `cargo package --workspace` instead of `cargo publish --dry-run`
-          # because publish --dry-run resolves dependencies from the live
-          # crates.io index, which fails for intra-workspace crates whose new
-          # versions aren't published yet. `cargo package` resolves workspace
-          # dependencies locally.
-          echo "::group::cargo package --workspace"
-          cargo package --workspace
-          echo "::endgroup::"
-          echo "::notice::All workspace crates pass package validation"
-
-  # ── Job 7: Create the GitHub release with binaries, .crate archives, notes ─
+  # ── Job 5: Create the GitHub release with binaries and notes ──────────────
   github-release:
     name: Create GitHub release
-    needs: [validate, binaries, package, publish-dry-run]
+    needs: [validate, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create release, upload assets
@@ -353,12 +287,6 @@ jobs:
           path: dist/
           pattern: github-backup-*
           merge-multiple: true
-
-      - name: Download .crate archives
-        uses: actions/download-artifact@v4
-        with:
-          name: crate-archives
-          path: dist/
 
       - name: Compute combined SHA256SUMS
         shell: bash
@@ -439,11 +367,13 @@ jobs:
             ls -lh dist/
             echo "\`\`\`"
             echo ""
-            echo "### Next step"
-            echo "Approve the **crates-io** deployment environment to publish to crates.io."
+            echo "### Install"
+            echo "- Pre-built binary: download from the release page above"
+            echo "- Docker: \`docker pull ghcr.io/${{ github.repository }}:${VERSION}\`"
+            echo "- Source: \`cargo install --git https://github.com/${{ github.repository }} --tag ${TAG} github-backup\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Job 8: Publish container image to GHCR ─────────────────────────────────
+  # ── Job 6: Publish container image to GHCR ─────────────────────────────────
   docker:
     name: Build and push image to GHCR
     needs: [validate, binaries]
@@ -479,110 +409,3 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-
-  # ── Job 9: Publish to crates.io (protected environment, requires approval) ─
-  publish:
-    name: Publish to crates.io
-    needs: [validate, github-release]
-    runs-on: ubuntu-latest
-    # The 'crates-io' environment requires a manual approval step.
-    # Configure it at: Settings → Environments → crates-io → Required reviewers
-    environment:
-      name: crates-io
-      url: https://crates.io/crates/github-backup/${{ needs.validate.outputs.version }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Publish workspace crates in dependency order
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        shell: bash
-        run: |
-          VERSION="${{ needs.validate.outputs.version }}"
-
-          # Helper: idempotent publish with retry and yank-recovery.
-          #
-          #   1. "already uploaded"  → unyank if needed and treat as success.
-          #   2. dependency "is yanked" → wait for index propagation and retry.
-          #   3. transient failures → exponential backoff up to 5 attempts.
-          publish_crate() {
-            local crate="$1"
-            local max_attempts=5
-            local attempt=1
-
-            echo "::group::cargo publish — $crate v$VERSION"
-            while (( attempt <= max_attempts )); do
-              echo "Attempt $attempt/$max_attempts: publishing $crate v$VERSION"
-
-              if cargo publish -p "$crate" 2>&1 | tee /tmp/publish-${crate}.log; then
-                echo "::endgroup::"
-                return 0
-              fi
-
-              if grep -q "already uploaded" /tmp/publish-${crate}.log; then
-                echo "::warning::$crate v$VERSION is already published — unyanking (if yanked) and skipping."
-                cargo yank --undo "$crate@$VERSION" 2>&1 || true
-                echo "Waiting 30s for crates.io index to propagate unyank..."
-                sleep 30
-                echo "::endgroup::"
-                return 0
-              fi
-
-              if grep -q "is yanked" /tmp/publish-${crate}.log; then
-                local wait=$(( 15 * attempt ))
-                echo "::warning::dependency appears yanked in index — waiting ${wait}s for propagation (attempt $attempt/$max_attempts)."
-                sleep "$wait"
-                attempt=$(( attempt + 1 ))
-                continue
-              fi
-
-              local wait=$(( 2 ** attempt ))
-              if (( attempt < max_attempts )); then
-                echo "::warning::publish failed — retrying in ${wait}s (attempt $attempt/$max_attempts)."
-                sleep "$wait"
-                attempt=$(( attempt + 1 ))
-              else
-                echo "::error::cargo publish -p $crate failed after $max_attempts attempts"
-                cat /tmp/publish-${crate}.log
-                echo "::endgroup::"
-                exit 1
-              fi
-            done
-          }
-
-          # Publish in topological dependency order. `cargo publish` waits for
-          # each crate to appear in the crates.io index before returning, so no
-          # explicit sleep is needed between non-recovery steps.
-          #
-          # Dependency graph:
-          #   types  ──►  client  ──►  core  ──┐
-          #          ──►  mirror  ─────────────┤
-          #               s3      ─────────────┼──►  tui  ──►  github-backup
-          #                                    ┘
-          publish_crate github-backup-types
-          publish_crate github-backup-s3
-          publish_crate github-backup-client
-          publish_crate github-backup-mirror
-          publish_crate github-backup-core
-          publish_crate github-backup-tui
-          publish_crate github-backup
-
-          {
-            echo "## Published to crates.io"
-            echo ""
-            echo "| Crate | Link |"
-            echo "|-------|------|"
-            echo "| github-backup-types  | [crates.io](https://crates.io/crates/github-backup-types/${VERSION}) |"
-            echo "| github-backup-s3     | [crates.io](https://crates.io/crates/github-backup-s3/${VERSION}) |"
-            echo "| github-backup-client | [crates.io](https://crates.io/crates/github-backup-client/${VERSION}) |"
-            echo "| github-backup-mirror | [crates.io](https://crates.io/crates/github-backup-mirror/${VERSION}) |"
-            echo "| github-backup-core   | [crates.io](https://crates.io/crates/github-backup-core/${VERSION}) |"
-            echo "| github-backup-tui    | [crates.io](https://crates.io/crates/github-backup-tui/${VERSION}) |"
-            echo "| github-backup        | [crates.io](https://crates.io/crates/github-backup/${VERSION}) |"
-            echo ""
-            echo "> docs.rs may take a few minutes to build and index the documentation."
-          } >> "$GITHUB_STEP_SUMMARY"
