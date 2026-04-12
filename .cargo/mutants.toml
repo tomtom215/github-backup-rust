@@ -136,5 +136,31 @@ exclude_globs = [
     "crates/github-backup-core/src/backup/wiki.rs",
 ]
 
+# ── Mutant-level exclusions (regex on the `--list` output) ────────────────────
+#
+# These are individual mutants that have a documented reason to be skipped,
+# distinct from whole-file exclusions above.
+exclude_re = [
+    # `lock.rs:179` and `lock.rs:189` live inside a
+    # `#[cfg(all(unix, not(target_os = "linux")))]` block — the macOS / BSD
+    # branch of `is_process_alive`.  Linux CI cannot compile that branch, so
+    # cargo-mutants statically generates the mutants from the source AST but
+    # they have no effect on a Linux build (the surrounding cfg removes the
+    # whole block from the compiled code).  They will always survive on
+    # Linux despite the function itself being well-tested for the Linux path.
+    'lock\.rs:1(79|89)',
+
+    # `lock.rs:97` is the `match e.kind() == ErrorKind::AlreadyExists`
+    # guard inside `BackupLock::acquire`.  Killing this mutant requires the
+    # test to inject a non-`AlreadyExists` `io::Error` from
+    # `try_create_exclusive` — but the only realistic way to trigger that is
+    # via a permission-denied filesystem, and the CI runner executes as root
+    # which bypasses POSIX permission checks.  The acquire/release
+    # round-trip and the stale-PID-removal path are both covered by direct
+    # tests; only this exact error-classification branch is unreachable in
+    # CI.
+    'lock\.rs:97',
+]
+
 # Per-mutant test timeout multiplier (relative to the baseline test run).
 timeout_multiplier = 3.0
