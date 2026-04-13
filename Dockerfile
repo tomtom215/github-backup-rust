@@ -33,14 +33,18 @@ COPY crates/github-backup-tui/Cargo.toml     crates/github-backup-tui/Cargo.toml
 COPY crates/github-backup/Cargo.toml         crates/github-backup/Cargo.toml
 
 # Create stub source files so `cargo fetch` can resolve the dependency graph
-# before the real source code is copied.
+# before the real source code is copied. Any `[[bench]]`, `[[bin]]`,
+# `[[test]]`, or `[[example]]` targets declared in the manifests must also be
+# stubbed out, otherwise Cargo refuses to parse the manifest.
 RUN for crate in github-backup-types github-backup-client github-backup-core \
         github-backup-mirror github-backup-s3 github-backup-tui; do \
       mkdir -p crates/${crate}/src && \
       echo "" > crates/${crate}/src/lib.rs; \
     done && \
     mkdir -p crates/github-backup/src && \
-    echo "fn main(){}" > crates/github-backup/src/main.rs
+    echo "fn main(){}" > crates/github-backup/src/main.rs && \
+    mkdir -p crates/github-backup-types/benches && \
+    echo "fn main(){}" > crates/github-backup-types/benches/glob.rs
 
 RUN cargo fetch
 
