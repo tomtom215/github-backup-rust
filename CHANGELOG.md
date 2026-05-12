@@ -9,7 +9,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added (Unraid)
+
+- **Community Applications template** at `unraid/github-backup.xml`
+  authored against the **Unraid v7.2.x DockerMan schema** and the
+  current (2026) CA submission guidelines.  Surfaces every important
+  option as a WebUI form field: `GITHUB_TOKEN` (masked), output
+  volume, `GITHUB_OWNER`, run-mode dropdown (`--all`, `--doctor`,
+  `--check`, `--list-scopes`, `--verify`, `--tui`,
+  `--print-config-template`), free-form `BACKUP_FLAGS`, GHES URL
+  overrides, OAuth client ID, AES-256-GCM encryption key (also
+  masked), webhook URL, `RUST_LOG`, and `HTTPS_PROXY`.  Advanced
+  fields hidden behind the "Advanced View" toggle.
+- **`docker/entrypoint.sh` wrapper** keeps the existing CLI / Compose
+  / Kubernetes invocation contract (positional argv passed through
+  verbatim) while *also* reconstructing argv from env vars when none
+  are supplied — the workflow Unraid CA uses.  Whitelists
+  `BACKUP_MODE`, rejects shell metacharacters in `BACKUP_FLAGS`, and
+  refuses unknown mode tokens with a clear error.
+- **`unraid/ca_profile.xml`** developer profile picked up by CA so
+  the "by tomtom215" link on the template lands on the project repo.
+- **`unraid/README.md`** walks through installation, first-run
+  diagnostic, scheduled-backup pattern via the User Scripts plugin,
+  restore, verify, local testing, and the CA submission flow.
+- **`unraid/icon.png`** placeholder 256×256 PNG (regeneratable via
+  `unraid/make_icon.py`, stdlib-only).
+- **Dockerfile updated** to install the new entrypoint wrapper and
+  use it (`ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]`).
+  Existing `docker run … github-backup OWNER --all` invocations are
+  unaffected.
+
+### Added (Docker / Compose)
+
+- **`.dockerignore`** prunes `target/`, `.git/`, `.env`, editor /
+  IDE clutter, and local backups from the build context.  Previously
+  every `docker build` uploaded the entire workspace (often several
+  GiB) to the daemon, making the build slow by minutes.
+- **OCI image labels** baked into the Dockerfile
+  (`org.opencontainers.image.source`, `…title`, `…description`,
+  `…licenses`, `…vendor`, `…base.name`).  Registries, Dependabot, and
+  Renovate use these to link back to the source repository.
+- **Tini as PID 1** in the runtime image so `docker stop` /
+  Kubernetes pod eviction delivers SIGTERM cleanly to the backup
+  process — which writes its checkpoint, releases its lock, and
+  exits with the conventional 143 code instead of being SIGKILLed.
+- **`VOLUME ["/backup"]`** declaration so `docker inspect` shows
+  exactly where output lands; the existing non-root `backup` user
+  (now pinned to UID/GID 1000 for predictable bind-mount semantics)
+  already owns that directory.
+- **`--profile doctor`** Compose service runs the pre-flight check
+  inside the image: confirms git, network, TLS, and the token before
+  the first scheduled cron run.
+- **`--profile tui`** Compose service with `tty: true` +
+  `stdin_open: true` so ratatui renders correctly under Compose.
+- **`--profile verify`** Compose service for SHA-256 manifest checks.
+- **`--profile gitlab`** Compose service for GitLab.com / self-hosted
+  GitLab mirror push (matching the existing `codeberg` profile).
+- **`init: true`** on every backup service as a belt-and-braces
+  injection of Docker's bundled tini in case the image's own tini is
+  bypassed on older Docker versions.
+
+### Changed (Docker / Compose)
+
+- **`config.toml` is no longer auto-mounted** by the default
+  Compose service.  Previously the bind mount `./config.toml` failed
+  on a fresh checkout because the file did not exist.  Mount it
+  explicitly when you need it:
+  `docker compose run --rm -v $PWD/config.toml:/etc/github-backup/config.toml:ro backup --config /etc/github-backup/config.toml`
+- **Every Compose service propagates the full env-var set** —
+  `GITHUB_API_URL`, `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`,
+  `BACKUP_NOTIFY_WEBHOOK`, `BACKUP_ENCRYPT_KEY`,
+  `GITHUB_BACKUP_RESTORE_YES`.  All optional; unset values are
+  forwarded as empty strings which clap ignores.
+- **`compose.example.env` is fully annotated** and documents every
+  variable, including the new restore-confirmation env var, the
+  optional GHES variables, and the AES-256-GCM encryption key.
+- **`DOCKER.md` rewritten** with a profile matrix, a pre-flight
+  workflow, a Kubernetes CronJob example, and `--doctor` /
+  `--check` / `--list-scopes` troubleshooting recipes.
+
+### Changed (binary)
+
+- **`NO_COLOR` now follows the no-color.org spec literally**: the
+  variable must be **set and non-empty** to disable ANSI.  An empty
+  value (a common pattern for declaring "pass through" variables in
+  Dockerfiles and systemd unit files) no longer accidentally
+  suppresses colour.  Affects both `init_tracing` and the
+  banner-rendering helpers.
+
+### Added
+
+- **`--doctor` self-diagnostic** runs every prerequisite check (git
+  binary + version, output writability, credential type, network
+  reachability of the configured API host, system TLS roots) and
+  prints a colour-coded pass/fail report. Exit status is `0` when
+  every blocking check passes, `1` otherwise. The fastest way to
+  confirm a fresh install will succeed before scheduling cron / CI.
+- **`--check` configuration-validation mode** is a superset of
+  `--doctor` that additionally echoes the resolved configuration
+  (owner, output, api_url, concurrency, computed OAuth scope set).
+  Performs no backup work and writes no files.
+- **`--list-scopes`** prints exactly which OAuth scopes the current
+  flag set needs, formatted as a copy-paste-able list for
+  https://github.com/settings/tokens/new. Replaces the "guess and
+  iterate" workflow new users typically follow.
+- **Friendly quickstart** is now printed when `github-backup` is run
+  with no arguments at all, in place of the old one-line error.
+  Walks the user through token creation, env export, and a working
+  command line. Detects ANSI / NO_COLOR.
+- **Pre-run plan banner** previews owner, output, concurrency,
+  enabled categories, and — when a backup-history file exists — an
+  ETA based on the last successful run. Skipped under `--quiet` so
+  cron / journald output stays machine-friendly.
+- **End-of-run summary banner** with colour/icon-coded pass/warn/fail
+  status, repo/issue/PR counters, and a formatted elapsed time. When
+  zero repositories were processed, an inline hint suggests checking
+  the OWNER spelling, scope, and category flags.
+- **Inline examples** in `--help` via clap's `after_help`: complete,
+  copy-paste-able invocations for the six most common scenarios
+  (full user backup, TUI, doctor, scopes, check, Codeberg mirror).
+- **`--print-config-template`** (from the previous unreleased entry)
+  remains. The template is unit-tested to parse and to keep flagging
+  every REQUIRED field.
+
+### Changed
+
+- **GitHub token format is now validated** at the doctor / check
+  level: classic PAT (`ghp_`), fine-grained PAT (`github_pat_`),
+  OAuth (`gho_`), and server-to-server (`ghu_` / `ghs_` / `ghr_`)
+  are recognised explicitly. Unknown-prefix tokens emit a warning
+  but are not rejected (custom GHES installations sometimes use
+  bespoke prefixes).
+- **`git` binary detection runs at doctor-time** with a
+  platform-specific install hint (`brew install git` on macOS,
+  package-manager string on Linux, `winget install Git.Git` on
+  Windows). Saves new users from a several-minutes-in stall.
+- **Error messages now include an actionable hint** when the raw
+  error text matches a well-known failure pattern: 401 (token
+  rejected), 403 (missing scope, with a pointer to `--list-scopes`),
+  404 (wrong target), rate-limit exhaustion, git-missing, network
+  unreachable, TLS, disk-full. Hints are emitted as a second `error!`
+  line tagged `hint:`.
+
+### Security
+
+- **Token redaction in error bodies**: any string the binary is
+  about to display via `error!()` is now passed through
+  `redact_secrets()`, which replaces every recognised GitHub token
+  prefix with `<prefix>_<redacted>`. Defence in depth — the rest of
+  the codebase already takes care to keep tokens out of error
+  strings, but a misbehaving proxy that echoes a request URL could
+  in principle still surface a token in `--verbose` output. This
+  scrubber catches the last hop.
+
+### Added (previous unreleased entry below)
+
+- **`--print-config-template`** flag prints an annotated TOML configuration
+  template to stdout and exits, so new operators can bootstrap a working
+  config without hunting through documentation. The template is bundled
+  with the binary and unit-tested to remain parseable and to document
+  every required field.
+- **`GITHUB_BACKUP_RESTORE_YES=1`** environment variable is now accepted
+  as an alternative to `--restore-yes`, so CI pipelines that cannot easily
+  add flags can still authorise non-interactive restore. Non-interactive
+  mode now prints both escape hatches in its rejection message.
+- **`NO_COLOR` / `CLICOLOR_FORCE`** are now honoured by the log
+  formatter, following the standard observability conventions. The
+  default is "ANSI on TTY, off otherwise" so logs piped to files stay
+  plain UTF-8.
+- **Owner-name validation** rejects path-traversal payloads (`..`, `/`,
+  `\`, NUL, control characters) before any directories are created. The
+  authoritative validation still belongs to GitHub's API — this is a
+  defense-in-depth net for typos and accidental shell-injection.
+- **Up-front writability probe** on the output directory: a tiny marker
+  file is created and removed at lock-acquire time so a read-only mount
+  or permissions issue is surfaced immediately, not after hundreds of
+  API calls.
+
+### Changed
+
+- **HTTP retries** now apply exponential back-off **with jitter**
+  (0–999 ms drawn from a deterministic clock-seeded PRNG, no extra
+  dependency) so many concurrent workers do not retry in lock-step on a
+  shared rate-limit bucket.
+- **Back-off caps**: every rate-limit and 5xx retry is now clamped at
+  five minutes (`MAX_BACKOFF_SECS`). A pathological `Retry-After` or
+  `X-RateLimit-Reset` header can no longer pause a backup for hours.
+- **Response body limits**: every JSON API response is capped at 16 MiB
+  (`MAX_RESPONSE_BYTES`). Binary release-asset downloads remain
+  unbounded as before.
+- **OAuth device-flow polling** is deadline-aware: the sleep before
+  each poll is clamped to the remaining session lifetime so an
+  expiry is surfaced immediately as `OAuthExpired` instead of a vague
+  network timeout. A heart-beat log line every 60 s reports
+  `seconds_remaining` so the operator knows the session is still
+  alive.
+- **Report and Prometheus textfile writes are now atomic**
+  (`tmp` + `rename`). The node_exporter textfile collector or any other
+  consumer can no longer scrape a half-written file when the backup
+  process is interrupted mid-write.
+- **Anonymous-credential UX**: when no token / device-auth is supplied
+  but the requested categories require admin/private scope, the run is
+  refused up-front with an actionable error rather than failing
+  silently inside the engine.
+- **Refactored** the GET/POST retry logic in the HTTP client into a
+  single shared `execute_with_retry` helper, removing ~100 lines of
+  duplicated code while preserving the existing semantics.
+
+### Security
+
+- **`Credential::Debug` now redacts the token value** — previously the
+  auto-derived `Debug` impl would have leaked the literal token through
+  any `tracing::debug!("{cred:?}")` call. The `GitHubClient::Debug`
+  impl was already redacting at the wrapping level; this closes the
+  inner gap.
 
 ---
 

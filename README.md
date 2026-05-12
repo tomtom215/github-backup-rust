@@ -72,10 +72,30 @@ docker compose run --rm backup octocat --all
 
 The Compose file ships profiles for S3 (`--profile s3`), Backblaze B2
 (`--profile b2`), self-hosted MinIO (`--profile minio`, bundles a
-side service), and Codeberg / Forgejo / Gitea mirroring (`--profile
-codeberg`). See `docker-compose.yml` for the full list.
+side service), Codeberg / Forgejo / Gitea mirroring (`--profile
+codeberg`), GitLab mirroring (`--profile gitlab`), pre-flight checks
+(`--profile doctor`), the interactive TUI (`--profile tui`), and
+integrity verification (`--profile verify`).  See `docker-compose.yml`
+for the full list.
 
-### 3. Build from source
+### 3. Unraid (Community Applications)
+
+A Community Applications template is bundled at `unraid/github-backup.xml`.
+Inside the Unraid WebUI, add the template URL under *Settings →
+Community Applications → Settings → Add Container → Template URL*:
+
+```
+https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/unraid/github-backup.xml
+```
+
+The template exposes every important option as a form field (token
+masked, output volume, run mode dropdown, GHES URLs, encryption key,
+webhook), and the image's wrapper entrypoint auto-builds argv from
+those env vars while keeping the regular `docker run … OWNER --all`
+invocation working unchanged.  Schedule recurring backups via the
+User Scripts plugin — see `unraid/README.md` for the full walkthrough.
+
+### 4. Build from source
 
 Requires a Rust toolchain meeting the MSRV in `Cargo.toml`
 (currently **1.88**).

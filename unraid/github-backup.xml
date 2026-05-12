@@ -1,0 +1,131 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>github-backup</Name>
+  <Repository>ghcr.io/tomtom215/github-backup-rust:latest</Repository>
+  <Registry>https://github.com/tomtom215/github-backup-rust/pkgs/container/github-backup-rust</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://forums.unraid.net/topic/REPLACE_WITH_SUPPORT_THREAD_ID-github-backup-rust/</Support>
+  <Project>https://github.com/tomtom215/github-backup-rust</Project>
+  <Overview>[b]github-backup[/b] is a CLI tool that backs up every kind of data GitHub keeps on a user or organisation — repositories (mirror / bare / shallow), issues, pull requests, releases, gists, wikis, topics, branches, deploy keys, collaborators, workflows, environments, discussions, projects, packages, and account relationships.&#xD;
+&#xD;
+[b]Run modes[/b] (set [code]BACKUP_MODE[/code] in the template):&#xD;
+[b]--doctor[/b] — pre-flight check (git, network, TLS, token). Run this once on first install.&#xD;
+[b]--all[/b] — back up everything (the normal scheduled mode).&#xD;
+[b]--verify[/b] — verify the SHA-256 manifest of an existing backup.&#xD;
+[b]--check[/b] — validate config + connectivity without performing a backup.&#xD;
+[b]--list-scopes[/b] — print the OAuth scopes needed for the current flags.&#xD;
+[b]--tui[/b] — open the interactive terminal UI (use the Console button).&#xD;
+&#xD;
+This container is a one-shot tool: it runs to completion and exits. To schedule recurring backups, install the [b]User Scripts[/b] plugin from Community Applications, add a script that runs [code]docker start github-backup[/code], and set a cron entry (e.g. [code]0 2 * * *[/code] for 2 am daily).&#xD;
+&#xD;
+[b]Security[/b] — the image runs as a non-root user (UID/GID 1000), uses rustls (no OpenSSL), holds no inbound ports, and signs every git clone via [code]GIT_ASKPASS[/code] so the token never appears in the process list. Backup metadata can additionally be AES-256-GCM encrypted before any S3 upload — set [code]BACKUP_ENCRYPT_KEY[/code] to a 32-byte hex value (generate with [code]openssl rand -hex 32[/code]).&#xD;
+&#xD;
+[b]Documentation[/b]: https://tomtom215.github.io/github-backup-rust/</Overview>
+  <Category>Backup: Tools: Utilities:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/unraid/github-backup.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/unraid/icon.png</Icon>
+  <ExtraParams>--rm</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>github-backup is a CLI tool that backs up every kind of data GitHub keeps on a user or organisation — repositories (mirror / bare / shallow), issues, pull requests, releases, gists, wikis, topics, branches, deploy keys, collaborators, workflows, environments, discussions, projects, packages, and account relationships.
+
+This container is a one-shot tool: it runs to completion and exits. To schedule recurring backups, install the User Scripts plugin from Community Applications, add a script that runs `docker start github-backup`, and set a cron entry (e.g. `0 2 * * *` for 2 am daily).
+
+See the upstream project README and docs for the complete flag reference.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish/>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/backups/github/</HostDir>
+      <ContainerDir>/backup</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value/>
+      <Name>GITHUB_OWNER</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>GITHUB_TOKEN</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>--all</Value>
+      <Name>BACKUP_MODE</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>BACKUP_FLAGS</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>GITHUB_API_URL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>GITHUB_CLONE_HOST</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>GITHUB_OAUTH_CLIENT_ID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>BACKUP_ENCRYPT_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>BACKUP_NOTIFY_WEBHOOK</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>info</Value>
+      <Name>RUST_LOG</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>HTTPS_PROXY</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Labels/>
+  <Changes>### 2026.05.12
+- Initial Unraid Community Applications template (matches binary v0.3.2).
+- Bridge networking, /backup volume, masked GITHUB_TOKEN field.
+- Exposes run mode as a dropdown (`--all`, `--doctor`, `--verify`, …).
+- Advanced-view fields for GitHub Enterprise Server (`GITHUB_API_URL`, `GITHUB_CLONE_HOST`), OAuth device flow (`GITHUB_OAUTH_CLIENT_ID`), at-rest encryption (`BACKUP_ENCRYPT_KEY`), and webhook notification (`BACKUP_NOTIFY_WEBHOOK`).
+- Uses tini as PID 1 for clean SIGTERM handling on `docker stop`.</Changes>
+  <Requires>An Unraid share to write backups to (default: `/mnt/user/backups/github/`).</Requires>
+  <MinVer>7.0.0</MinVer>
+  <Config Name="Output Directory" Target="/backup" Default="/mnt/user/backups/github/" Mode="rw" Description="Where GitHub backup data is written.  Point this at an Unraid share with enough space — a complete backup of an active org can be tens of GiB." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/backups/github/</Config>
+  <Config Name="GitHub Owner" Target="GITHUB_OWNER" Default="" Mode="" Description="The GitHub username or organisation to back up — the first positional argument the tool needs.  Example: octocat" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="GitHub Token" Target="GITHUB_TOKEN" Default="" Mode="" Description="Personal access token used to authenticate to the GitHub API.  Classic PAT (`ghp_…`) or fine-grained PAT (`github_pat_…`).  For a complete backup including private data, the token needs the `repo` and `read:org` scopes.  Run with mode `--list-scopes` to see exactly what the current flag set requires.&#xD;&#xD;Generate at: https://github.com/settings/tokens/new" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Run Mode" Target="BACKUP_MODE" Default="--all|--doctor|--check|--list-scopes|--verify|--tui|--print-config-template" Mode="" Description="What this container does on each run.  `--all` = back up everything (the normal scheduled mode).  `--doctor` = pre-flight self-test (no API write).  `--check` = validate config + connectivity.  `--list-scopes` = print needed OAuth scopes.  `--verify` = verify the SHA-256 manifest of an existing backup.  `--tui` = interactive UI (run via the Console button)." Type="Variable" Display="always" Required="false" Mask="false">--all</Config>
+  <Config Name="Extra CLI Flags" Target="BACKUP_FLAGS" Default="" Mode="" Description="Free-form flags appended after the Run Mode.  Examples: `--org` (treat owner as an organisation), `--concurrency 8`, `--include-repos 'rust-*'`, `--since 2025-01-01T00:00:00Z`, `--manifest`.  See the project documentation for the full reference.  Shell metacharacters are rejected up-front to prevent injection from copy-paste mistakes." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="GitHub API URL (GHES only)" Target="GITHUB_API_URL" Default="" Mode="" Description="Override the API base URL for GitHub Enterprise Server.  Leave empty for github.com.  Example: https://github.example.com/api/v3" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="GitHub Clone Host (split GHES)" Target="GITHUB_CLONE_HOST" Default="" Mode="" Description="Override the git clone hostname when GHES has split API / clone endpoints behind separate load balancers." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OAuth App Client ID" Target="GITHUB_OAUTH_CLIENT_ID" Default="" Mode="" Description="GitHub OAuth App client ID used by `--device-auth` (pass `--device-auth` in Extra CLI Flags).  Create the app at https://github.com/settings/developers — the device flow requires no callback URL." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="At-Rest Encryption Key" Target="BACKUP_ENCRYPT_KEY" Default="" Mode="" Description="32-byte hex-encoded AES-256-GCM key used for encryption before S3 upload.  Leave empty if you do not use S3 sync, or generate with `openssl rand -hex 32`.  Lose this key and you lose the ability to decrypt your backups." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Notification Webhook" Target="BACKUP_NOTIFY_WEBHOOK" Default="" Mode="" Description="HTTPS URL receiving a JSON POST with the backup outcome (`success` / `failure`).  Notification failures never affect the backup's exit code." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Log Level" Target="RUST_LOG" Default="info|debug|trace|warn|error" Mode="" Description="`tracing` filter for log verbosity.  `info` is the default; raise to `debug` while diagnosing a problem." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+  <Config Name="HTTPS Proxy" Target="HTTPS_PROXY" Default="" Mode="" Description="Route all GitHub API and git clone traffic through this proxy.  Example: http://proxy.example.com:3128 (or http://user:pass@proxy:3128).  Honoured by both the Rust HTTP client and git." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>

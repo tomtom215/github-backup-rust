@@ -179,6 +179,14 @@ async fn request_device_code(
 
 /// Polls the token endpoint until the user authorises, the token expires, or
 /// an unrecoverable error occurs.
+///
+/// Periodically logs a heart-beat with the time remaining so the operator
+/// can tell whether the session is still alive (and how long they have left
+/// to enter the code).  The sleep between polls is **deadline-aware** so we
+/// don't sleep past the expiry — if the next poll would land after the
+/// deadline we wait until the deadline and then return [`OAuthExpired`].
+///
+/// [`OAuthExpired`]: ClientError::OAuthExpired
 async fn poll_for_token(
     http: &HyperClient,
     client_id: &str,
@@ -187,14 +195,37 @@ async fn poll_for_token(
     expires_in_secs: u64,
 ) -> Result<String, ClientError> {
     let mut poll_interval = Duration::from_secs(interval_secs.max(5));
-    let deadline = std::time::Instant::now() + Duration::from_secs(expires_in_secs);
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_secs(expires_in_secs);
+    let mut last_heartbeat = started;
+    // Log a heart-beat at most every 60 seconds.
+    let heartbeat_period = Duration::from_secs(60);
 
     loop {
-        if std::time::Instant::now() >= deadline {
+        // Bail out early if the deadline has already passed.
+        let now = std::time::Instant::now();
+        if now >= deadline {
             return Err(ClientError::OAuthExpired);
         }
 
-        tokio::time::sleep(poll_interval).await;
+        // Sleep until the next poll, but never past the deadline.  This
+        // ensures the operator gets the explicit "expired" error instead
+        // of a vague "timed out".
+        let remaining = deadline.saturating_duration_since(now);
+        let sleep_for = poll_interval.min(remaining);
+        tokio::time::sleep(sleep_for).await;
+
+        // Heart-beat so the user knows the session is alive.
+        if last_heartbeat.elapsed() >= heartbeat_period {
+            let remaining = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+            info!(
+                seconds_remaining = remaining,
+                "still waiting for OAuth authorisation"
+            );
+            last_heartbeat = std::time::Instant::now();
+        }
 
         debug!("polling GitHub for OAuth token");
 

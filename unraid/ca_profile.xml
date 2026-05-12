@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!--
+  Community Applications developer profile.
+
+  Picked up by CA when the user clicks the "by tomtom215" link on any
+  template that originates from this repository.  Keep `Author`,
+  `Profile`, and `Repo` in sync with the GitHub account that owns the
+  repository, otherwise CA will display the template as "uncredited".
+-->
+<Profile>
+  <Author>tomtom215</Author>
+  <Profile>https://github.com/tomtom215</Profile>
+  <Repo>https://github.com/tomtom215/github-backup-rust</Repo>
+  <ProfilePic>https://avatars.githubusercontent.com/u/tomtom215</ProfilePic>
+</Profile>

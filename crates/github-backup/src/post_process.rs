@@ -337,9 +337,28 @@ pub fn write_prometheus_metrics(
     ));
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
+        }
     }
-    std::fs::write(path, out).map_err(|e| format!("write metrics: {e}"))
+    // Atomic rename: node_exporter's textfile collector polls this path
+    // every ~15 s; we must never expose a half-written file or the scrape
+    // will fail with a "key without value" error.
+    write_textfile_atomic(path, out.as_bytes())
+}
+
+/// Writes `bytes` to `path` via a sibling `*.tmp` + rename.  See the comment
+/// in [`write_prometheus_metrics`] for rationale.
+fn write_textfile_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) => path.with_extension(format!("{ext}.tmp")),
+        None => path.with_extension("tmp"),
+    };
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write metrics tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename metrics tmp: {e}")
+    })
 }
 
 /// Compares two backup JSON directories and returns a human-readable summary.

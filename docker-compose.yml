@@ -4,58 +4,108 @@
 # Docker Compose configurations for github-backup-rust.
 #
 # By default, every service pulls the published multi-arch image from
-# GHCR (`ghcr.io/tomtom215/github-backup-rust:latest`). To build from a
-# local checkout instead, uncomment the `build: .` line under any
-# service and comment out the `image:` line, or override with:
+# GHCR (`ghcr.io/tomtom215/github-backup-rust:latest`).  To build from a
+# local checkout instead, run:
 #
 #     docker compose build
+#     docker compose run --rm backup octocat --all
 #
 # Environment variables are loaded from `.env` in the same directory as
-# this file. Copy `compose.example.env` to `.env` and fill in your
+# this file.  Copy `compose.example.env` to `.env` and fill in your
 # secrets before running any of the services below.
 #
-# Profiles:
-#   (default)  – local filesystem backup (mounts ./backups and ./config.toml)
-#   s3         – backup to AWS S3
-#   b2         – backup to Backblaze B2 (S3-compatible)
-#   minio      – backup to self-hosted MinIO (bundled as a side service)
-#   codeberg   – push mirrors to Codeberg after backup
+# ── Profiles ───────────────────────────────────────────────────────────────
+#   (default)  – local filesystem backup, output → ./backups/
+#   doctor     – run --doctor pre-flight checks
+#   tui        – interactive full-screen TUI (needs a real terminal)
+#   verify     – verify the integrity of an existing backup
+#   s3         – backup + sync to AWS S3
+#   b2         – backup + sync to Backblaze B2
+#   minio      – backup + sync to self-hosted MinIO (bundled side service)
+#   codeberg   – backup + mirror push to Codeberg / Forgejo / Gitea
+#   gitlab     – backup + mirror push to GitLab.com or self-hosted GitLab
 #
-# Usage:
-#   # Local backup to ./backups/, reading ./config.toml:
+# ── Usage ──────────────────────────────────────────────────────────────────
+#   # First-time pre-flight check (no files written, no API calls billed)
+#   docker compose --profile doctor run --rm doctor octocat
+#
+#   # Local backup to ./backups/
 #   docker compose run --rm backup octocat --all
 #
-#   # S3 backup:
+#   # Interactive TUI (requires a TTY)
+#   docker compose --profile tui run --rm tui octocat
+#
+#   # S3 sync after backup
 #   docker compose --profile s3 run --rm backup-s3 octocat --all
 #
-#   # Codeberg mirror:
+#   # Mirror to Codeberg
 #   docker compose --profile codeberg run --rm backup-codeberg octocat --all
 
-# Shared anchor: every service uses the same base image and volume layout.
+# Shared anchor: every service uses the same base image, volume layout,
+# and minimum security-relevant settings.
 x-image: &image ghcr.io/tomtom215/github-backup-rust:latest
 
 x-common: &common
   image: *image
   # build: .                         # uncomment to build from local checkout
+  # `init: true` lets docker inject tini if for some reason the image's
+  # baked-in tini is not used (e.g. older Docker versions).  Harmless.
+  init: true
   volumes:
     - ./backups:/backup              # where backup output is written
-    - ./config.toml:/etc/github-backup/config.toml:ro  # optional config file
   environment:
     GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required — see compose.example.env}
+    GITHUB_API_URL: ${GITHUB_API_URL-}
+    GITHUB_CLONE_HOST: ${GITHUB_CLONE_HOST-}
+    GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID-}
+    BACKUP_NOTIFY_WEBHOOK: ${BACKUP_NOTIFY_WEBHOOK-}
+    BACKUP_ENCRYPT_KEY: ${BACKUP_ENCRYPT_KEY-}
+    GITHUB_BACKUP_RESTORE_YES: ${GITHUB_BACKUP_RESTORE_YES-}
 
 services:
-  # ── Local filesystem backup ────────────────────────────────────────────────
+  # ── Local filesystem backup (default profile) ──────────────────────────────
+  # No config.toml is mounted by default so a fresh checkout works
+  # immediately.  Mount one explicitly with:
+  #   docker compose run --rm \
+  #     -v $(pwd)/config.toml:/etc/github-backup/config.toml:ro \
+  #     backup --config /etc/github-backup/config.toml
   backup:
     <<: *common
-    # Pass the owner and additional flags on the command line:
-    #   docker compose run --rm backup octocat --all
-    # The default command just points --output at the mounted volume; any
-    # arguments after the service name are appended by Compose.
     command:
-      - "--config"
-      - "/etc/github-backup/config.toml"
       - "--output"
       - "/backup"
+
+  # ── --doctor pre-flight check ──────────────────────────────────────────────
+  # Confirms git, network, token, and TLS before scheduling a real run.
+  doctor:
+    <<: *common
+    profiles: [doctor]
+    command:
+      - "--output"
+      - "/backup"
+      - "--doctor"
+
+  # ── Interactive TUI ────────────────────────────────────────────────────────
+  # Allocates a TTY so ratatui can render.  Use `docker compose run --rm tui`,
+  # not `up`, so the foreground TTY attaches correctly.
+  tui:
+    <<: *common
+    profiles: [tui]
+    tty: true
+    stdin_open: true
+    command:
+      - "--output"
+      - "/backup"
+      - "--tui"
+
+  # ── Verify an existing backup ──────────────────────────────────────────────
+  verify:
+    <<: *common
+    profiles: [verify]
+    command:
+      - "--output"
+      - "/backup"
+      - "--verify"
 
   # ── AWS S3 metadata sync ───────────────────────────────────────────────────
   backup-s3:
@@ -65,6 +115,7 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
+      BACKUP_ENCRYPT_KEY: ${BACKUP_ENCRYPT_KEY-}
     command:
       - "--output"
       - "/backup"
@@ -130,7 +181,7 @@ services:
       - "--s3-endpoint"
       - "http://minio:9000"
 
-  # ── Codeberg mirror ────────────────────────────────────────────────────────
+  # ── Codeberg / Forgejo / Gitea mirror ──────────────────────────────────────
   backup-codeberg:
     <<: *common
     profiles: [codeberg]
@@ -144,6 +195,23 @@ services:
       - "${MIRROR_URL:-https://codeberg.org}"
       - "--mirror-owner"
       - "${MIRROR_OWNER:?MIRROR_OWNER is required}"
+
+  # ── GitLab mirror ──────────────────────────────────────────────────────────
+  backup-gitlab:
+    <<: *common
+    profiles: [gitlab]
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      MIRROR_TOKEN: ${GITLAB_TOKEN:?GITLAB_TOKEN is required}
+    command:
+      - "--output"
+      - "/backup"
+      - "--mirror-to"
+      - "${GITLAB_URL:-https://gitlab.com}"
+      - "--mirror-type"
+      - "gitlab"
+      - "--mirror-owner"
+      - "${GITLAB_NAMESPACE:?GITLAB_NAMESPACE is required}"
 
 volumes:
   minio-data:

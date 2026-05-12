@@ -35,6 +35,10 @@ use github_backup_core::BackupStats;
 /// The report includes counters, elapsed time, tool version, and an ISO 8601
 /// timestamp so monitoring systems can parse and alert on backup health.
 ///
+/// The schema is **append-only stable**: existing keys keep the same name and
+/// type across releases.  Monitoring jobs may pin to the set of keys
+/// currently documented in the module-level doc-comment.
+///
 /// # Errors
 ///
 /// Returns an error string if the file cannot be created or written.
@@ -45,12 +49,16 @@ pub fn write_report(
     started_at_unix: u64,
 ) -> Result<(), String> {
     let started_iso = unix_secs_to_iso8601(started_at_unix);
+    let elapsed = stats.elapsed_secs();
+    let finished_iso = unix_secs_to_iso8601(started_at_unix.saturating_add(elapsed as u64));
 
     let report = serde_json::json!({
         "tool_version": env!("CARGO_PKG_VERSION"),
+        "schema_version": 1,
         "owner": owner,
         "started_at": started_iso,
-        "duration_secs": stats.elapsed_secs(),
+        "finished_at": finished_iso,
+        "duration_secs": elapsed,
         "repos_discovered": stats.repos_discovered(),
         "repos_backed_up": stats.repos_backed_up(),
         "repos_skipped": stats.repos_skipped(),
@@ -63,10 +71,32 @@ pub fn write_report(
     });
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create report directory: {e}"))?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create report directory: {e}"))?;
+        }
     }
-    std::fs::write(path, json).map_err(|e| format!("cannot write report: {e}"))
+    write_atomic(path, json.as_bytes())
+}
+
+/// Writes `bytes` to `path` atomically.
+///
+/// Writes to a sibling `*.tmp` file first, then renames over `path`.  This
+/// avoids leaving a half-written report visible to monitoring systems if the
+/// process is interrupted mid-write — a common failure mode when the host
+/// is shutting down (the same SIGTERM that kills `github-backup` also kills
+/// the Prometheus node exporter that reads the file moments later).
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) => path.with_extension(format!("{ext}.tmp")),
+        None => path.with_extension("tmp"),
+    };
+    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write report tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        // Best-effort cleanup so we don't leave the .tmp on the filesystem.
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot rename report tmp into place: {e}")
+    })
 }
 
 /// Formats a Unix timestamp (seconds since epoch) as an RFC 3339 / ISO 8601
@@ -185,5 +215,39 @@ mod tests {
         let s = unix_secs_to_iso8601(1_700_000_000);
         assert_eq!(s.len(), 20);
         assert!(is_valid_iso8601(&s), "output must be valid ISO 8601: {s}");
+    }
+
+    // ── write_atomic ──────────────────────────────────────────────────────
+
+    #[test]
+    fn write_atomic_creates_target_and_removes_tmp() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("report.json");
+        super::write_atomic(&target, b"{\"ok\": true}").expect("write");
+        assert_eq!(
+            std::fs::read(&target).expect("read"),
+            b"{\"ok\": true}",
+            "target should contain the bytes we wrote"
+        );
+        // Neither `report.tmp` nor `report.json.tmp` should remain.
+        for ext in ["tmp", "json.tmp"] {
+            let stray = target.with_extension(ext);
+            assert!(
+                !stray.exists(),
+                "tmp file {} must not be left behind",
+                stray.display()
+            );
+        }
+    }
+
+    #[test]
+    fn write_atomic_overwrites_existing_file() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("r.json");
+        std::fs::write(&target, b"old").expect("seed");
+        super::write_atomic(&target, b"new").expect("overwrite");
+        assert_eq!(std::fs::read(&target).expect("read"), b"new");
     }
 }

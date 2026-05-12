@@ -1,0 +1,56 @@
+# Anything that does not need to be sent to the Docker daemon as part of
+# the build context.  Without this file the entire `target/` directory
+# (often several GiB after `cargo build`) is uploaded on every `docker
+# build`, slowing the build by minutes.
+#
+# Order is intentionally permissive: list big, well-known build outputs
+# first, then VCS / editor / OS metadata, then anything we explicitly
+# do not want shipped inside the image even if it sneaks into the
+# checkout.
+
+# ── Build artefacts ──────────────────────────────────────────────────
+target/
+**/target/
+*.rs.bk
+**/*.profraw
+mutants.out/
+
+# ── Docker / CI ──────────────────────────────────────────────────────
+docker-compose.override.yml
+docker-compose.*.yml
+.dockerignore
+
+# ── Local config & secrets ───────────────────────────────────────────
+.env
+*.env
+!compose.example.env
+*.pem
+*.key
+*.crt
+config.toml
+backups/
+data/
+
+# ── Documentation build output ───────────────────────────────────────
+docs/book/
+docs/.book-cache/
+
+# ── VCS metadata ─────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# ── Editor / IDE ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*~
+
+# ── Per-user OS clutter ──────────────────────────────────────────────
+.cache/
+.tmp/
+.coverage/

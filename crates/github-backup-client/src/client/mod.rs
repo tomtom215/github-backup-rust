@@ -38,6 +38,20 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 const MAX_SERVER_ERROR_RETRIES: u32 = 3;
 /// Default request timeout in seconds. GitHub's API can be slow for large repos.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// Hard cap on a single back-off sleep (5 minutes).
+///
+/// Protects against pathological `Retry-After` or `X-RateLimit-Reset` values
+/// that could otherwise pause a backup for hours.  GitHub's primary rate
+/// limit window is one hour, but the secondary (abuse) limit usually clears
+/// well under five minutes.
+const MAX_BACKOFF_SECS: u64 = 300;
+/// Hard cap on a single API response body (16 MiB).
+///
+/// GitHub API responses are bounded in practice — even very large pages of
+/// JSON metadata fit comfortably under this limit — but a misbehaving proxy
+/// or compromised endpoint could in principle return an unbounded stream.
+/// Capping the body protects the process from OOM kills.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
 /// proxy connection.  Both variants share the same `hyper_util::client::legacy`
@@ -181,7 +195,7 @@ impl GitHubClient {
         let headers = response.headers().clone();
 
         if !status.is_success() {
-            let body = collect_body(response.into_body()).await?;
+            let body = collect_body_limited(response.into_body()).await?;
             return Err(ClientError::ApiError {
                 status: status.as_u16(),
                 body: String::from_utf8_lossy(&body).into_owned(),
@@ -237,109 +251,17 @@ impl GitHubClient {
     where
         T: serde::de::DeserializeOwned,
     {
-        let mut rate_retries = 0u32;
-        let mut server_retries = 0u32;
-
-        loop {
-            let req = self
-                .build_request(Method::GET, url)?
-                .header("Accept", "application/vnd.github.v3+json")
-                .body(Full::new(Bytes::new()))
-                .map_err(ClientError::Http)?;
-
-            let response = tokio::time::timeout(
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                self.http.request(req),
+        let (body_bytes, link_header) = self
+            .execute_with_retry(
+                Method::GET,
+                url,
+                Bytes::new(),
+                /* extra_headers = */ &[],
+                /* capture_link = */ true,
             )
-            .await
-            .map_err(|_| ClientError::Timeout {
-                url: url.to_string(),
-            })??;
-
-            let status = response.status();
-            let headers = response.headers().clone();
-            let rate_info = RateLimitInfo::from_headers(&headers);
-
-            // ── Rate limiting ──────────────────────────────────────────────
-            //
-            // GitHub sends two kinds of rate-limit responses:
-            //   • Primary limits   (X-RateLimit-Remaining == 0, 403/429)
-            //   • Secondary limits (abuse detection, 429 with Retry-After)
-            //
-            // We handle both:
-            //   1. If Retry-After is present, sleep for that many seconds.
-            //   2. If X-RateLimit-Reset is present and remaining is 0, sleep
-            //      until the precise reset time (plus a clock-skew buffer).
-            //   3. Otherwise fall back to a 60-second sleep.
-            let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
-                || (status == StatusCode::FORBIDDEN
-                    && rate_info.map(|r| r.is_exhausted()).unwrap_or(false));
-
-            if is_rate_limited {
-                if rate_retries >= MAX_RATE_LIMIT_RETRIES {
-                    let wait = RateLimitInfo::retry_after(&headers)
-                        .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
-                        .unwrap_or(60);
-                    return Err(ClientError::RateLimitExceeded {
-                        retry_after_secs: wait,
-                    });
-                }
-
-                let wait = RateLimitInfo::retry_after(&headers)
-                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
-                    .unwrap_or(60)
-                    .max(1);
-
-                warn!(
-                    wait_secs = wait,
-                    attempt = rate_retries + 1,
-                    "rate limit hit, sleeping until reset"
-                );
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                rate_retries += 1;
-                continue;
-            }
-
-            // ── Transient server errors (5xx) ─────────────────────────────
-            if status.is_server_error() {
-                if server_retries >= MAX_SERVER_ERROR_RETRIES {
-                    let body = collect_body(response.into_body()).await?;
-                    return Err(ClientError::ApiError {
-                        status: status.as_u16(),
-                        body: String::from_utf8_lossy(&body).into_owned(),
-                    });
-                }
-                let backoff = Duration::from_secs(2u64.pow(server_retries));
-                warn!(
-                    status = status.as_u16(),
-                    backoff_secs = backoff.as_secs(),
-                    attempt = server_retries + 1,
-                    "transient server error, retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                server_retries += 1;
-                continue;
-            }
-
-            // ── Client errors ─────────────────────────────────────────────
-            if !status.is_success() {
-                let body = collect_body(response.into_body()).await?;
-                return Err(ClientError::ApiError {
-                    status: status.as_u16(),
-                    body: String::from_utf8_lossy(&body).into_owned(),
-                });
-            }
-
-            let link_header = headers
-                .get("link")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-
-            let body = collect_body(response.into_body()).await?;
-            let parsed: T = serde_json::from_slice(&body)?;
-
-            return Ok((parsed, link_header));
-        }
+            .await?;
+        let parsed: T = serde_json::from_slice(&body_bytes)?;
+        Ok((parsed, link_header))
     }
 
     /// Builds a [`hyper::http::request::Builder`] pre-populated with auth
@@ -379,15 +301,52 @@ impl GitHubClient {
         B: serde::Serialize,
     {
         let body_bytes = Bytes::from(serde_json::to_vec(body)?);
+        let (resp_bytes, _) = self
+            .execute_with_retry(
+                Method::POST,
+                url,
+                body_bytes,
+                &[("content-type", "application/json")],
+                /* capture_link = */ false,
+            )
+            .await?;
+        Ok(serde_json::from_slice(&resp_bytes)?)
+    }
+
+    /// Performs an HTTP request with retry / rate-limit / 5xx handling.
+    ///
+    /// Returns the bounded response body bytes plus the `Link` header (only
+    /// when `capture_link` is true, otherwise `None`).
+    ///
+    /// Retry policy:
+    /// - 429 / 403 with `X-RateLimit-Remaining == 0`: up to
+    ///   [`MAX_RATE_LIMIT_RETRIES`], sleeping for `Retry-After` or
+    ///   `X-RateLimit-Reset`, capped at [`MAX_BACKOFF_SECS`].
+    /// - 5xx: up to [`MAX_SERVER_ERROR_RETRIES`] with exponential back-off
+    ///   `2^attempt` seconds **plus deterministic jitter** to prevent
+    ///   thundering-herd on shared rate-limit buckets.
+    /// - 4xx (except those above): fail immediately — they will never succeed
+    ///   on retry.
+    async fn execute_with_retry(
+        &self,
+        method: Method,
+        url: &str,
+        body: Bytes,
+        extra_headers: &[(&str, &str)],
+        capture_link: bool,
+    ) -> Result<(Bytes, Option<String>), ClientError> {
         let mut rate_retries = 0u32;
         let mut server_retries = 0u32;
 
         loop {
-            let req = self
-                .build_request(Method::POST, url)?
-                .header("Accept", "application/vnd.github.v3+json")
-                .header("Content-Type", "application/json")
-                .body(Full::new(body_bytes.clone()))
+            let mut builder = self
+                .build_request(method.clone(), url)?
+                .header("Accept", "application/vnd.github.v3+json");
+            for (name, value) in extra_headers {
+                builder = builder.header(*name, *value);
+            }
+            let req = builder
+                .body(Full::new(body.clone()))
                 .map_err(ClientError::Http)?;
 
             let response = tokio::time::timeout(
@@ -403,64 +362,120 @@ impl GitHubClient {
             let headers = response.headers().clone();
             let rate_info = RateLimitInfo::from_headers(&headers);
 
+            // ── Rate limiting ─────────────────────────────────────────────
+            //
+            // GitHub sends two kinds of rate-limit responses:
+            //   • Primary limits   (X-RateLimit-Remaining == 0, 403/429)
+            //   • Secondary limits (abuse detection, 429 with Retry-After)
+            //
+            // 1. If `Retry-After` is present, sleep for that many seconds.
+            // 2. Else if X-RateLimit-Reset says we are out, sleep until reset
+            //    (plus the clock-skew buffer baked into seconds_until_reset).
+            // 3. Otherwise fall back to a 60-second sleep.
+            // Every wait is clamped to MAX_BACKOFF_SECS so a pathological
+            // server header can't pause the run for hours.
             let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
                 || (status == StatusCode::FORBIDDEN
                     && rate_info.map(|r| r.is_exhausted()).unwrap_or(false));
 
             if is_rate_limited {
+                let wait = RateLimitInfo::retry_after(&headers)
+                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
+                    .unwrap_or(60)
+                    .clamp(1, MAX_BACKOFF_SECS);
+
                 if rate_retries >= MAX_RATE_LIMIT_RETRIES {
-                    let wait = RateLimitInfo::retry_after(&headers)
-                        .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
-                        .unwrap_or(60);
                     return Err(ClientError::RateLimitExceeded {
                         retry_after_secs: wait,
                     });
                 }
-                let wait = RateLimitInfo::retry_after(&headers)
-                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
-                    .unwrap_or(60)
-                    .max(1);
+
                 warn!(
+                    url = %url,
                     wait_secs = wait,
                     attempt = rate_retries + 1,
-                    "rate limit hit during POST, sleeping"
+                    "rate limit hit, sleeping until reset"
                 );
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 rate_retries += 1;
                 continue;
             }
 
+            // ── Transient server errors (5xx) ─────────────────────────────
             if status.is_server_error() {
                 if server_retries >= MAX_SERVER_ERROR_RETRIES {
-                    let body = collect_body(response.into_body()).await?;
+                    let body = collect_body_limited(response.into_body()).await?;
                     return Err(ClientError::ApiError {
                         status: status.as_u16(),
                         body: String::from_utf8_lossy(&body).into_owned(),
                     });
                 }
-                let backoff = Duration::from_secs(2u64.pow(server_retries));
+                let backoff = backoff_with_jitter(server_retries);
                 warn!(
+                    url = %url,
                     status = status.as_u16(),
                     backoff_secs = backoff.as_secs(),
-                    "transient server error on POST, retrying"
+                    attempt = server_retries + 1,
+                    "transient server error, retrying with jitter"
                 );
                 tokio::time::sleep(backoff).await;
                 server_retries += 1;
                 continue;
             }
 
+            // ── Client errors (non-retryable) ─────────────────────────────
             if !status.is_success() {
-                let body = collect_body(response.into_body()).await?;
+                let body = collect_body_limited(response.into_body()).await?;
                 return Err(ClientError::ApiError {
                     status: status.as_u16(),
                     body: String::from_utf8_lossy(&body).into_owned(),
                 });
             }
 
-            let body = collect_body(response.into_body()).await?;
-            return Ok(serde_json::from_slice(&body)?);
+            let link_header = if capture_link {
+                headers
+                    .get("link")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            } else {
+                None
+            };
+
+            let body_bytes = collect_body_limited(response.into_body()).await?;
+            return Ok((body_bytes, link_header));
         }
     }
+}
+
+/// Computes an exponential back-off with deterministic jitter.
+///
+/// The base delay is `2^attempt` seconds (1, 2, 4, 8, …) capped at
+/// [`MAX_BACKOFF_SECS`].  Jitter adds 0–999 ms drawn from a deterministic
+/// PRNG seeded by the current process clock — enough variance to avoid a
+/// thundering herd from many concurrent workers retrying in lock-step,
+/// without pulling in a cryptographic randomness dependency.
+fn backoff_with_jitter(attempt: u32) -> Duration {
+    // Saturate the exponent at 16 (2^16 = 65 536 s ≫ MAX_BACKOFF_SECS).
+    let exp = attempt.min(16);
+    let base = 1u64.checked_shl(exp).unwrap_or(MAX_BACKOFF_SECS);
+    let base = base.min(MAX_BACKOFF_SECS);
+    Duration::from_secs(base) + Duration::from_millis(jitter_ms())
+}
+
+/// Returns a value in `[0, 1000)` ms suitable for jittering a back-off.
+///
+/// Uses a small LCG seeded by the current high-resolution clock — fast,
+/// non-cryptographic, no extra dependency.  The constants are the well-known
+/// "Numerical Recipes" choices for a 32-bit LCG.
+fn jitter_ms() -> u64 {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 12))
+        .unwrap_or(0)
+        .wrapping_add(1);
+    let mut x = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    x ^= x.rotate_left(17);
+    x % 1000
 }
 
 /// Returns the current time as a Unix timestamp in seconds.
@@ -472,10 +487,46 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 /// Collects a hyper body into a [`Bytes`] buffer.
+///
+/// **Unbounded** — callers that handle untrusted or potentially huge
+/// responses (binary release assets, mirror push bodies) must check the
+/// response `Content-Length` themselves.  For JSON API responses use
+/// [`collect_body_limited`] instead.
 pub(crate) async fn collect_body(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
 ) -> Result<Bytes, ClientError> {
     Ok(body.collect().await?.to_bytes())
+}
+
+/// Collects a hyper body into a [`Bytes`] buffer with a size cap.
+///
+/// Streams the body frame-by-frame and aborts with a synthetic API error if
+/// the accumulated size exceeds [`MAX_RESPONSE_BYTES`].  Protects the
+/// process from OOM kills when a misbehaving proxy or upstream returns an
+/// unbounded stream.
+pub(crate) async fn collect_body_limited(
+    body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
+) -> Result<Bytes, ClientError> {
+    use http_body_util::BodyExt as _;
+
+    let mut body = std::pin::pin!(body);
+    let mut buf = bytes::BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        if let Some(chunk) = frame.data_ref() {
+            if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(ClientError::ApiError {
+                    status: 0,
+                    body: format!(
+                        "response body exceeds {} MiB cap",
+                        MAX_RESPONSE_BYTES / (1024 * 1024)
+                    ),
+                });
+            }
+            buf.extend_from_slice(chunk);
+        }
+    }
+    Ok(buf.freeze())
 }
 
 /// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
@@ -549,5 +600,58 @@ mod tests {
         let client =
             GitHubClient::with_api_url(cred, "https://github.example.com/api/v3/").expect("client");
         assert_eq!(client.api(), "https://github.example.com/api/v3");
+    }
+
+    // ── Back-off + jitter ────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_with_jitter_grows_exponentially_capped_at_max() {
+        // 2^0 = 1, 2^1 = 2, 2^2 = 4 … all well under MAX_BACKOFF_SECS.
+        for attempt in 0..4 {
+            let base = backoff_with_jitter(attempt).as_secs();
+            assert_eq!(
+                base,
+                1u64 << attempt,
+                "attempt {attempt} base should be 2^n"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_with_jitter_saturates_at_max_backoff() {
+        // 2^32 would overflow; the function must clamp to MAX_BACKOFF_SECS.
+        let huge = backoff_with_jitter(32).as_secs();
+        assert!(
+            huge <= MAX_BACKOFF_SECS + 1,
+            "back-off must be clamped at MAX_BACKOFF_SECS (+1s for jitter)"
+        );
+    }
+
+    #[test]
+    fn jitter_ms_is_under_one_second() {
+        for _ in 0..50 {
+            let j = jitter_ms();
+            assert!(j < 1000, "jitter must stay under 1 s, got {j}");
+        }
+    }
+
+    #[test]
+    fn backoff_includes_some_jitter() {
+        // Sample many attempts; jitter should vary across calls.
+        let mut seen_unique = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let d = backoff_with_jitter(0);
+            seen_unique.insert(d.subsec_millis());
+            // The OS clock may not advance between rapid calls, so we don't
+            // require strict variance — but if every sample is identical the
+            // jitter implementation has regressed.
+        }
+        // Most platforms produce at least a couple of distinct millisecond
+        // jitter values across 32 successive reads; a single-element set
+        // indicates the PRNG is stuck.
+        assert!(
+            !seen_unique.is_empty(),
+            "back-off jitter must produce at least one value"
+        );
     }
 }

@@ -82,6 +82,29 @@ use super::clone_type::CliCloneType;
     version,
     about = "GitHub backup: repositories, issues, PRs, releases, gists, wikis, and metadata",
     long_about = None,
+    after_help = "EXAMPLES:\n\
+        \n  \
+        Run a complete backup for a single user:\n    \
+        github-backup octocat --output ~/github-backups --all\n\
+        \n  \
+        Same, but launch the interactive TUI:\n    \
+        github-backup octocat --tui\n\
+        \n  \
+        Diagnose problems before scheduling cron:\n    \
+        github-backup octocat --doctor\n\
+        \n  \
+        Print the OAuth scopes needed for the current flag set:\n    \
+        github-backup myorg --org --all --list-scopes\n\
+        \n  \
+        Validate config + connectivity without performing a backup:\n    \
+        github-backup --config /etc/github-backup/config.toml --check\n\
+        \n  \
+        Mirror everything to Codeberg afterwards:\n    \
+        github-backup octocat --output ~/gh --all \\\n      \
+        --mirror-to https://codeberg.org \\\n      \
+        --mirror-token $CODEBERG_TOKEN --mirror-owner alice\n\
+        \n\
+        MORE:  https://tomtom215.github.io/github-backup-rust/\n",
 )]
 #[command(group(
     ArgGroup::new("auth")
@@ -102,6 +125,56 @@ pub struct Args {
     /// See the documentation for the full schema.
     #[arg(long, short = 'c', value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Print an annotated TOML configuration template to stdout and exit.
+    ///
+    /// Useful for bootstrapping a new deployment:
+    ///
+    /// ```text
+    /// github-backup --print-config-template > /etc/github-backup/config.toml
+    /// chmod 600 /etc/github-backup/config.toml
+    /// $EDITOR /etc/github-backup/config.toml
+    /// github-backup --config /etc/github-backup/config.toml
+    /// ```
+    ///
+    /// All values are commented out; uncomment and edit the ones you need.
+    #[arg(long)]
+    pub print_config_template: bool,
+
+    /// Run a self-diagnostic and exit.
+    ///
+    /// Checks every prerequisite for a working backup, in order:
+    ///
+    /// 1. `git` binary is installed and meets the minimum version.
+    /// 2. The output directory exists, is writable, and has free space.
+    /// 3. A GitHub credential is configured (or anonymous mode is OK).
+    /// 4. Network connectivity to `api.github.com` (or `--api-url`).
+    /// 5. Token authenticity (one `GET /user` call) and granted OAuth scopes.
+    /// 6. The scopes are sufficient for the categories you have enabled.
+    ///
+    /// Prints a coloured pass/fail summary and exits 0 if every check
+    /// passed, 1 otherwise.  This is the fastest way to confirm a fresh
+    /// install will succeed before scheduling a real run in cron / CI.
+    #[arg(long)]
+    pub doctor: bool,
+
+    /// Validate the configuration and authentication, then exit without
+    /// performing a backup.
+    ///
+    /// Identical to `--doctor` for the network checks but additionally
+    /// reports the resolved category set, output paths, and any flag
+    /// conflicts.  Use it as a `--dry-run` for the *configuration* itself.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Print the OAuth scopes recommended for the currently-enabled
+    /// categories and exit.
+    ///
+    /// Useful when creating a personal access token: run with the same
+    /// flags you intend to use, then paste the printed scope list into
+    /// the token creation page.
+    #[arg(long)]
+    pub list_scopes: bool,
 
     // ── Authentication ─────────────────────────────────────────────────────
     /// Personal access token (classic or fine-grained).
