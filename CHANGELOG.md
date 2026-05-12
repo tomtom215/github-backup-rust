@@ -11,6 +11,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--doctor` self-diagnostic** runs every prerequisite check (git
+  binary + version, output writability, credential type, network
+  reachability of the configured API host, system TLS roots) and
+  prints a colour-coded pass/fail report. Exit status is `0` when
+  every blocking check passes, `1` otherwise. The fastest way to
+  confirm a fresh install will succeed before scheduling cron / CI.
+- **`--check` configuration-validation mode** is a superset of
+  `--doctor` that additionally echoes the resolved configuration
+  (owner, output, api_url, concurrency, computed OAuth scope set).
+  Performs no backup work and writes no files.
+- **`--list-scopes`** prints exactly which OAuth scopes the current
+  flag set needs, formatted as a copy-paste-able list for
+  https://github.com/settings/tokens/new. Replaces the "guess and
+  iterate" workflow new users typically follow.
+- **Friendly quickstart** is now printed when `github-backup` is run
+  with no arguments at all, in place of the old one-line error.
+  Walks the user through token creation, env export, and a working
+  command line. Detects ANSI / NO_COLOR.
+- **Pre-run plan banner** previews owner, output, concurrency,
+  enabled categories, and — when a backup-history file exists — an
+  ETA based on the last successful run. Skipped under `--quiet` so
+  cron / journald output stays machine-friendly.
+- **End-of-run summary banner** with colour/icon-coded pass/warn/fail
+  status, repo/issue/PR counters, and a formatted elapsed time. When
+  zero repositories were processed, an inline hint suggests checking
+  the OWNER spelling, scope, and category flags.
+- **Inline examples** in `--help` via clap's `after_help`: complete,
+  copy-paste-able invocations for the six most common scenarios
+  (full user backup, TUI, doctor, scopes, check, Codeberg mirror).
+- **`--print-config-template`** (from the previous unreleased entry)
+  remains. The template is unit-tested to parse and to keep flagging
+  every REQUIRED field.
+
+### Changed
+
+- **GitHub token format is now validated** at the doctor / check
+  level: classic PAT (`ghp_`), fine-grained PAT (`github_pat_`),
+  OAuth (`gho_`), and server-to-server (`ghu_` / `ghs_` / `ghr_`)
+  are recognised explicitly. Unknown-prefix tokens emit a warning
+  but are not rejected (custom GHES installations sometimes use
+  bespoke prefixes).
+- **`git` binary detection runs at doctor-time** with a
+  platform-specific install hint (`brew install git` on macOS,
+  package-manager string on Linux, `winget install Git.Git` on
+  Windows). Saves new users from a several-minutes-in stall.
+- **Error messages now include an actionable hint** when the raw
+  error text matches a well-known failure pattern: 401 (token
+  rejected), 403 (missing scope, with a pointer to `--list-scopes`),
+  404 (wrong target), rate-limit exhaustion, git-missing, network
+  unreachable, TLS, disk-full. Hints are emitted as a second `error!`
+  line tagged `hint:`.
+
+### Security
+
+- **Token redaction in error bodies**: any string the binary is
+  about to display via `error!()` is now passed through
+  `redact_secrets()`, which replaces every recognised GitHub token
+  prefix with `<prefix>_<redacted>`. Defence in depth — the rest of
+  the codebase already takes care to keep tokens out of error
+  strings, but a misbehaving proxy that echoes a request URL could
+  in principle still surface a token in `--verbose` output. This
+  scrubber catches the last hop.
+
+### Added (previous unreleased entry below)
+
 - **`--print-config-template`** flag prints an annotated TOML configuration
   template to stdout and exits, so new operators can bootstrap a working
   config without hunting through documentation. The template is bundled
