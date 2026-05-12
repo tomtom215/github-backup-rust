@@ -17,9 +17,11 @@
 //! |-----------|---------|
 //! | Authentication | Personal access token (classic & fine-grained) |
 //! | Pagination | Automatic via `Link` response header |
-//! | Rate limiting | Automatic back-off when `X-RateLimit-Remaining == 0` |
-//! | Retries | Up to 3 retries on transient 5xx responses (exponential back-off) |
+//! | Rate limiting | Automatic back-off when `X-RateLimit-Remaining == 0`, honours `Retry-After`, capped at 5 minutes |
+//! | Retries | Up to 3 retries on transient 5xx with exponential back-off + jitter; 4xx fail fast |
+//! | Body cap | 16 MiB cap on API responses to protect against runaway streams |
 //! | TLS | rustls with platform CA bundle |
+//! | Proxy | Automatic HTTP `CONNECT` tunnelling via `HTTPS_PROXY` |
 //!
 //! # Example
 //!

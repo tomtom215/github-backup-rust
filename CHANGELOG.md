@@ -9,7 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **`--print-config-template`** flag prints an annotated TOML configuration
+  template to stdout and exits, so new operators can bootstrap a working
+  config without hunting through documentation. The template is bundled
+  with the binary and unit-tested to remain parseable and to document
+  every required field.
+- **`GITHUB_BACKUP_RESTORE_YES=1`** environment variable is now accepted
+  as an alternative to `--restore-yes`, so CI pipelines that cannot easily
+  add flags can still authorise non-interactive restore. Non-interactive
+  mode now prints both escape hatches in its rejection message.
+- **`NO_COLOR` / `CLICOLOR_FORCE`** are now honoured by the log
+  formatter, following the standard observability conventions. The
+  default is "ANSI on TTY, off otherwise" so logs piped to files stay
+  plain UTF-8.
+- **Owner-name validation** rejects path-traversal payloads (`..`, `/`,
+  `\`, NUL, control characters) before any directories are created. The
+  authoritative validation still belongs to GitHub's API — this is a
+  defense-in-depth net for typos and accidental shell-injection.
+- **Up-front writability probe** on the output directory: a tiny marker
+  file is created and removed at lock-acquire time so a read-only mount
+  or permissions issue is surfaced immediately, not after hundreds of
+  API calls.
+
+### Changed
+
+- **HTTP retries** now apply exponential back-off **with jitter**
+  (0–999 ms drawn from a deterministic clock-seeded PRNG, no extra
+  dependency) so many concurrent workers do not retry in lock-step on a
+  shared rate-limit bucket.
+- **Back-off caps**: every rate-limit and 5xx retry is now clamped at
+  five minutes (`MAX_BACKOFF_SECS`). A pathological `Retry-After` or
+  `X-RateLimit-Reset` header can no longer pause a backup for hours.
+- **Response body limits**: every JSON API response is capped at 16 MiB
+  (`MAX_RESPONSE_BYTES`). Binary release-asset downloads remain
+  unbounded as before.
+- **OAuth device-flow polling** is deadline-aware: the sleep before
+  each poll is clamped to the remaining session lifetime so an
+  expiry is surfaced immediately as `OAuthExpired` instead of a vague
+  network timeout. A heart-beat log line every 60 s reports
+  `seconds_remaining` so the operator knows the session is still
+  alive.
+- **Report and Prometheus textfile writes are now atomic**
+  (`tmp` + `rename`). The node_exporter textfile collector or any other
+  consumer can no longer scrape a half-written file when the backup
+  process is interrupted mid-write.
+- **Anonymous-credential UX**: when no token / device-auth is supplied
+  but the requested categories require admin/private scope, the run is
+  refused up-front with an actionable error rather than failing
+  silently inside the engine.
+- **Refactored** the GET/POST retry logic in the HTTP client into a
+  single shared `execute_with_retry` helper, removing ~100 lines of
+  duplicated code while preserving the existing semantics.
+
+### Security
+
+- **`Credential::Debug` now redacts the token value** — previously the
+  auto-derived `Debug` impl would have leaked the literal token through
+  any `tracing::debug!("{cred:?}")` call. The `GitHubClient::Debug`
+  impl was already redacting at the wrapping level; this closes the
+  inner gap.
 
 ---
 

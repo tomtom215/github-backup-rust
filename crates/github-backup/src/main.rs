@@ -46,6 +46,14 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Same trick for --print-config-template: handled before full parsing so
+    // operators bootstrapping a fresh install do not have to supply
+    // unrelated required flags first.
+    if std::env::args().any(|a| a == "--print-config-template") {
+        print!("{}", config_template());
+        return ExitCode::SUCCESS;
+    }
+
     let mut args = Args::parse();
 
     // ── TUI mode ──────────────────────────────────────────────────────────────
@@ -119,6 +127,19 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Defense in depth: even though `owner` is supposed to be a GitHub user
+    // or organisation name, it ends up as a path segment under `--output`.
+    // Refuse anything that could escape the output root or break path
+    // construction across operating systems.  The real upstream validation
+    // is done by GitHub's API itself (a malformed owner just 404s), so this
+    // is a safety net for typos and accidental shell-injection.
+    if let Some(ref owner) = args.owner {
+        if let Err(reason) = validate_owner_name(owner) {
+            error!(owner = %owner, "invalid owner name: {reason}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     // ── Verify-only mode ──────────────────────────────────────────────────
     if args.verify {
         let owner = args.owner.as_deref().unwrap();
@@ -184,8 +205,34 @@ async fn main() -> ExitCode {
     };
 
     if matches!(credential, Credential::Anonymous) {
+        // Anonymous mode is supported but the GitHub unauthenticated limit
+        // (60 req/h, no private data) is rarely what the operator actually
+        // wants.  Be loud about it and tell them exactly how to fix it.
+        let asked_for_private = args.private
+            || args.org_members
+            || args.org_teams
+            || args.hooks
+            || args.deploy_keys
+            || args.collaborators
+            || args.action_runs
+            || args.actions
+            || args.packages
+            || args.discussions
+            || args.projects;
+
+        if asked_for_private {
+            error!(
+                "no GitHub credential supplied (--token / GITHUB_TOKEN / --device-auth), \
+                 but private or admin-scoped data was requested. \
+                 Anonymous requests cannot read this data — aborting before partial backup."
+            );
+            return ExitCode::FAILURE;
+        }
+
         warn!(
-            "no token provided — running unauthenticated (public data only, 60 req/h rate limit)"
+            "no GitHub credential supplied — running unauthenticated. \
+             Limited to public data and 60 requests / hour. \
+             Set GITHUB_TOKEN, pass --token, or use --device-auth for a full backup."
         );
     }
 
@@ -273,10 +320,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    let started_at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let started_at_unix = unix_now_secs();
 
     // ── Primary backup ────────────────────────────────────────────────────
     let engine = BackupEngine::new(
@@ -334,10 +378,7 @@ async fn main() -> ExitCode {
     info!("{stats}");
 
     // ── Write backup state ─────────────────────────────────────────────────
-    let finished_at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let finished_at_unix = unix_now_secs();
     {
         let state = BackupState {
             last_successful_run: unix_secs_to_iso8601(started_at_unix),
@@ -631,11 +672,21 @@ fn check_config_permissions(path: &std::path::Path) {
 /// Prints a restore warning banner and, when interactive, asks for explicit
 /// confirmation.
 ///
-/// Returns `true` if the user confirmed (or `--restore-yes` was passed).
-/// Returns `false` if the user declined or stdin is not a TTY and `--restore-yes`
-/// was not supplied.
+/// Returns `true` if the user confirmed.  Confirmation can come from any of:
+/// - The `--restore-yes` CLI flag.
+/// - The `GITHUB_BACKUP_RESTORE_YES=1` environment variable (handy for CI
+///   pipelines where adding a flag is awkward).
+/// - Typing `yes` on a TTY.
+///
+/// Returns `false` if the user declined, stdin is not a TTY, or any of the
+/// above failed.  The non-TTY error message explicitly tells the user *both*
+/// escape hatches so they don't have to dig through `--help`.
 fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
     if restore_yes {
+        return true;
+    }
+    if std::env::var("GITHUB_BACKUP_RESTORE_YES").as_deref() == Ok("1") {
+        info!("GITHUB_BACKUP_RESTORE_YES=1 — proceeding with restore");
         return true;
     }
 
@@ -650,7 +701,9 @@ fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
 
     use std::io::IsTerminal as _;
     if !std::io::stdin().is_terminal() {
-        eprintln!("  stdin is not a TTY — re-run with --restore-yes to confirm.");
+        eprintln!("  stdin is not a TTY — to confirm non-interactively, either:");
+        eprintln!("    • re-run with --restore-yes, or");
+        eprintln!("    • export GITHUB_BACKUP_RESTORE_YES=1");
         eprintln!();
         return false;
     }
@@ -698,7 +751,17 @@ async fn wait_for_shutdown_signal() -> u8 {
 }
 
 /// Initialises the `tracing` subscriber.
+///
+/// Respects the standard observability conventions:
+/// - `RUST_LOG` overrides the level filter when set;
+/// - `NO_COLOR` (any value) disables ANSI colour codes;
+/// - `CLICOLOR_FORCE=1` forces colour even when stderr is not a TTY.
+///
+/// When stderr is not a TTY (e.g. a log file, CI, journald) we default to
+/// no colour so the file contains plain UTF-8 — anyone who wants colour back
+/// can set `CLICOLOR_FORCE=1`.
 fn init_tracing(quiet: bool, verbose: u8) {
+    use std::io::IsTerminal as _;
     use tracing_subscriber::{fmt, EnvFilter};
 
     let level = if quiet {
@@ -713,9 +776,162 @@ fn init_tracing(quiet: bool, verbose: u8) {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let force_color = std::env::var("CLICOLOR_FORCE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let ansi = !no_color && (force_color || std::io::stderr().is_terminal());
+
     fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(ansi)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// Returns an annotated TOML configuration template.
+///
+/// All entries are commented out so an unedited template parses as the
+/// default configuration.  Lines marked `# REQUIRED` flag the minimum
+/// fields a working config typically needs.
+fn config_template() -> &'static str {
+    include_str!("config_template.toml")
+}
+
+/// Current Unix time in seconds.
+///
+/// Falls back to `0` when the system clock is somehow before the epoch
+/// (effectively impossible on any host we run on, but the saturating
+/// fallback avoids a panic in pathological environments).
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Validates a GitHub owner / organisation name as a safe path segment.
+///
+/// Rejects anything that could escape the output directory or break path
+/// construction across operating systems.  Mirrors GitHub's own rules
+/// (alphanumerics and hyphens, no leading/trailing hyphens, 1–39 chars)
+/// but is intentionally a little more permissive on length so that future
+/// GitHub policy changes do not break this client.
+///
+/// The function never tries to be the authoritative "is this a real GitHub
+/// account" check — that responsibility belongs to the API server.  Its
+/// only job is to refuse traversal payloads (`..`, `/`, `\`, NUL) and
+/// other typos that would manifest as confusing later errors.
+fn validate_owner_name(owner: &str) -> Result<(), &'static str> {
+    if owner.is_empty() {
+        return Err("name is empty");
+    }
+    if owner.len() > 100 {
+        return Err("name is longer than 100 characters");
+    }
+    if owner == "." || owner == ".." {
+        return Err("name must not be '.' or '..'");
+    }
+    for c in owner.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => {}
+            '/' | '\\' => return Err("name must not contain path separators"),
+            '\0' => return Err("name must not contain a NUL byte"),
+            _ if c.is_control() => return Err("name must not contain control characters"),
+            _ => return Err("name contains an unsupported character"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use github_backup_types::config::ConfigFile;
+
+    #[test]
+    fn config_template_is_valid_toml() {
+        let toml = config_template();
+        ConfigFile::from_toml_str(toml).expect("embedded template must parse as ConfigFile");
+    }
+
+    #[test]
+    fn config_template_unedited_parses_to_defaults() {
+        // An untouched template (all keys commented out) should yield the
+        // default `ConfigFile` — i.e. every Option<…> is `None`.  This guards
+        // against an accidental uncommented line shipping with the binary.
+        let cfg = ConfigFile::from_toml_str(config_template()).expect("parse");
+        assert!(cfg.owner.is_none(), "untouched template must not set owner");
+        assert!(cfg.token.is_none(), "untouched template must not set token");
+        assert!(
+            cfg.output.is_none(),
+            "untouched template must not set output"
+        );
+        assert!(cfg.all.is_none(), "untouched template must not set all");
+    }
+
+    #[test]
+    fn config_template_documents_required_fields() {
+        let toml = config_template();
+        // Defensive: any key marked REQUIRED in the README + docs must
+        // still be present in the template, otherwise onboarding silently
+        // regresses.
+        assert!(
+            toml.contains("REQUIRED — the GitHub user"),
+            "template must flag owner as REQUIRED"
+        );
+        assert!(
+            toml.contains("REQUIRED — root directory"),
+            "template must flag output as REQUIRED"
+        );
+    }
+
+    // ── validate_owner_name ───────────────────────────────────────────
+
+    #[test]
+    fn validate_owner_accepts_realistic_github_names() {
+        for ok in [
+            "octocat",
+            "GitHub",
+            "tom-tom215",
+            "a",
+            "rust-lang",
+            "github-actions",
+            "user_with_underscore",
+            "ORG-Name42",
+        ] {
+            assert!(
+                validate_owner_name(ok).is_ok(),
+                "{ok:?} should pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_owner_rejects_path_traversal_attempts() {
+        for bad in ["..", ".", "../etc", "foo/bar", "foo\\bar", "/abs", "a/b"] {
+            assert!(
+                validate_owner_name(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_owner_rejects_control_and_special_characters() {
+        for bad in ["foo\0bar", "foo\nbar", "foo\tbar", "foo bar", "foo$bar"] {
+            assert!(
+                validate_owner_name(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_owner_rejects_empty_or_huge() {
+        assert!(validate_owner_name("").is_err());
+        let huge: String = "a".repeat(101);
+        assert!(validate_owner_name(&huge).is_err());
+    }
 }

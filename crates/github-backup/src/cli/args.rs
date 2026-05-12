@@ -103,6 +103,21 @@ pub struct Args {
     #[arg(long, short = 'c', value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Print an annotated TOML configuration template to stdout and exit.
+    ///
+    /// Useful for bootstrapping a new deployment:
+    ///
+    /// ```text
+    /// github-backup --print-config-template > /etc/github-backup/config.toml
+    /// chmod 600 /etc/github-backup/config.toml
+    /// $EDITOR /etc/github-backup/config.toml
+    /// github-backup --config /etc/github-backup/config.toml
+    /// ```
+    ///
+    /// All values are commented out; uncomment and edit the ones you need.
+    #[arg(long)]
+    pub print_config_template: bool,
+
     // ── Authentication ─────────────────────────────────────────────────────
     /// Personal access token (classic or fine-grained).
     ///
