@@ -88,6 +88,14 @@ COPY --from=builder \
     /build/target/release/github-backup \
     /usr/local/bin/github-backup
 
+# Install the env-var-aware entrypoint wrapper.  CLI / Compose users
+# who pass explicit positional args see no behavioural change; users
+# whose launcher only sets env vars (Unraid Community Applications,
+# generic web GUIs) get an argv reconstructed from `GITHUB_OWNER`,
+# `BACKUP_MODE`, and `BACKUP_FLAGS`.
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+
 # Default backup output directory (mount a volume here).
 RUN mkdir -p /backup && chown backup:backup /backup
 
@@ -103,7 +111,10 @@ WORKDIR /backup
 # always export it from the host (`-e NO_COLOR=1`) when piping to a file.
 ENV RUST_LOG=info
 
-# tini + the binary makes signals (SIGTERM from `docker stop`) propagate
-# correctly and the backup's checkpoint / lock cleanup runs.
-ENTRYPOINT ["/sbin/tini", "--", "github-backup"]
-CMD ["--help"]
+# tini + the entrypoint wrapper makes signals (SIGTERM from
+# `docker stop`) propagate correctly and the backup's checkpoint /
+# lock cleanup runs.  The wrapper falls through to `github-backup`
+# with either the supplied argv (CLI / Compose / Kubernetes) or one
+# reconstructed from env vars (Unraid CA WebUI).
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+CMD []

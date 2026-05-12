@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Unraid)
+
+- **Community Applications template** at `unraid/github-backup.xml`
+  authored against the **Unraid v7.2.x DockerMan schema** and the
+  current (2026) CA submission guidelines.  Surfaces every important
+  option as a WebUI form field: `GITHUB_TOKEN` (masked), output
+  volume, `GITHUB_OWNER`, run-mode dropdown (`--all`, `--doctor`,
+  `--check`, `--list-scopes`, `--verify`, `--tui`,
+  `--print-config-template`), free-form `BACKUP_FLAGS`, GHES URL
+  overrides, OAuth client ID, AES-256-GCM encryption key (also
+  masked), webhook URL, `RUST_LOG`, and `HTTPS_PROXY`.  Advanced
+  fields hidden behind the "Advanced View" toggle.
+- **`docker/entrypoint.sh` wrapper** keeps the existing CLI / Compose
+  / Kubernetes invocation contract (positional argv passed through
+  verbatim) while *also* reconstructing argv from env vars when none
+  are supplied — the workflow Unraid CA uses.  Whitelists
+  `BACKUP_MODE`, rejects shell metacharacters in `BACKUP_FLAGS`, and
+  refuses unknown mode tokens with a clear error.
+- **`unraid/ca_profile.xml`** developer profile picked up by CA so
+  the "by tomtom215" link on the template lands on the project repo.
+- **`unraid/README.md`** walks through installation, first-run
+  diagnostic, scheduled-backup pattern via the User Scripts plugin,
+  restore, verify, local testing, and the CA submission flow.
+- **`unraid/icon.png`** placeholder 256×256 PNG (regeneratable via
+  `unraid/make_icon.py`, stdlib-only).
+- **Dockerfile updated** to install the new entrypoint wrapper and
+  use it (`ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]`).
+  Existing `docker run … github-backup OWNER --all` invocations are
+  unaffected.
+
 ### Added (Docker / Compose)
 
 - **`.dockerignore`** prunes `target/`, `.git/`, `.env`, editor /

@@ -4,6 +4,11 @@
 minimal Alpine-based image (~15 MB) containing only `git`, the CA
 bundle, `tini`, and the backup binary.
 
+> Running on **Unraid**?  A Community Applications template is bundled
+> at [`unraid/github-backup.xml`](unraid/README.md).  It points at the
+> same multi-arch GHCR image; the rest of this guide still applies if
+> you want to drop down to the WebUI or `docker run` directly.
+
 Multi-architecture images for `linux/amd64` and `linux/arm64` are
 published to GHCR on every tagged release:
 
