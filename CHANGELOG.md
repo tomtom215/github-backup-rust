@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Docker / Compose)
+
+- **`.dockerignore`** prunes `target/`, `.git/`, `.env`, editor /
+  IDE clutter, and local backups from the build context.  Previously
+  every `docker build` uploaded the entire workspace (often several
+  GiB) to the daemon, making the build slow by minutes.
+- **OCI image labels** baked into the Dockerfile
+  (`org.opencontainers.image.source`, `…title`, `…description`,
+  `…licenses`, `…vendor`, `…base.name`).  Registries, Dependabot, and
+  Renovate use these to link back to the source repository.
+- **Tini as PID 1** in the runtime image so `docker stop` /
+  Kubernetes pod eviction delivers SIGTERM cleanly to the backup
+  process — which writes its checkpoint, releases its lock, and
+  exits with the conventional 143 code instead of being SIGKILLed.
+- **`VOLUME ["/backup"]`** declaration so `docker inspect` shows
+  exactly where output lands; the existing non-root `backup` user
+  (now pinned to UID/GID 1000 for predictable bind-mount semantics)
+  already owns that directory.
+- **`--profile doctor`** Compose service runs the pre-flight check
+  inside the image: confirms git, network, TLS, and the token before
+  the first scheduled cron run.
+- **`--profile tui`** Compose service with `tty: true` +
+  `stdin_open: true` so ratatui renders correctly under Compose.
+- **`--profile verify`** Compose service for SHA-256 manifest checks.
+- **`--profile gitlab`** Compose service for GitLab.com / self-hosted
+  GitLab mirror push (matching the existing `codeberg` profile).
+- **`init: true`** on every backup service as a belt-and-braces
+  injection of Docker's bundled tini in case the image's own tini is
+  bypassed on older Docker versions.
+
+### Changed (Docker / Compose)
+
+- **`config.toml` is no longer auto-mounted** by the default
+  Compose service.  Previously the bind mount `./config.toml` failed
+  on a fresh checkout because the file did not exist.  Mount it
+  explicitly when you need it:
+  `docker compose run --rm -v $PWD/config.toml:/etc/github-backup/config.toml:ro backup --config /etc/github-backup/config.toml`
+- **Every Compose service propagates the full env-var set** —
+  `GITHUB_API_URL`, `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`,
+  `BACKUP_NOTIFY_WEBHOOK`, `BACKUP_ENCRYPT_KEY`,
+  `GITHUB_BACKUP_RESTORE_YES`.  All optional; unset values are
+  forwarded as empty strings which clap ignores.
+- **`compose.example.env` is fully annotated** and documents every
+  variable, including the new restore-confirmation env var, the
+  optional GHES variables, and the AES-256-GCM encryption key.
+- **`DOCKER.md` rewritten** with a profile matrix, a pre-flight
+  workflow, a Kubernetes CronJob example, and `--doctor` /
+  `--check` / `--list-scopes` troubleshooting recipes.
+
+### Changed (binary)
+
+- **`NO_COLOR` now follows the no-color.org spec literally**: the
+  variable must be **set and non-empty** to disable ANSI.  An empty
+  value (a common pattern for declaring "pass through" variables in
+  Dockerfiles and systemd unit files) no longer accidentally
+  suppresses colour.  Affects both `init_tracing` and the
+  banner-rendering helpers.
+
 ### Added
 
 - **`--doctor` self-diagnostic** runs every prerequisite check (git

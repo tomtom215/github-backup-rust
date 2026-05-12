@@ -796,7 +796,7 @@ async fn wait_for_shutdown_signal() -> u8 {
 ///
 /// Respects the standard observability conventions:
 /// - `RUST_LOG` overrides the level filter when set;
-/// - `NO_COLOR` (any value) disables ANSI colour codes;
+/// - `NO_COLOR` (non-empty, per <https://no-color.org>) disables ANSI;
 /// - `CLICOLOR_FORCE=1` forces colour even when stderr is not a TTY.
 ///
 /// When stderr is not a TTY (e.g. a log file, CI, journald) we default to
@@ -818,7 +818,7 @@ fn init_tracing(quiet: bool, verbose: u8) {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
-    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let no_color = no_color_env_set();
     let force_color = std::env::var("CLICOLOR_FORCE")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -929,13 +929,24 @@ async fn run_doctor(args: &Args) -> ExitCode {
 /// `CLICOLOR_FORCE=1` forces, otherwise we autodetect TTY.
 fn use_ansi() -> bool {
     use std::io::IsTerminal as _;
-    if std::env::var_os("NO_COLOR").is_some() {
+    if no_color_env_set() {
         return false;
     }
     if std::env::var("CLICOLOR_FORCE").as_deref() == Ok("1") {
         return true;
     }
     std::io::stdout().is_terminal()
+}
+
+/// Returns `true` iff `NO_COLOR` is set to a non-empty value, per the
+/// official <https://no-color.org> spec.
+///
+/// We use `var()` (not `var_os()`) so a Dockerfile or systemd unit that
+/// declares `NO_COLOR=` (empty value, common pattern when a tool sets
+/// the variable for downstream processes) does not accidentally
+/// suppress colour.
+fn no_color_env_set() -> bool {
+    matches!(std::env::var("NO_COLOR"), Ok(ref v) if !v.is_empty())
 }
 
 /// Prints a one-shot summary of what the run is about to do.
