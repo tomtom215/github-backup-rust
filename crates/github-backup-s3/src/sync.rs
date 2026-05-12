@@ -180,11 +180,12 @@ pub async fn sync_to_s3(
             }
 
             // Emit a progress log line at configurable percentage intervals.
-            if total > 0 {
-                let done = uploaded.load(Ordering::Relaxed)
-                    + skipped.load(Ordering::Relaxed)
-                    + errored.load(Ordering::Relaxed);
-                let pct = done * 100 / total;
+            // `checked_div` returns `None` when `total == 0`, naturally
+            // skipping the progress line for an empty input set.
+            let done = uploaded.load(Ordering::Relaxed)
+                + skipped.load(Ordering::Relaxed)
+                + errored.load(Ordering::Relaxed);
+            if let Some(pct) = (done * 100).checked_div(total) {
                 let bucket = pct / PROGRESS_INTERVAL_PCT;
                 let prev = last_logged_pct.fetch_max(bucket, Ordering::Relaxed);
                 if bucket > prev {
