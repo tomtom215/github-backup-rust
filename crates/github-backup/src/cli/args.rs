@@ -37,8 +37,9 @@ use super::clone_type::CliCloneType;
 ///
 /// # S3 Storage
 ///
-/// Use `--s3-bucket` (and related flags) to sync JSON metadata and release
-/// assets to any S3-compatible object store (AWS, Backblaze B2, MinIO, …).
+/// Use `--s3-bucket` (and related flags) to sync the JSON metadata (and, with
+/// `--s3-include-assets`, release assets) to any S3-compatible object store
+/// (AWS, Backblaze B2, MinIO, …).  Repository clones are not uploaded.
 ///
 /// # Configuration File
 ///
@@ -623,10 +624,12 @@ pub struct Args {
     pub mirror_private: bool,
 
     // ── S3 storage options ─────────────────────────────────────────────────
-    /// S3 bucket to sync backup metadata to.
+    /// S3 bucket to sync backup metadata to (the bucket must already exist).
     ///
-    /// Works with AWS S3, Backblaze B2 (S3-compatible), MinIO, Cloudflare R2,
-    /// DigitalOcean Spaces, and Wasabi.
+    /// Uploads the JSON metadata under `<prefix>/<owner>/json/`; repository
+    /// clones are NOT uploaded.  Works with AWS S3, Backblaze B2, MinIO,
+    /// Cloudflare R2, DigitalOcean Spaces, and Wasabi.  Failed uploads make
+    /// the run fail.
     #[arg(long, value_name = "BUCKET")]
     pub s3_bucket: Option<String>,
 
@@ -637,12 +640,16 @@ pub struct Args {
     pub s3_region: Option<String>,
 
     /// Key prefix for all S3 objects (e.g., `github-backup/`).
+    ///
+    /// Objects are stored as `<prefix>/<owner>/json/<path>`.  A trailing
+    /// slash is optional.
     #[arg(long, value_name = "PREFIX", requires = "s3_bucket")]
     pub s3_prefix: Option<String>,
 
-    /// Custom S3-compatible endpoint (for B2, MinIO, R2, etc.).
+    /// Custom S3-compatible endpoint, with scheme (for B2, MinIO, R2, etc.).
     ///
-    /// Example for B2: `https://s3.us-west-004.backblazeb2.com`
+    /// Example for B2: `https://s3.us-west-004.backblazeb2.com`.  Private CAs
+    /// are trusted through `SSL_CERT_FILE`.  `HTTPS_PROXY` is not used.
     #[arg(long, value_name = "URL", requires = "s3_bucket")]
     pub s3_endpoint: Option<String>,
 
@@ -675,22 +682,39 @@ pub struct Args {
     )]
     pub s3_secret_key: Option<String>,
 
+    /// Session token for temporary AWS credentials.
+    ///
+    /// Can also be set via the `AWS_SESSION_TOKEN` environment variable, which
+    /// is ignored unless `--s3-bucket` is given.
+    //
+    // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "AWS_SESSION_TOKEN",
+        hide_env_values = true
+    )]
+    pub s3_session_token: Option<String>,
+
     /// Also upload binary release assets to S3 (can be very large).
     ///
     /// By default, only JSON metadata is uploaded; binary release assets
-    /// are kept local only.
+    /// are kept local only.  Dropping this flag later never deletes assets
+    /// that are already in the bucket.
     #[arg(long, requires = "s3_bucket")]
     pub s3_include_assets: bool,
 
     /// Delete S3 objects that no longer exist in the local backup.
     ///
-    /// After the upload phase completes, lists all objects under the configured
-    /// S3 prefix and deletes any that are not part of the current backup run.
-    /// This keeps the bucket in sync when repositories or files have been
-    /// removed locally.
+    /// After the upload phase, lists the objects under
+    /// `<prefix>/<owner>/json/` and deletes those whose local file is gone.
+    /// Nothing is deleted when the backup run had failures, when the local
+    /// tree could not be fully read or holds no files, or with `--dry-run`
+    /// (which only lists what would go).  Release assets that were merely not
+    /// uploaded this time are kept.
     ///
-    /// **Use with caution** — this permanently deletes data from S3.  Review
-    /// your retention policy before enabling.
+    /// **Use with caution** — deletion is permanent unless the bucket has
+    /// versioning enabled.
     #[arg(long, requires = "s3_bucket")]
     pub s3_delete_stale: bool,
 
@@ -791,13 +815,16 @@ pub struct Args {
     /// Encrypt backup data before writing to S3 using AES-256-GCM.
     ///
     /// Provide a 32-byte hex-encoded encryption key (64 hex characters).
+    /// Objects get a `.enc` suffix; object names and sizes stay visible.
+    /// Losing the key makes the encrypted objects unrecoverable.
     /// **Prefer** supplying the key via the `BACKUP_ENCRYPT_KEY` environment
     /// variable rather than on the command line — a CLI flag is visible to
     /// any user running `ps aux` on the same host.
     ///
     /// Can also be set via the `BACKUP_ENCRYPT_KEY` environment variable.
     ///
-    /// The key is never written to disk or logged.
+    /// The key is never written to disk, and error messages do not echo any
+    /// of its characters.
     #[arg(
         long,
         value_name = "HEX_KEY",

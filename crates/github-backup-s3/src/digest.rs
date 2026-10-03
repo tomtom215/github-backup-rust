@@ -194,7 +194,10 @@ mod tests {
                 Ok(1)
             }
         }
-        assert_eq!(digest_reader(Trickle(&data[..5_000]), None).unwrap(), digest_bytes(&data[..5_000], None));
+        assert_eq!(
+            digest_reader(Trickle(&data[..5_000]), None).unwrap(),
+            digest_bytes(&data[..5_000], None)
+        );
         assert_eq!(digest_reader(&data[..], None).unwrap(), whole);
     }
 
@@ -203,7 +206,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.bin");
         std::fs::write(&path, b"file contents").unwrap();
-        assert_eq!(digest_file(&path, None).unwrap(), digest_bytes(b"file contents", None));
+        assert_eq!(
+            digest_file(&path, None).unwrap(),
+            digest_bytes(b"file contents", None)
+        );
         assert_eq!(
             digest_file(&path, Some(&KEY)).unwrap(),
             digest_bytes(b"file contents", Some(&KEY))

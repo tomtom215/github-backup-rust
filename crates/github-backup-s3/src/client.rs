@@ -58,11 +58,9 @@ use hyper_util::rt::TokioExecutor;
 use tracing::{debug, info, warn};
 
 use crate::config::{parse_endpoint, S3Config};
-use crate::encoding::{
-    percent_decode, request_query, xml_tag, xml_tags,
-};
 #[cfg(test)]
 use crate::encoding::encode_path;
+use crate::encoding::{percent_decode, request_query, xml_tag, xml_tags};
 use crate::error::{error_chain, ApiError, S3Error};
 use crate::signing::{sha256_hex, SignedRequest, Signer, SigningInput};
 
@@ -269,7 +267,11 @@ impl Body for ProgressBody {
 
 /// Polls `fut` until it finishes, giving up once `progress` has been idle for
 /// `idle`.  Returns `None` on timeout.
-async fn with_idle_timeout<F: Future>(fut: F, progress: &Progress, idle: Duration) -> Option<F::Output> {
+async fn with_idle_timeout<F: Future>(
+    fut: F,
+    progress: &Progress,
+    idle: Duration,
+) -> Option<F::Output> {
     tokio::pin!(fut);
     loop {
         let remaining = idle.saturating_sub(progress.idle_for());
@@ -625,7 +627,9 @@ impl S3Client {
             _ => Err(response
                 .api_error(spec.operation, false)
                 .map(S3Error::api)
-                .unwrap_or_else(|| S3Error::InvalidResponse(format!("HEAD status {}", response.status)))),
+                .unwrap_or_else(|| {
+                    S3Error::InvalidResponse(format!("HEAD status {}", response.status))
+                })),
         }
     }
 
@@ -1038,7 +1042,9 @@ impl S3Client {
             builder = builder.header("x-amz-security-token", value);
         }
         let mut authorization = HeaderValue::from_str(&signed.authorization).map_err(|_| {
-            S3Error::InvalidConfig("the Authorization header is not a valid header value".to_string())
+            S3Error::InvalidConfig(
+                "the Authorization header is not a valid header value".to_string(),
+            )
         })?;
         authorization.set_sensitive(true);
         builder = builder
@@ -1058,7 +1064,8 @@ impl S3Client {
 
 /// Reads a response body (bounded in size and by the idle timeout).
 async fn read_body(body: Incoming, idle: Duration) -> Option<Result<Bytes, S3Error>> {
-    let collected = tokio::time::timeout(idle, Limited::new(body, MAX_RESPONSE_BYTES).collect()).await;
+    let collected =
+        tokio::time::timeout(idle, Limited::new(body, MAX_RESPONSE_BYTES).collect()).await;
     match collected {
         Err(_) => None,
         Ok(Ok(collected)) => Some(Ok(collected.to_bytes())),
@@ -1508,8 +1515,14 @@ mod tests {
         for attempt in 1..=10 {
             let delay = policy.delay_for(attempt);
             let ceiling = (policy.base_delay * (1 << (attempt - 1).min(20))).min(policy.max_delay);
-            assert!(delay <= ceiling, "attempt {attempt}: {delay:?} > {ceiling:?}");
-            assert!(delay >= ceiling / 2, "attempt {attempt}: {delay:?} < half of {ceiling:?}");
+            assert!(
+                delay <= ceiling,
+                "attempt {attempt}: {delay:?} > {ceiling:?}"
+            );
+            assert!(
+                delay >= ceiling / 2,
+                "attempt {attempt}: {delay:?} < half of {ceiling:?}"
+            );
         }
         assert!(policy.delay_for(1) <= Duration::from_millis(100));
         assert!(policy.delay_for(8) >= Duration::from_millis(500));

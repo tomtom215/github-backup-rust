@@ -731,11 +731,7 @@ fn metadata_of(p: &Parsed) -> BTreeMap<String, String> {
 
 fn dispatch(shared: &Shared, cfg: &FakeConfig, p: &Parsed, body: &Bytes) -> Reply {
     if p.bucket != cfg.bucket {
-        return Reply::error(
-            404,
-            "NoSuchBucket",
-            "The specified bucket does not exist",
-        );
+        return Reply::error(404, "NoSuchBucket", "The specified bucket does not exist");
     }
     let has = |name: &str| p.params.contains_key(name);
     match (p.method.as_str(), p.key.is_empty()) {
@@ -764,7 +760,11 @@ fn dispatch(shared: &Shared, cfg: &FakeConfig, p: &Parsed, body: &Bytes) -> Repl
             shared.state().objects.remove(&p.key);
             Reply::empty(204)
         }
-        _ => Reply::error(405, "MethodNotAllowed", "method not allowed for this resource"),
+        _ => Reply::error(
+            405,
+            "MethodNotAllowed",
+            "method not allowed for this resource",
+        ),
     }
 }
 
@@ -798,7 +798,11 @@ fn put_object(shared: &Shared, p: &Parsed, body: &Bytes) -> Reply {
         );
     }
     if p.header("content-length").is_none() {
-        return Reply::error(411, "MissingContentLength", "You must provide the Content-Length HTTP header.");
+        return Reply::error(
+            411,
+            "MissingContentLength",
+            "You must provide the Content-Length HTTP header.",
+        );
     }
     if p.key.len() > 1024 {
         return Reply::error(400, "KeyTooLongError", "Your key is too long");
@@ -856,7 +860,11 @@ fn upload_part(shared: &Shared, _cfg: &FakeConfig, p: &Parsed, body: &Bytes) -> 
         .and_then(|n| n.parse::<u32>().ok())
         .filter(|n| (1..=10_000).contains(n))
     else {
-        return Reply::error(400, "InvalidArgument", "Part number must be an integer between 1 and 10000");
+        return Reply::error(
+            400,
+            "InvalidArgument",
+            "Part number must be an integer between 1 and 10000",
+        );
     };
     let mut state = shared.state();
     let Some(upload) = state.uploads.get_mut(id) else {
@@ -904,7 +912,11 @@ fn complete_upload(shared: &Shared, cfg: &FakeConfig, p: &Parsed, body: &Bytes) 
         // AWS may answer 200 and report the failure in the body.
         return Reply::xml(
             200,
-            error_xml(code, "We encountered an internal error. Please try again.", None),
+            error_xml(
+                code,
+                "We encountered an internal error. Please try again.",
+                None,
+            ),
         );
     }
     let requested = parse_complete_body(&String::from_utf8_lossy(body));
@@ -916,17 +928,29 @@ fn complete_upload(shared: &Shared, cfg: &FakeConfig, p: &Parsed, body: &Bytes) 
         return Reply::error(404, "NoSuchUpload", "upload belongs to another key");
     }
     if requested.is_empty() {
-        return Reply::error(400, "MalformedXML", "The XML you provided was not well-formed");
+        return Reply::error(
+            400,
+            "MalformedXML",
+            "The XML you provided was not well-formed",
+        );
     }
     let mut assembled = Vec::new();
     let mut last_number = 0;
     for (i, (number, etag)) in requested.iter().enumerate() {
         if *number <= last_number {
-            return Reply::error(400, "InvalidPartOrder", "The list of parts was not in ascending order.");
+            return Reply::error(
+                400,
+                "InvalidPartOrder",
+                "The list of parts was not in ascending order.",
+            );
         }
         last_number = *number;
         let Some((data, stored_etag)) = upload.parts.get(number) else {
-            return Reply::error(400, "InvalidPart", "One or more of the specified parts could not be found.");
+            return Reply::error(
+                400,
+                "InvalidPart",
+                "One or more of the specified parts could not be found.",
+            );
         };
         if stored_etag.trim_matches('"') != etag.trim_matches('"') {
             return Reply::error(400, "InvalidPart", "ETag mismatch for a part");
@@ -990,7 +1014,13 @@ fn list_objects(shared: &Shared, cfg: &FakeConfig, p: &Parsed) -> Reply {
                 .collect();
             match decoded.and_then(|b| String::from_utf8(b).ok()) {
                 Some(s) => s,
-                None => return Reply::error(400, "InvalidArgument", "The continuation token provided is incorrect"),
+                None => {
+                    return Reply::error(
+                        400,
+                        "InvalidArgument",
+                        "The continuation token provided is incorrect",
+                    )
+                }
             }
         }
         None => String::new(),
@@ -1002,7 +1032,9 @@ fn list_objects(shared: &Shared, cfg: &FakeConfig, p: &Parsed) -> Reply {
         .state()
         .objects
         .keys()
-        .filter(|k| k.starts_with(&prefix) && (start_after.is_empty() || k.as_str() > start_after.as_str()))
+        .filter(|k| {
+            k.starts_with(&prefix) && (start_after.is_empty() || k.as_str() > start_after.as_str())
+        })
         .cloned()
         .collect();
     let truncated = keys.len() > max_keys;
@@ -1012,8 +1044,14 @@ fn list_objects(shared: &Shared, cfg: &FakeConfig, p: &Parsed) -> Reply {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
     );
     xml.push_str(&format!("<Name>{}</Name>", xml_escape(&cfg.bucket)));
-    xml.push_str(&format!("<Prefix>{}</Prefix>", encode_or_escape(&prefix, encode_keys, cfg)));
-    xml.push_str(&format!("<KeyCount>{}</KeyCount><MaxKeys>{max_keys}</MaxKeys>", page.len()));
+    xml.push_str(&format!(
+        "<Prefix>{}</Prefix>",
+        encode_or_escape(&prefix, encode_keys, cfg)
+    ));
+    xml.push_str(&format!(
+        "<KeyCount>{}</KeyCount><MaxKeys>{max_keys}</MaxKeys>",
+        page.len()
+    ));
     if encode_keys {
         xml.push_str("<EncodingType>url</EncodingType>");
     }

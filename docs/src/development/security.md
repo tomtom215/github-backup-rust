@@ -98,14 +98,22 @@ Fine-grained tokens cannot access organisation data; use a classic token with
 
 ## S3 Credential Security
 
-S3 credentials are accepted via `--s3-access-key` / `--s3-secret-key` or
-via the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables.
+S3 credentials are accepted via `--s3-access-key` / `--s3-secret-key` /
+`--s3-session-token` or the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_SESSION_TOKEN` environment variables.
 
-- Prefer environment variables in automated environments.
-- Use an IAM policy with the minimum required permissions:
-  `s3:PutObject`, `s3:GetObject`, `s3:HeadObject` on the target bucket only.
-
----
+- Prefer environment variables: command-line values show up in `ps`.
+- Credentials and the session token are kept out of `Debug` output and logs
+  and are not serialised; the secret key is wiped from memory when the client
+  is dropped (best effort, see the [encryption guide](../storage/encryption.md)).
+- Use an IAM policy with the minimum permissions: `s3:ListBucket` on the
+  bucket, and `s3:GetObject`, `s3:PutObject` (plus `s3:DeleteObject` only with
+  `--s3-delete-stale`, and the multipart actions for large assets) on
+  `bucket/prefix/*`. There is no `s3:HeadObject` action. The full policy is in
+  the [S3 guide](../storage/s3.md#required-permissions).
+- Enable bucket versioning where `--s3-delete-stale` is used.
+- S3 traffic does not use `HTTPS_PROXY`, and a plain `http://` endpoint is
+  unencrypted (a warning is logged).
 
 ## Output Directory Permissions
 

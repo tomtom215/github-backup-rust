@@ -164,9 +164,9 @@ impl ApiError {
                          --s3-region and --s3-endpoint"
                     .to_string(),
             }),
-            Some("InvalidBucketName") => Some(
-                "the bucket name is not valid for this service; check --s3-bucket".to_string(),
-            ),
+            Some("InvalidBucketName") => {
+                Some("the bucket name is not valid for this service; check --s3-bucket".to_string())
+            }
             Some("AccountProblem" | "AllAccessDisabled") => Some(
                 "the account or bucket is disabled or has a billing problem; check with the \
                  provider"
@@ -179,18 +179,18 @@ impl ApiError {
                         .to_string(),
                 )
             }
-            Some("EntityTooSmall") => Some(
-                "a multipart part was smaller than the service's minimum".to_string(),
-            ),
-            Some("KeyTooLongError") => {
-                Some("the object key exceeds 1024 bytes; shorten the prefix or file name".to_string())
+            Some("EntityTooSmall") => {
+                Some("a multipart part was smaller than the service's minimum".to_string())
             }
+            Some("KeyTooLongError") => Some(
+                "the object key exceeds 1024 bytes; shorten the prefix or file name".to_string(),
+            ),
             Some("NoSuchUpload") => {
                 Some("the multipart upload no longer exists on the server".to_string())
             }
-            Some("NotImplemented") => Some(
-                "this S3-compatible service does not implement the request".to_string(),
-            ),
+            Some("NotImplemented") => {
+                Some("this S3-compatible service does not implement the request".to_string())
+            }
             _ => None,
         };
         if by_code.is_some() {
@@ -450,13 +450,8 @@ mod tests {
 
     #[test]
     fn region_hint_uses_the_header_value() {
-        let e = ApiError::from_response(
-            "HeadObject",
-            301,
-            b"",
-            Some("eu-west-1".to_string()),
-            None,
-        );
+        let e =
+            ApiError::from_response("HeadObject", 301, b"", Some("eu-west-1".to_string()), None);
         assert!(e.hint().unwrap().contains("--s3-region eu-west-1"));
     }
 

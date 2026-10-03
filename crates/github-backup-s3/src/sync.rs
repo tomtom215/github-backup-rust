@@ -419,15 +419,29 @@ pub async fn sync_to_s3(
             total,
             &key_root,
             report.aborted.is_some(),
-        );
+        )
+        .or_else(|| {
+            (report.stats.errored > 0).then(|| {
+                "some uploads failed in this run; the objects they should have replaced \
+                 must not be deleted"
+                    .to_string()
+            })
+        });
         match blocker {
             Some(reason) => {
                 warn!(reason = %reason, "stale-object deletion refused");
                 report.deletion_skipped = Some(reason);
             }
             None => {
-                delete_stale_objects(client, config, &key_root, &expected, options.dry_run, &mut report)
-                    .await;
+                delete_stale_objects(
+                    client,
+                    config,
+                    &key_root,
+                    &expected,
+                    options.dry_run,
+                    &mut report,
+                )
+                .await;
             }
         }
     }
@@ -546,9 +560,11 @@ where
     F: FnOnce() -> Result<T, S3Error> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| S3Error::Io(std::io::Error::other(format!("background task failed: {e}"))))?
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        S3Error::Io(std::io::Error::other(format!(
+            "background task failed: {e}"
+        )))
+    })?
 }
 
 /// Decides whether `job` needs uploading and, unless it is a dry run, does it.
@@ -943,7 +959,8 @@ mod tests {
         fs::write(dir.path().join("real/f.json"), b"{}").unwrap();
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
         std::os::unix::fs::symlink(dir.path(), dir.path().join("real/cycle")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real/f.json"), dir.path().join("flink")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real/f.json"), dir.path().join("flink"))
+            .unwrap();
         let walk = walk_files(dir.path());
         assert_eq!(walk.files, vec![dir.path().join("real/f.json")]);
         assert!(walk.issues.is_empty());
@@ -1055,7 +1072,10 @@ mod tests {
     fn relative_key_path_uses_forward_slashes() {
         let root = Path::new("/out/octocat/json");
         let file = root.join("repos").join("hello").join("a b.json");
-        assert_eq!(relative_key_path(root, &file).unwrap(), "repos/hello/a b.json");
+        assert_eq!(
+            relative_key_path(root, &file).unwrap(),
+            "repos/hello/a b.json"
+        );
         assert!(relative_key_path(root, Path::new("/elsewhere/x")).is_err());
         assert!(relative_key_path(root, root).is_err());
     }

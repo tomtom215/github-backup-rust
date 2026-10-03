@@ -7,7 +7,9 @@
 
 mod support;
 
-use support::sigv4_check::{canonical_query, canonical_request, canonical_uri, sha256_hex, signature};
+use support::sigv4_check::{
+    canonical_query, canonical_request, canonical_uri, sha256_hex, signature,
+};
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const DATE: &str = "20130524T000000Z";

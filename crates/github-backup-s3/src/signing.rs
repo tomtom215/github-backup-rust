@@ -463,7 +463,10 @@ mod tests {
              x-amz-date:20130524T000000Z\n\nhost;range;x-amz-content-sha256;x-amz-date\n\
              e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        assert_eq!(signed.signed_headers, "host;range;x-amz-content-sha256;x-amz-date");
+        assert_eq!(
+            signed.signed_headers,
+            "host;range;x-amz-content-sha256;x-amz-date"
+        );
         assert_eq!(
             signature_of(&signed),
             "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
@@ -573,7 +576,10 @@ mod tests {
             AWS_DATE,
         );
         // No content-type: none was passed, so none is signed.
-        assert_eq!(signed.signed_headers, "host;x-amz-content-sha256;x-amz-date");
+        assert_eq!(
+            signed.signed_headers,
+            "host;x-amz-content-sha256;x-amz-date"
+        );
     }
 
     #[test]

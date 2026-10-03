@@ -21,7 +21,11 @@ use github_backup_mirror::{
     runner::push_mirrors,
     GitLabClient, GiteaClient,
 };
-use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
+use github_backup_s3::{
+    config::S3Config,
+    sync::{sync_to_s3, SyncOptions, SyncReport},
+    S3Client,
+};
 use github_backup_types::config::OutputConfig;
 
 use crate::cli::Args;
@@ -134,16 +138,97 @@ async fn run_mirror_push_gitlab(
     Ok(())
 }
 
-/// Syncs the local backup JSON metadata (and optionally binary assets) to S3.
+/// Options for [`run_s3_sync_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct S3RunOptions<'a> {
+    /// Also upload release assets.
+    pub include_assets: bool,
+    /// Encrypt every file with this AES-256 key.
+    pub encrypt_key: Option<&'a [u8; 32]>,
+    /// Delete remote objects whose local file is gone (`--s3-delete-stale`).
+    pub delete_stale: bool,
+    /// Master switch for deletion.  Pass `false` when the backup run had
+    /// failures: an incomplete local copy must never remove a good remote one.
+    pub allow_delete: bool,
+    /// `--dry-run`: list what would be uploaded or deleted, write nothing.
+    pub dry_run: bool,
+}
+
+/// Syncs the local JSON metadata (and optionally release assets) to S3 and
+/// returns the full [`SyncReport`].
 ///
-/// When `encrypt_key` is `Some`, every file is encrypted with AES-256-GCM
-/// before upload.  The key must be a 32-byte slice derived from the
-/// `--encrypt-key` hex string.
+/// Objects are stored as `<prefix>/<owner>/json/<relative path>`.  Unchanged
+/// files are detected by a content digest stored with each object.
 ///
 /// # Errors
 ///
-/// Returns [`PostProcessError::S3`] if the S3 client fails to initialise or a
-/// sync error is encountered.
+/// Returns [`PostProcessError::S3`] if the settings are unusable (for
+/// example missing credentials), the client cannot be created, **or any
+/// upload, listing or deletion failed**.  The message names the failed keys,
+/// the HTTP status, the S3 error code and a hint.
+pub async fn run_s3_sync_with(
+    config: &S3Config,
+    output: &OutputConfig,
+    owner: &str,
+    options: &S3RunOptions<'_>,
+) -> Result<SyncReport, PostProcessError> {
+    check_s3_config(config).map_err(PostProcessError::S3)?;
+    let client =
+        S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(s3_error_text(&e)))?;
+    let backup_root = output.owner_json_dir(owner);
+
+    if !backup_root.exists() {
+        warn!(dir = %backup_root.display(), "backup directory does not exist; skipping S3 sync");
+        return Ok(SyncReport::default());
+    }
+
+    info!("S3 sync uploads the JSON metadata (and release assets with --s3-include-assets); repository clones are not uploaded");
+    let key_root = format!("{owner}/json");
+    let sync_options = SyncOptions::new(&backup_root, &key_root)
+        .include_binary_assets(options.include_assets)
+        .encrypt_key(options.encrypt_key)
+        .delete_stale(options.delete_stale)
+        .allow_delete(options.allow_delete)
+        .dry_run(options.dry_run);
+    let report = sync_to_s3(&client, config, &sync_options)
+        .await
+        .map_err(|e| PostProcessError::S3(s3_error_text(&e)))?;
+
+    if report.dry_run {
+        info!(
+            would_upload = report.would_upload.len(),
+            skipped = report.stats.skipped,
+            would_delete = report.would_delete.len(),
+            "S3 dry run complete (nothing was written)"
+        );
+    } else {
+        info!(
+            uploaded = report.stats.uploaded,
+            skipped = report.stats.skipped,
+            errored = report.stats.errored,
+            deleted = report.stats.deleted,
+            "S3 sync complete"
+        );
+    }
+    if let Some(reason) = &report.deletion_skipped {
+        warn!(reason = %reason, "--s3-delete-stale did nothing");
+    }
+    if report.is_success() {
+        Ok(report)
+    } else {
+        Err(PostProcessError::S3(summarize_failures(&report)))
+    }
+}
+
+/// Syncs the local backup JSON metadata (and optionally release assets) to S3.
+///
+/// Convenience form of [`run_s3_sync_with`] for a real (non-dry) run with
+/// deletion allowed.
+///
+/// # Errors
+///
+/// Returns [`PostProcessError::S3`] on any failure, including a single failed
+/// upload or deletion.
 pub async fn run_s3_sync(
     config: &S3Config,
     output: &OutputConfig,
@@ -152,41 +237,51 @@ pub async fn run_s3_sync(
     encrypt_key: Option<&[u8; 32]>,
     delete_stale: bool,
 ) -> Result<(), PostProcessError> {
-    let client = S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(e.to_string()))?;
-    let backup_root = output.owner_json_dir(owner);
-
-    if !backup_root.exists() {
-        warn!(dir = %backup_root.display(), "backup directory does not exist; skipping S3 sync");
-        return Ok(());
-    }
-
-    let stats = sync_to_s3(
-        &client,
+    run_s3_sync_with(
         config,
-        &backup_root,
-        include_assets,
-        encrypt_key,
-        delete_stale,
+        output,
+        owner,
+        &S3RunOptions {
+            include_assets,
+            encrypt_key,
+            delete_stale,
+            allow_delete: true,
+            dry_run: false,
+        },
     )
     .await
-    .map_err(|e| PostProcessError::S3(e.to_string()))?;
+    .map(drop)
+}
 
-    info!(
-        uploaded = stats.uploaded,
-        skipped = stats.skipped,
-        errored = stats.errored,
-        deleted = stats.deleted,
-        "S3 sync complete"
-    );
-
-    if stats.errored > 0 {
-        warn!(errored = stats.errored, "some files failed to upload to S3");
+/// Renders an [`S3Error`](github_backup_s3::S3Error) with its hint.
+fn s3_error_text(error: &github_backup_s3::S3Error) -> String {
+    match error.hint() {
+        Some(hint) => format!("{error} (hint: {hint})"),
+        None => error.to_string(),
     }
-    if stats.deleted > 0 {
-        info!(deleted = stats.deleted, "stale S3 objects removed");
-    }
+}
 
-    Ok(())
+/// One-paragraph description of everything that failed in `report`.
+fn summarize_failures(report: &SyncReport) -> String {
+    const SHOWN: usize = 5;
+    let mut text = match &report.aborted {
+        Some(reason) => format!(
+            "aborted: {reason}; {} file(s) were not attempted",
+            report.not_attempted
+        ),
+        None => format!(
+            "{} operation(s) failed ({})",
+            report.failures.len(),
+            report.stats
+        ),
+    };
+    for failure in report.failures.iter().take(SHOWN) {
+        text.push_str(&format!("; {failure}"));
+    }
+    if report.failures.len() > SHOWN {
+        text.push_str(&format!("; and {} more", report.failures.len() - SHOWN));
+    }
+    text
 }
 
 /// Builds a [`MirrorDest`] from CLI args, or returns `None` if no mirror
@@ -218,25 +313,61 @@ pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
 
 /// Builds an [`S3Config`] from CLI args, or returns `None` if no S3 bucket
 /// is configured.
+///
+/// Blank values (an empty `AWS_SESSION_TOKEN` forwarded by a container
+/// launcher, for instance) count as unset.  Missing credentials are *not*
+/// rejected here; [`check_s3_config`] (called by [`run_s3_sync_with`]) does
+/// that with an actionable message.
 #[must_use]
 pub fn build_s3_config(args: &Args) -> Option<S3Config> {
     let bucket = args.s3_bucket.clone()?;
     let region = args
         .s3_region
         .clone()
+        .filter(|r| !r.trim().is_empty())
         .unwrap_or_else(|| "us-east-1".to_string());
     let prefix = args.s3_prefix.clone().unwrap_or_default();
     let access_key_id = args.s3_access_key.clone().unwrap_or_default();
     let secret_access_key = args.s3_secret_key.clone().unwrap_or_default();
+    let session_token = args
+        .s3_session_token
+        .clone()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
 
     Some(S3Config {
         bucket,
         region,
         prefix,
-        endpoint: args.s3_endpoint.clone(),
+        endpoint: args.s3_endpoint.clone().filter(|e| !e.trim().is_empty()),
         access_key_id,
         secret_access_key,
+        session_token,
     })
+}
+
+/// Validates an [`S3Config`] before any request is made.
+///
+/// # Errors
+///
+/// Returns a message that says which setting is missing or malformed and how
+/// to supply it.
+pub fn check_s3_config(config: &S3Config) -> Result<(), String> {
+    let missing_key = config.access_key_id.trim().is_empty();
+    let missing_secret = config.secret_access_key.trim().is_empty();
+    if missing_key || missing_secret {
+        let what = match (missing_key, missing_secret) {
+            (true, true) => "an access key id and a secret access key",
+            (true, false) => "an access key id",
+            _ => "a secret access key",
+        };
+        return Err(format!(
+            "--s3-bucket is set but {what} is missing; provide AWS_ACCESS_KEY_ID and \
+             AWS_SECRET_ACCESS_KEY (environment variables are safer than flags), or \
+             --s3-access-key / --s3-secret-key, or s3_access_key / s3_secret_key in the config file"
+        ));
+    }
+    config.validate().map_err(|e| s3_error_text(&e))
 }
 
 /// Decodes a hex-encoded 32-byte AES-256 key from the `--encrypt-key` string.
@@ -244,9 +375,10 @@ pub fn build_s3_config(args: &Args) -> Option<S3Config> {
 /// Returns `None` if no key is set, or `Err` if the string is not exactly
 /// 64 hex characters that decode to 32 bytes.
 ///
-/// The returned key bytes are wrapped in [`Zeroizing`] so that they are
-/// securely erased from memory when dropped, preventing the key from
-/// lingering in process memory.
+/// The returned key bytes are wrapped in [`Zeroizing`], so that buffer is
+/// overwritten when dropped.  This does not reach copies the process cannot
+/// control: the hex string held by the argument parser, the environment and
+/// the command line.  Error messages never contain any character of the key.
 ///
 /// # Errors
 ///
@@ -257,16 +389,31 @@ pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Zeroizing<[u8;
     };
     if hex.len() != 64 {
         return Err(format!(
-            "--encrypt-key must be exactly 64 hex characters (32 bytes); got {} chars",
+            "--encrypt-key must be exactly 64 hex characters (32 bytes); got {} bytes",
             hex.len()
         ));
     }
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
     let mut key = Zeroizing::new([0u8; 32]);
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let byte_str = std::str::from_utf8(chunk)
-            .map_err(|_| "--encrypt-key contains non-UTF-8 characters".to_string())?;
-        key[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|_| format!("--encrypt-key contains non-hex character in '{byte_str}'"))?;
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let (hi, lo) = (nibble(pair[0]), nibble(pair[1]));
+        match (hi, lo) {
+            (Some(hi), Some(lo)) => key[i] = hi * 16 + lo,
+            _ => {
+                return Err(format!(
+                    "--encrypt-key must contain only the hex digits 0-9 and a-f \
+                     (a different character was found near position {})",
+                    i * 2 + 1
+                ))
+            }
+        }
     }
     Ok(Some(key))
 }
@@ -360,6 +507,128 @@ mod tests {
     fn decode_encrypt_key_non_hex_errors() {
         let hex = "zz".repeat(32);
         assert!(decode_encrypt_key(Some(&hex)).is_err());
+    }
+
+    #[test]
+    fn decode_encrypt_key_accepts_upper_case() {
+        let hex = "AB".repeat(32);
+        assert!(decode_encrypt_key(Some(&hex))
+            .unwrap()
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0xab));
+    }
+
+    #[test]
+    fn decode_encrypt_key_rejects_plus_and_whitespace_signs() {
+        let hex = format!("+a{}", "aa".repeat(31));
+        assert!(decode_encrypt_key(Some(&hex)).is_err());
+        let hex = format!("-a{}", "aa".repeat(31));
+        assert!(decode_encrypt_key(Some(&hex)).is_err());
+    }
+
+    #[test]
+    fn decode_encrypt_key_errors_never_echo_key_characters() {
+        // Distinct marker characters at known positions.
+        let mut hex = "0123456789abcdef".repeat(4);
+        hex.replace_range(20..22, "Zq");
+        let err = decode_encrypt_key(Some(&hex)).unwrap_err();
+        for fragment in ["Zq", "Z", "q", "0123", "abcdef", &hex] {
+            assert!(!err.contains(fragment), "{err:?} leaks {fragment:?}");
+        }
+        let short = decode_encrypt_key(Some("deadbeefSECRET")).unwrap_err();
+        assert!(
+            !short.contains("deadbeef") && !short.contains("SECRET"),
+            "{short}"
+        );
+    }
+
+    fn s3_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["github-backup", "octocat", "--s3-bucket", "b"];
+        argv.extend_from_slice(extra);
+        crate::cli::test_support::parse(&argv)
+    }
+
+    #[test]
+    fn build_s3_config_none_without_bucket() {
+        let args = crate::cli::test_support::parse(&["github-backup", "octocat"]);
+        assert!(build_s3_config(&args).is_none());
+    }
+
+    #[test]
+    fn build_s3_config_carries_session_token_and_trims_blanks() {
+        let args = s3_args(&["--s3-session-token", "  TOK  "]);
+        assert_eq!(
+            build_s3_config(&args).unwrap().session_token.as_deref(),
+            Some("TOK")
+        );
+        let args = s3_args(&["--s3-session-token", "   "]);
+        assert!(build_s3_config(&args).unwrap().session_token.is_none());
+    }
+
+    #[test]
+    fn check_s3_config_explains_missing_credentials() {
+        let args = s3_args(&[]);
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(
+            err.contains("AWS_ACCESS_KEY_ID") && err.contains("secret access key"),
+            "{err}"
+        );
+        let args = s3_args(&["--s3-access-key", "AK"]);
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(err.contains("a secret access key is missing"), "{err}");
+        let args = s3_args(&["--s3-access-key", "AK", "--s3-secret-key", "SK"]);
+        check_s3_config(&build_s3_config(&args).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn check_s3_config_rejects_bucket_urls() {
+        let mut args = s3_args(&["--s3-access-key", "AK", "--s3-secret-key", "SK"]);
+        args.s3_bucket = Some("s3://my-bucket".to_string());
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(err.contains("bucket"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_s3_sync_without_credentials_is_an_error_before_any_request() {
+        let dir = tempdir().unwrap();
+        let output = OutputConfig::new(dir.path());
+        fs::create_dir_all(output.owner_json_dir("octocat")).unwrap();
+        let args = s3_args(&["--s3-endpoint", "http://127.0.0.1:9"]);
+        let cfg = build_s3_config(&args).unwrap();
+        let err = run_s3_sync(&cfg, &output, "octocat", false, None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("AWS_ACCESS_KEY_ID"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_s3_sync_reports_a_failed_upload_as_an_error() {
+        // Nothing listens on port 9: every upload fails, so the run must
+        // return Err (the CLI turns that into a non-zero exit).
+        let dir = tempdir().unwrap();
+        let output = OutputConfig::new(dir.path());
+        let json = output.owner_json_dir("octocat");
+        fs::create_dir_all(&json).unwrap();
+        fs::write(json.join("a.json"), b"{}").unwrap();
+        let args = s3_args(&[
+            "--s3-endpoint",
+            "http://127.0.0.1:9",
+            "--s3-access-key",
+            "AK",
+            "--s3-secret-key",
+            "SK",
+        ]);
+        let cfg = build_s3_config(&args).unwrap();
+        let err = run_s3_sync(&cfg, &output, "octocat", false, None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("octocat/json/a.json") || err.contains("aborted"),
+            "{err}"
+        );
     }
 
     #[test]

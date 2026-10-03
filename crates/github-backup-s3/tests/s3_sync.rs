@@ -52,7 +52,10 @@ fn fast_options() -> ClientOptions {
 
 fn client_for(fake: &FakeS3, prefix: &str) -> (S3Client, S3Config) {
     let cfg = config_for(fake, prefix);
-    (S3Client::with_options(cfg.clone(), fast_options()).unwrap(), cfg)
+    (
+        S3Client::with_options(cfg.clone(), fast_options()).unwrap(),
+        cfg,
+    )
 }
 
 async fn run_sync<'a>(
@@ -80,22 +83,40 @@ async fn s3c01_every_operation_is_accepted_by_a_strict_server() {
     let fake = FakeS3::start().await;
     let (client, _) = client_for(&fake, "pfx");
     client
-        .put_object("pfx/a.json", &b"{}"[..], "application/json", &[("sha256", "abcd")])
+        .put_object(
+            "pfx/a.json",
+            &b"{}"[..],
+            "application/json",
+            &[("sha256", "abcd")],
+        )
         .await
         .expect("PUT");
     match client.head_object("pfx/a.json").await.expect("HEAD") {
         HeadOutcome::Found(info) => {
             assert_eq!(info.size, Some(2));
-            assert_eq!(info.metadata.get("sha256").map(String::as_str), Some("abcd"));
+            assert_eq!(
+                info.metadata.get("sha256").map(String::as_str),
+                Some("abcd")
+            );
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(client.head_object("pfx/none").await.unwrap(), HeadOutcome::Missing);
-    assert_eq!(client.list_objects("pfx/").await.expect("LIST"), vec!["pfx/a.json"]);
+    assert_eq!(
+        client.head_object("pfx/none").await.unwrap(),
+        HeadOutcome::Missing
+    );
+    assert_eq!(
+        client.list_objects("pfx/").await.expect("LIST"),
+        vec!["pfx/a.json"]
+    );
     client.delete_object("pfx/a.json").await.expect("DELETE");
     assert!(fake.keys().is_empty());
     for r in fake.records() {
-        assert!(r.signature_ok, "{} {} rejected: {:?}", r.method, r.target, r.rejection);
+        assert!(
+            r.signature_ok,
+            "{} {} rejected: {:?}",
+            r.method, r.target, r.rejection
+        );
         assert!(!r.signed_headers.contains(&"content-type".to_string()) || r.method == "PUT");
     }
 }
@@ -118,7 +139,12 @@ async fn s3c01_multipart_round_trip_and_abort_are_accepted() {
     .unwrap();
     let data: Vec<u8> = (0..35u8).collect();
     client
-        .multipart_upload("big.bin", &data, "application/octet-stream", &[("sha256", "ff")])
+        .multipart_upload(
+            "big.bin",
+            &data,
+            "application/octet-stream",
+            &[("sha256", "ff")],
+        )
         .await
         .expect("multipart");
     assert_eq!(fake.body_of("big.bin").unwrap(), data);
@@ -146,7 +172,9 @@ async fn s3c15_complete_with_200_error_body_fails_and_aborts() {
     })
     .await;
     // Retries of Complete also hit the rule; keep it on for all attempts.
-    fake.add_rule(Rule::new(Action::CompleteWithErrorBody { code: "InternalError" }));
+    fake.add_rule(Rule::new(Action::CompleteWithErrorBody {
+        code: "InternalError",
+    }));
     let client = S3Client::with_options(
         config_for(&fake, ""),
         ClientOptions {
@@ -161,7 +189,11 @@ async fn s3c15_complete_with_200_error_body_fails_and_aborts() {
         .expect_err("a 200 carrying <Error> is a failure");
     assert_eq!(err.api_code(), Some("InternalError"), "{err}");
     assert!(fake.object("big.bin").is_none());
-    assert_eq!(fake.open_uploads(), 0, "the incomplete upload must be aborted");
+    assert_eq!(
+        fake.open_uploads(),
+        0,
+        "the incomplete upload must be aborted"
+    );
 }
 
 #[tokio::test]
@@ -211,8 +243,19 @@ async fn s3c02_wrong_secret_is_reported_with_code_and_hint() {
     assert!(report.stats.errored >= 1);
     let text = report.failures[0].to_string();
     assert!(text.contains("403"), "{text}");
-    assert!(report.aborted.as_deref().unwrap_or("").contains("SignatureDoesNotMatch") || text.contains("SignatureDoesNotMatch"), "{report:?}");
-    assert!(report.failures.iter().any(|f| f.error.contains("hint:")), "{report:?}");
+    assert!(
+        report
+            .aborted
+            .as_deref()
+            .unwrap_or("")
+            .contains("SignatureDoesNotMatch")
+            || text.contains("SignatureDoesNotMatch"),
+        "{report:?}"
+    );
+    assert!(
+        report.failures.iter().any(|f| f.error.contains("hint:")),
+        "{report:?}"
+    );
     assert!(fake.keys().is_empty());
 }
 
@@ -228,7 +271,10 @@ async fn s3c02_missing_bucket_aborts_after_one_error() {
     }
     let report = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
     assert!(!report.is_success());
-    assert!(report.aborted.as_deref().unwrap().contains("NoSuchBucket"), "{report:?}");
+    assert!(
+        report.aborted.as_deref().unwrap().contains("NoSuchBucket"),
+        "{report:?}"
+    );
     // HEAD of a missing key in a missing bucket is 404 (reads as "new"), so
     // the PUT is what reveals the bucket problem; far fewer than 30 attempts.
     assert!(report.stats.errored + report.not_attempted >= 1);
@@ -282,7 +328,10 @@ async fn s3c04_same_size_edit_is_reuploaded_and_unchanged_is_skipped() {
 
     write(dir.path(), "data.json", br#"{"n":2}"#);
     let r3 = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
-    assert_eq!(r3.stats.uploaded, 1, "same-size edit must be uploaded: {r3:?}");
+    assert_eq!(
+        r3.stats.uploaded, 1,
+        "same-size edit must be uploaded: {r3:?}"
+    );
     assert_eq!(fake.body_of(key).unwrap(), br#"{"n":2}"#);
 }
 
@@ -295,7 +344,11 @@ async fn s3c04_object_without_digest_is_reuploaded() {
     fake.put_object("pfx/o/json/data.json", b"{}");
     let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
     assert_eq!(r.stats.uploaded, 1, "{r:?}");
-    assert!(fake.object("pfx/o/json/data.json").unwrap().metadata.contains_key("sha256"));
+    assert!(fake
+        .object("pfx/o/json/data.json")
+        .unwrap()
+        .metadata
+        .contains_key("sha256"));
 }
 
 #[tokio::test]
@@ -305,23 +358,42 @@ async fn s3c04_encrypted_uploads_use_a_keyed_digest_and_rotate_with_the_key() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "secret.json", b"{\"secret\":true}");
 
-    let r1 = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.encrypt_key(Some(&KEY))).await;
+    let r1 = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.encrypt_key(Some(&KEY))
+    })
+    .await;
     assert_eq!(r1.stats.uploaded, 1, "{r1:?}");
     let key = "pfx/o/json/secret.json.enc";
     let obj = fake.object(key).unwrap();
     let stored = &obj.metadata["sha256"];
-    assert_ne!(stored, &digest::digest_bytes(b"{\"secret\":true}", None), "no plaintext hash leaks");
-    assert_eq!(stored, &digest::digest_bytes(b"{\"secret\":true}", Some(&KEY)));
+    assert_ne!(
+        stored,
+        &digest::digest_bytes(b"{\"secret\":true}", None),
+        "no plaintext hash leaks"
+    );
+    assert_eq!(
+        stored,
+        &digest::digest_bytes(b"{\"secret\":true}", Some(&KEY))
+    );
     assert_eq!(
         github_backup_s3::encrypt::decrypt(&KEY, &obj.body).unwrap(),
         b"{\"secret\":true}"
     );
 
-    let r2 = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.encrypt_key(Some(&KEY))).await;
-    assert_eq!(r2.stats.skipped, 1, "unchanged encrypted file is skipped: {r2:?}");
+    let r2 = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.encrypt_key(Some(&KEY))
+    })
+    .await;
+    assert_eq!(
+        r2.stats.skipped, 1,
+        "unchanged encrypted file is skipped: {r2:?}"
+    );
 
     let new_key = [0x43u8; 32];
-    let r3 = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.encrypt_key(Some(&new_key))).await;
+    let r3 = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.encrypt_key(Some(&new_key))
+    })
+    .await;
     assert_eq!(r3.stats.uploaded, 1, "a new key re-uploads: {r3:?}");
     let body = fake.body_of(key).unwrap();
     assert!(github_backup_s3::encrypt::decrypt(&KEY, &body).is_err());
@@ -339,11 +411,27 @@ async fn s3c05_keys_include_owner_and_json_and_owners_do_not_collide() {
     write(a.path(), "repos/hello/issues.json", b"alice");
     write(b.path(), "repos/hello/issues.json", b"bob!");
     write(a.path(), "alice_only.json", b"x");
-    assert!(run_sync(&client, &cfg, a.path(), "alice/json", |o| o).await.is_success());
-    assert!(run_sync(&client, &cfg, b.path(), "bob/json", |o| o.delete_stale(true)).await.is_success());
-    assert_eq!(fake.body_of("shared/alice/json/repos/hello/issues.json").unwrap(), b"alice");
-    assert_eq!(fake.body_of("shared/bob/json/repos/hello/issues.json").unwrap(), b"bob!");
-    assert!(fake.object("shared/alice/json/alice_only.json").is_some(), "bob's delete-stale must not touch alice");
+    assert!(run_sync(&client, &cfg, a.path(), "alice/json", |o| o)
+        .await
+        .is_success());
+    assert!(run_sync(&client, &cfg, b.path(), "bob/json", |o| o
+        .delete_stale(true))
+    .await
+    .is_success());
+    assert_eq!(
+        fake.body_of("shared/alice/json/repos/hello/issues.json")
+            .unwrap(),
+        b"alice"
+    );
+    assert_eq!(
+        fake.body_of("shared/bob/json/repos/hello/issues.json")
+            .unwrap(),
+        b"bob!"
+    );
+    assert!(
+        fake.object("shared/alice/json/alice_only.json").is_some(),
+        "bob's delete-stale must not touch alice"
+    );
 }
 
 // ── S3C-06/07: delete-stale scope and guards ───────────────────────────────
@@ -364,14 +452,22 @@ async fn s3c06_delete_stale_stays_inside_the_owner_tree() {
     let (client, cfg) = client_for(&fake, "github-backup");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "data.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "octocat/json", |o| o.delete_stale(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "octocat/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert!(r.is_success(), "{r:?}");
     assert_eq!(r.stats.deleted, 1);
     let keys = fake.keys();
     assert!(!keys.contains(&"github-backup/octocat/json/stale.json".to_string()));
     assert_eq!(keys.len(), 6, "{keys:?}");
     let list = &fake.requests("GET", "list-type")[0];
-    assert!(list.query.contains("prefix=github-backup%2Foctocat%2Fjson%2F"), "{}", list.query);
+    assert!(
+        list.query
+            .contains("prefix=github-backup%2Foctocat%2Fjson%2F"),
+        "{}",
+        list.query
+    );
 }
 
 #[tokio::test]
@@ -382,7 +478,10 @@ async fn s3c06_empty_prefix_delete_stale_cannot_reach_other_data() {
     let (client, cfg) = client_for(&fake, "");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "data.json", b"{}");
-    run_sync(&client, &cfg, dir.path(), "octocat/json", |o| o.delete_stale(true)).await;
+    run_sync(&client, &cfg, dir.path(), "octocat/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert!(fake.object("photos/img.jpg").is_some());
     assert!(fake.object("octocat/json/stale.json").is_none());
     // And without an owner in the key root, deletion is refused outright.
@@ -400,27 +499,54 @@ async fn s3c07_delete_stale_refuses_on_empty_tree_failed_run_and_keeps_assets() 
 
     // Empty local tree.
     let empty = tempfile::tempdir().unwrap();
-    let r = run_sync(&client, &cfg, empty.path(), "o/json", |o| o.delete_stale(true)).await;
-    assert!(r.deletion_skipped.as_deref().unwrap().contains("no uploadable files"), "{r:?}");
+    let r = run_sync(&client, &cfg, empty.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
+    assert!(
+        r.deletion_skipped
+            .as_deref()
+            .unwrap()
+            .contains("no uploadable files"),
+        "{r:?}"
+    );
     assert!(fake.object("p/o/json/old.json").is_some());
 
     // Backup run had failures.
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "data.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true).allow_delete(false)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true).allow_delete(false)
+    })
+    .await;
     assert!(r.deletion_skipped.is_some(), "{r:?}");
     assert!(fake.object("p/o/json/old.json").is_some());
     assert_eq!(r.stats.deleted, 0);
 
     // Dropping --s3-include-assets must not delete previously uploaded assets.
     write(dir.path(), "repos/r/release_assets/v1/app.zip", b"zipdata");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.include_binary_assets(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.include_binary_assets(true)
+    })
+    .await;
     assert!(r.is_success(), "{r:?}");
-    assert!(fake.object("p/o/json/repos/r/release_assets/v1/app.zip").is_some());
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
+    assert!(fake
+        .object("p/o/json/repos/r/release_assets/v1/app.zip")
+        .is_some());
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert!(r.is_success(), "{r:?}");
-    assert!(fake.object("p/o/json/repos/r/release_assets/v1/app.zip").is_some(), "assets survive");
-    assert!(fake.object("p/o/json/old.json").is_none(), "genuinely stale object goes");
+    assert!(
+        fake.object("p/o/json/repos/r/release_assets/v1/app.zip")
+            .is_some(),
+        "assets survive"
+    );
+    assert!(
+        fake.object("p/o/json/old.json").is_none(),
+        "genuinely stale object goes"
+    );
 }
 
 #[cfg(unix)]
@@ -436,11 +562,17 @@ async fn s3c07_unreadable_directory_blocks_deletion() {
     let locked = dir.path().join("locked");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     let enforced = std::fs::read_dir(&locked).is_err();
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     if enforced {
         assert!(!r.is_success());
-        assert!(r.failures.iter().any(|f| f.operation == FailedOperation::ReadLocal));
+        assert!(r
+            .failures
+            .iter()
+            .any(|f| f.operation == FailedOperation::ReadLocal));
         assert!(r.deletion_skipped.is_some());
         assert!(fake.object("p/o/json/locked/hidden.json").is_some());
     }
@@ -449,25 +581,47 @@ async fn s3c07_unreadable_directory_blocks_deletion() {
 #[tokio::test]
 async fn s3c07_failed_listing_is_a_failure_not_a_silent_skip() {
     let fake = FakeS3::start().await;
-    fake.add_rule(Rule::new(Action::Error { status: 403, code: "AccessDenied", message: "Access Denied" }).method("GET"));
+    fake.add_rule(
+        Rule::new(Action::Error {
+            status: 403,
+            code: "AccessDenied",
+            message: "Access Denied",
+        })
+        .method("GET"),
+    );
     let (client, cfg) = client_for(&fake, "p");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "a.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert!(!r.is_success());
-    assert!(r.failures.iter().any(|f| f.operation == FailedOperation::List), "{r:?}");
+    assert!(
+        r.failures
+            .iter()
+            .any(|f| f.operation == FailedOperation::List),
+        "{r:?}"
+    );
 }
 
 #[tokio::test]
 async fn s3c06_pagination_deletes_everything_stale() {
-    let fake = FakeS3::start_with(FakeConfig { list_page_size: 3, ..FakeConfig::default() }).await;
+    let fake = FakeS3::start_with(FakeConfig {
+        list_page_size: 3,
+        ..FakeConfig::default()
+    })
+    .await;
     for i in 0..10 {
         fake.put_object(&format!("p/o/json/stale{i}.json"), b"s");
     }
     let (client, cfg) = client_for(&fake, "p");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "keep.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert_eq!(r.stats.deleted, 10, "{r:?}");
     assert!(fake.requests("GET", "list-type").len() >= 4);
 }
@@ -481,7 +635,10 @@ async fn s3c08_dry_run_performs_no_writes() {
     let (client, cfg) = client_for(&fake, "p");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "new.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true).dry_run(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true).dry_run(true)
+    })
+    .await;
     assert!(r.is_success(), "{r:?}");
     assert!(r.dry_run);
     assert_eq!(r.would_upload, vec!["p/o/json/new.json"]);
@@ -519,11 +676,23 @@ async fn s3c12_awkward_key_names_round_trip_exactly() {
     assert!(r.is_success(), "{r:?}");
     for name in AWKWARD {
         let key = format!("pfx/o/json/{name}");
-        assert_eq!(fake.body_of(&key).as_deref(), Some(name.as_bytes()), "{key}: {:?}", fake.keys());
+        assert_eq!(
+            fake.body_of(&key).as_deref(),
+            Some(name.as_bytes()),
+            "{key}: {:?}",
+            fake.keys()
+        );
     }
     // Second run: all skipped, and delete-stale finds nothing stale.
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
-    assert_eq!((r.stats.skipped, r.stats.deleted, r.stats.uploaded), (AWKWARD.len(), 0, 0), "{r:?}");
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
+    assert_eq!(
+        (r.stats.skipped, r.stats.deleted, r.stats.uploaded),
+        (AWKWARD.len(), 0, 0),
+        "{r:?}"
+    );
 }
 
 #[tokio::test]
@@ -557,12 +726,19 @@ async fn s3c19_listing_decodes_keys_for_every_server_behaviour() {
 async fn s3c13_transient_errors_are_retried() {
     let fake = FakeS3::start().await;
     fake.add_rule(
-        Rule::new(Action::Error { status: 503, code: "SlowDown", message: "Please reduce your request rate." })
-            .method("PUT")
-            .times(2),
+        Rule::new(Action::Error {
+            status: 503,
+            code: "SlowDown",
+            message: "Please reduce your request rate.",
+        })
+        .method("PUT")
+        .times(2),
     );
     let (client, _) = client_for(&fake, "");
-    client.put_object("a", &b"x"[..], "text/plain", &[]).await.expect("succeeds on the 3rd attempt");
+    client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .expect("succeeds on the 3rd attempt");
     assert_eq!(fake.requests("PUT", "").len(), 3);
     assert_eq!(fake.body_of("a").unwrap(), b"x");
 }
@@ -572,16 +748,26 @@ async fn s3c13_dropped_connections_are_retried() {
     let fake = FakeS3::start().await;
     fake.add_rule(Rule::new(Action::Drop).method("PUT").times(1));
     let (client, _) = client_for(&fake, "");
-    client.put_object("a", &b"x"[..], "text/plain", &[]).await.expect("retried");
+    client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .expect("retried");
     assert!(fake.object("a").is_some());
 }
 
 #[tokio::test]
 async fn s3c13_permanent_errors_are_not_retried() {
     let fake = FakeS3::start().await;
-    fake.add_rule(Rule::new(Action::Error { status: 403, code: "AccessDenied", message: "Access Denied" }));
+    fake.add_rule(Rule::new(Action::Error {
+        status: 403,
+        code: "AccessDenied",
+        message: "Access Denied",
+    }));
     let (client, _) = client_for(&fake, "");
-    let err = client.put_object("a", &b"x"[..], "text/plain", &[]).await.unwrap_err();
+    let err = client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .unwrap_err();
     assert_eq!(fake.requests("PUT", "").len(), 1);
     assert_eq!(err.status(), Some(403));
 }
@@ -589,9 +775,16 @@ async fn s3c13_permanent_errors_are_not_retried() {
 #[tokio::test]
 async fn s3c13_retries_are_bounded() {
     let fake = FakeS3::start().await;
-    fake.add_rule(Rule::new(Action::Error { status: 500, code: "InternalError", message: "oops" }));
+    fake.add_rule(Rule::new(Action::Error {
+        status: 500,
+        code: "InternalError",
+        message: "oops",
+    }));
     let (client, _) = client_for(&fake, "");
-    let err = client.put_object("a", &b"x"[..], "text/plain", &[]).await.unwrap_err();
+    let err = client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .unwrap_err();
     assert_eq!(fake.requests("PUT", "").len(), 4);
     assert!(err.to_string().contains("InternalError"), "{err}");
 }
@@ -610,14 +803,21 @@ async fn s3c13_a_stalled_server_times_out_by_idleness() {
     )
     .unwrap();
     let started = std::time::Instant::now();
-    let err = client.put_object("a", &b"x"[..], "text/plain", &[]).await.unwrap_err();
+    let err = client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .unwrap_err();
     assert!(matches!(err, S3Error::Timeout { .. }), "{err}");
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[tokio::test]
 async fn s3c11_head_403_falls_back_to_uploading() {
-    let fake = FakeS3::start_with(FakeConfig { deny_head: true, ..FakeConfig::default() }).await;
+    let fake = FakeS3::start_with(FakeConfig {
+        deny_head: true,
+        ..FakeConfig::default()
+    })
+    .await;
     let (client, cfg) = client_for(&fake, "p");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "a.json", b"{}");
@@ -625,7 +825,11 @@ async fn s3c11_head_403_falls_back_to_uploading() {
     assert!(r.is_success(), "{r:?}");
     assert_eq!(r.stats.uploaded, 1);
     // Without ListBucket a missing key also reads as 403.
-    let fake = FakeS3::start_with(FakeConfig { no_list_permission: true, ..FakeConfig::default() }).await;
+    let fake = FakeS3::start_with(FakeConfig {
+        no_list_permission: true,
+        ..FakeConfig::default()
+    })
+    .await;
     let (client, cfg) = client_for(&fake, "p");
     let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
     assert_eq!(r.stats.uploaded, 1, "{r:?}");
@@ -635,19 +839,31 @@ async fn s3c11_head_403_falls_back_to_uploading() {
 
 #[tokio::test]
 async fn s3c16_session_token_is_signed_and_required() {
-    let fake = FakeS3::start_with(FakeConfig { session_token: Some("TOKEN//abc==".into()), ..FakeConfig::default() }).await;
+    let fake = FakeS3::start_with(FakeConfig {
+        session_token: Some("TOKEN//abc==".into()),
+        ..FakeConfig::default()
+    })
+    .await;
     let (client, cfg) = client_for(&fake, "p");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "a.json", b"{}");
-    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o.delete_stale(true)).await;
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
     assert!(r.is_success(), "{r:?}");
-    assert!(fake.records().iter().all(|r| r.signed_headers.contains(&"x-amz-security-token".to_string())));
+    assert!(fake.records().iter().all(|r| r
+        .signed_headers
+        .contains(&"x-amz-security-token".to_string())));
 
     // Without the token the server refuses.
     let mut no_token = cfg.clone();
     no_token.session_token = None;
     let client = S3Client::with_options(no_token, fast_options()).unwrap();
-    assert!(client.put_object("p/x", &b"x"[..], "text/plain", &[]).await.is_err());
+    assert!(client
+        .put_object("p/x", &b"x"[..], "text/plain", &[])
+        .await
+        .is_err());
 }
 
 #[test]
@@ -669,11 +885,43 @@ fn s3c16_missing_credentials_fail_before_any_request() {
 
 #[tokio::test]
 async fn shadow_mode_serves_but_records_signature_problems() {
-    let fake = FakeS3::start_with(FakeConfig { sig_mode: SigMode::Shadow, ..FakeConfig::default() }).await;
+    let fake = FakeS3::start_with(FakeConfig {
+        sig_mode: SigMode::Shadow,
+        ..FakeConfig::default()
+    })
+    .await;
     let mut cfg = config_for(&fake, "");
     cfg.secret_access_key = "another-secret-another-secret-12".into();
     let client = S3Client::with_options(cfg, fast_options()).unwrap();
-    client.put_object("a", &b"x"[..], "text/plain", &[]).await.expect("shadow serves");
+    client
+        .put_object("a", &b"x"[..], "text/plain", &[])
+        .await
+        .expect("shadow serves");
     assert!(!fake.records()[0].signature_ok);
     let _ = BTreeMap::<String, String>::new();
+}
+
+#[tokio::test]
+async fn s3c07_failed_uploads_block_deletion() {
+    let fake = FakeS3::start().await;
+    fake.put_object("p/o/json/old.json", b"old");
+    fake.add_rule(
+        Rule::new(Action::Error {
+            status: 400,
+            code: "InvalidRequest",
+            message: "no",
+        })
+        .method("PUT")
+        .key_contains("new.json"),
+    );
+    let (client, cfg) = client_for(&fake, "p");
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "new.json", b"{}");
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.delete_stale(true)
+    })
+    .await;
+    assert!(!r.is_success());
+    assert!(r.deletion_skipped.is_some(), "{r:?}");
+    assert!(fake.object("p/o/json/old.json").is_some());
 }

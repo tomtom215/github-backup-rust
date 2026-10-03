@@ -95,7 +95,10 @@ pub fn canonical_uri(raw_path: &str) -> Result<String, String> {
 }
 
 /// Splits a raw query string into decoded `(name, value)` pairs.
-pub fn query_pairs(raw_query: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+/// A decoded query parameter.
+pub type QueryPair = (Vec<u8>, Vec<u8>);
+
+pub fn query_pairs(raw_query: &str) -> Result<Vec<QueryPair>, String> {
     let mut pairs = Vec::new();
     for part in raw_query.split('&').filter(|p| !p.is_empty()) {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
@@ -336,9 +339,13 @@ pub fn check_encoding(rx: &Received<'_>) -> Result<(), Rejection> {
 ///
 /// On success returns the parsed `Authorization` header.
 pub fn verify(rx: &Received<'_>, cfg: &VerifyConfig<'_>) -> Result<Authorization, Rejection> {
-    let auth_value = rx
-        .header("authorization")
-        .ok_or_else(|| Rejection::new(403, "AccessDenied", "Access Denied (no Authorization header)"))?;
+    let auth_value = rx.header("authorization").ok_or_else(|| {
+        Rejection::new(
+            403,
+            "AccessDenied",
+            "Access Denied (no Authorization header)",
+        )
+    })?;
     let auth = parse_authorization(&auth_value)
         .map_err(|e| Rejection::new(400, "AuthorizationHeaderMalformed", e))?;
 
@@ -427,7 +434,9 @@ pub fn verify(rx: &Received<'_>, cfg: &VerifyConfig<'_>) -> Result<Authorization
         return Err(Rejection::new(
             403,
             "AccessDenied",
-            format!("There were headers present in the request which were not signed: {unsigned:?}"),
+            format!(
+                "There were headers present in the request which were not signed: {unsigned:?}"
+            ),
         ));
     }
     if let Some(token) = cfg.session_token {

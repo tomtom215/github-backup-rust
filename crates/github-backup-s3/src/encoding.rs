@@ -261,7 +261,10 @@ mod tests {
         assert_eq!(encode_path("/what?"), "/what%3F");
         assert_eq!(encode_path("/file#1"), "/file%231");
         assert_eq!(encode_path("/a&b=c"), "/a%26b%3Dc");
-        assert_eq!(encode_path("/(1)*!'$,;:@"), "/%281%29%2A%21%27%24%2C%3B%3A%40");
+        assert_eq!(
+            encode_path("/(1)*!'$,;:@"),
+            "/%281%29%2A%21%27%24%2C%3B%3A%40"
+        );
         assert_eq!(encode_path("/r\u{e9}sum\u{e9}"), "/r%C3%A9sum%C3%A9");
         assert_eq!(encode_path("/\u{1f600}"), "/%F0%9F%98%80");
     }
@@ -323,7 +326,16 @@ mod tests {
 
     #[test]
     fn percent_decode_roundtrips_encode_path() {
-        for key in ["a b", "a+b", "100%", "what?", "f#1", "a&b", "r\u{e9}sum\u{e9}", "\u{1f600}"] {
+        for key in [
+            "a b",
+            "a+b",
+            "100%",
+            "what?",
+            "f#1",
+            "a&b",
+            "r\u{e9}sum\u{e9}",
+            "\u{1f600}",
+        ] {
             assert_eq!(percent_decode(&encode_path(key), false), key);
             assert_eq!(percent_decode(&encode_path(key), true), key);
         }

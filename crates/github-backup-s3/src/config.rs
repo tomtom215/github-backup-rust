@@ -167,7 +167,11 @@ impl S3Config {
                 "the secret access key is empty".to_string(),
             ));
         }
-        if self.session_token.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        if self
+            .session_token
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
             return Err(S3Error::InvalidConfig(
                 "the session token is empty (leave it unset instead)".to_string(),
             ));
@@ -239,7 +243,9 @@ pub(crate) struct ParsedEndpoint {
 pub(crate) fn parse_endpoint(raw: &str) -> Result<ParsedEndpoint, S3Error> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(S3Error::InvalidEndpoint("the endpoint is empty".to_string()));
+        return Err(S3Error::InvalidEndpoint(
+            "the endpoint is empty".to_string(),
+        ));
     }
     let (with_scheme, assumed_https) = if trimmed.contains("://") {
         (trimmed.to_string(), false)
@@ -261,7 +267,9 @@ pub(crate) fn parse_endpoint(raw: &str) -> Result<ParsedEndpoint, S3Error> {
         }
     };
     let authority = uri.authority().ok_or_else(|| {
-        S3Error::InvalidEndpoint(format!("{raw:?} has no host; expected e.g. https://s3.example.com"))
+        S3Error::InvalidEndpoint(format!(
+            "{raw:?} has no host; expected e.g. https://s3.example.com"
+        ))
     })?;
     if authority.as_str().contains('@') {
         return Err(S3Error::InvalidEndpoint(
@@ -384,7 +392,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_bucket_urls_and_odd_names() {
-        for bucket in ["", "s3://my-bucket", "my bucket", "a/b", "buck\u{e9}t", "my:bucket"] {
+        for bucket in [
+            "",
+            "s3://my-bucket",
+            "my bucket",
+            "a/b",
+            "buck\u{e9}t",
+            "my:bucket",
+        ] {
             let mut cfg = sample();
             cfg.bucket = bucket.to_string();
             let err = cfg.validate().expect_err(bucket).to_string();
@@ -396,13 +411,25 @@ mod tests {
     fn validate_rejects_empty_credentials() {
         let mut cfg = sample();
         cfg.access_key_id = "  ".to_string();
-        assert!(cfg.validate().unwrap_err().to_string().contains("access key id"));
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("access key id"));
         let mut cfg = sample();
         cfg.secret_access_key = String::new();
-        assert!(cfg.validate().unwrap_err().to_string().contains("secret access key"));
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("secret access key"));
         let mut cfg = sample();
         cfg.session_token = Some(String::new());
-        assert!(cfg.validate().unwrap_err().to_string().contains("session token"));
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("session token"));
     }
 
     #[test]
@@ -427,10 +454,20 @@ mod tests {
         assert!(!e.https);
         assert_eq!(e.authority, "127.0.0.1:9000");
         assert_eq!(e.host_header, "127.0.0.1:9000");
-        assert_eq!(parse_endpoint("https://example.com:443").unwrap().host_header, "example.com");
-        assert_eq!(parse_endpoint("http://example.com:80").unwrap().host_header, "example.com");
         assert_eq!(
-            parse_endpoint("https://example.com:8443").unwrap().host_header,
+            parse_endpoint("https://example.com:443")
+                .unwrap()
+                .host_header,
+            "example.com"
+        );
+        assert_eq!(
+            parse_endpoint("http://example.com:80").unwrap().host_header,
+            "example.com"
+        );
+        assert_eq!(
+            parse_endpoint("https://example.com:8443")
+                .unwrap()
+                .host_header,
             "example.com:8443"
         );
     }
@@ -444,7 +481,9 @@ mod tests {
 
     #[test]
     fn endpoint_rejects_credentials_and_wrong_schemes() {
-        let err = parse_endpoint("https://user:pw@example.com").unwrap_err().to_string();
+        let err = parse_endpoint("https://user:pw@example.com")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("credentials"), "{err}");
         assert!(parse_endpoint("ftp://example.com").is_err());
         assert!(parse_endpoint("").is_err());
