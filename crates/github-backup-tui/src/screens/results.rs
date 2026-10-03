@@ -39,12 +39,14 @@ pub fn render(frame: &mut Frame, res: &ResultsState, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(banner_h),
-            // A run that died early has no meaningful counters to show.
-            Constraint::Length(if res.outcome == Outcome::Failed {
-                0
-            } else {
-                stats.height()
-            }),
+            // A run that died or was stopped early has no meaningful counters.
+            Constraint::Length(
+                if matches!(res.outcome, Outcome::Failed | Outcome::Cancelled) {
+                    0
+                } else {
+                    stats.height()
+                },
+            ),
             Constraint::Min(0), // failures / error
             Constraint::Length(hint_h),
         ])
@@ -198,7 +200,7 @@ fn render_stats(frame: &mut Frame, res: &ResultsState, area: Rect, layout: Stats
         return;
     }
     // A run that stopped early has no meaningful counters.
-    if matches!(res.outcome, Outcome::Failed) {
+    if matches!(res.outcome, Outcome::Failed | Outcome::Cancelled) {
         return;
     }
     let all = counters(res);
