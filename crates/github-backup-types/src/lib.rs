@@ -85,7 +85,7 @@ pub use discussion::{Discussion, DiscussionCategory, DiscussionComment};
 pub use environment::{DeploymentBranchPolicy, Environment, EnvironmentProtectionRule};
 pub use gist::Gist;
 pub use hook::Hook;
-pub use issue::{Issue, IssueComment, IssueEvent};
+pub use issue::{Issue, IssueComment, IssueEvent, IssueLabel};
 pub use label::Label;
 pub use milestone::Milestone;
 pub use package::{Package, PackageVersion};

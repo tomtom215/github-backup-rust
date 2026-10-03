@@ -109,14 +109,16 @@ mod tests {
             title: format!("Issue #{number}"),
             body: None,
             state: "open".to_string(),
-            user: make_user(),
+            user: Some(make_user()),
             labels: vec![],
             assignees: vec![],
             milestone: None,
             pull_request: if is_pr {
                 Some(IssuePullRequestRef {
-                    url: format!("https://api.github.com/repos/octocat/repo/pulls/{number}"),
-                    html_url: format!("https://github.com/octocat/repo/pull/{number}"),
+                    url: Some(format!(
+                        "https://api.github.com/repos/octocat/repo/pulls/{number}"
+                    )),
+                    html_url: Some(format!("https://github.com/octocat/repo/pull/{number}")),
                 })
             } else {
                 None

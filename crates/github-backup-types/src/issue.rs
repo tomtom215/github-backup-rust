@@ -5,14 +5,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{label::Label, milestone::Milestone, user::User};
+use crate::{milestone::Milestone, user::User};
 
-/// A GitHub issue (note: pull requests also appear as issues in the issues API).
+/// A GitHub issue.
+///
+/// The Issues API also returns pull requests (they are issues with a
+/// `pull_request` stub); [`Issue::is_pull_request`] tells them apart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     /// Numeric issue identifier (globally unique).
     pub id: u64,
     /// Repository-scoped issue number.
+    ///
+    /// Issues and pull requests share one number space per repository.
     pub number: u64,
     /// Issue title.
     pub title: String,
@@ -20,11 +25,12 @@ pub struct Issue {
     pub body: Option<String>,
     /// State: `"open"` or `"closed"`.
     pub state: String,
-    /// User who opened the issue.
-    pub user: User,
+    /// User who opened the issue; `None` when the account no longer exists.
+    pub user: Option<User>,
     /// Labels applied to this issue.
-    pub labels: Vec<Label>,
+    pub labels: Vec<IssueLabel>,
     /// Users assigned to this issue.
+    #[serde(default)]
     pub assignees: Vec<User>,
     /// Milestone associated with this issue, if any.
     pub milestone: Option<Milestone>,
@@ -53,22 +59,48 @@ impl Issue {
     }
 }
 
+/// A label as embedded in an [`Issue`].
+///
+/// The OpenAPI description lists no required property for an issue's labels
+/// and makes `color` nullable, so every field but the name is optional here.
+/// (The repository label list, [`crate::Label`], is strict.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueLabel {
+    /// Numeric label identifier, when present.
+    #[serde(default)]
+    pub id: Option<u64>,
+    /// Label name (empty when GitHub omitted it).
+    #[serde(default)]
+    pub name: String,
+    /// Hex colour string without the leading `#`; `None` when `null`.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Optional description of the label's meaning.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Whether this is a default label created automatically by GitHub.
+    #[serde(default)]
+    pub default: bool,
+}
+
 /// Stub reference present on issue objects that are actually pull requests.
+///
+/// Every property is nullable in the OpenAPI description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuePullRequestRef {
     /// API URL of the pull request.
-    pub url: String,
+    pub url: Option<String>,
     /// HTML URL of the pull request.
-    pub html_url: String,
+    pub html_url: Option<String>,
 }
 
-/// A comment on a GitHub issue.
+/// A comment on a GitHub issue (or on the conversation of a pull request).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueComment {
     /// Numeric comment identifier.
     pub id: u64,
-    /// User who posted the comment.
-    pub user: User,
+    /// User who posted the comment; `None` when the account no longer exists.
+    pub user: Option<User>,
     /// Comment body (Markdown).
     pub body: Option<String>,
     /// ISO 8601 creation timestamp.
@@ -79,7 +111,7 @@ pub struct IssueComment {
     pub html_url: String,
 }
 
-/// An event in a GitHub issue's timeline.
+/// An event in a GitHub issue's event list (`GET .../issues/{n}/events`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueEvent {
     /// Numeric event identifier.
@@ -165,6 +197,56 @@ mod tests {
     }
 
     #[test]
+    fn issue_accepts_a_null_user_the_account_was_deleted() {
+        let json = sample_issue_json().replace(
+            r#""user": {
+                "id": 1,
+                "login": "octocat",
+                "type": "User",
+                "avatar_url": "https://github.com/images/error/octocat_happy.gif",
+                "html_url": "https://github.com/octocat"
+            }"#,
+            r#""user": null"#,
+        );
+
+        let issue: Issue = serde_json::from_str(&json).expect("deserialise");
+
+        assert!(issue.user.is_none());
+    }
+
+    #[test]
+    fn issue_defaults_missing_assignees_and_accepts_null_label_colour() {
+        let json = sample_issue_json()
+            .replace(r#""assignees": [],"#, "")
+            .replace(
+                r#""labels": []"#,
+                r#""labels": [{"id": 5, "name": "bug", "color": null}, {"name": "bare"}]"#,
+            );
+
+        let issue: Issue = serde_json::from_str(&json).expect("deserialise");
+
+        assert!(issue.assignees.is_empty());
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert!(issue.labels[0].color.is_none());
+        assert_eq!(issue.labels[1].id, None);
+    }
+
+    #[test]
+    fn issue_pull_request_stub_accepts_null_urls() {
+        let json = sample_issue_json().replace(
+            r#""pull_request": null"#,
+            r#""pull_request": {"url": null, "html_url": null, "merged_at": null}"#,
+        );
+
+        let issue: Issue = serde_json::from_str(&json).expect("deserialise");
+
+        assert!(issue.is_pull_request());
+        let stub = issue.pull_request.expect("stub");
+        assert!(stub.url.is_none() && stub.html_url.is_none());
+    }
+
+    #[test]
     fn issue_comment_deserialise_succeeds() {
         let json = r#"{
             "id": 1,
@@ -183,6 +265,22 @@ mod tests {
         let comment: IssueComment = serde_json::from_str(json).expect("deserialise");
         assert_eq!(comment.id, 1);
         assert_eq!(comment.body.as_deref(), Some("Me too"));
+    }
+
+    #[test]
+    fn issue_comment_accepts_a_null_user() {
+        let json = r#"{
+            "id": 2,
+            "user": null,
+            "body": "from a deleted account",
+            "created_at": "2011-04-14T16:00:49Z",
+            "updated_at": "2011-04-14T16:00:49Z",
+            "html_url": "https://github.com/octocat/Hello-World/issues/1347#issuecomment-2"
+        }"#;
+
+        let comment: IssueComment = serde_json::from_str(json).expect("deserialise");
+
+        assert!(comment.user.is_none());
     }
 
     #[test]

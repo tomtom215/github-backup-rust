@@ -144,6 +144,7 @@ mod tests {
             content_type: "application/octet-stream".to_string(),
             state: state.to_string(),
             size: 1024,
+            digest: None,
             download_count: 0,
             url: "https://api.github.com/repos/octocat/repo/releases/assets/1".to_string(),
             browser_download_url: String::new(),

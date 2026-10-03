@@ -191,13 +191,13 @@ mod tests {
             description: None,
             clone_url: format!("https://github.com/{full_name}.git"),
             ssh_url: format!("git@github.com:{full_name}.git"),
-            default_branch: "main".to_string(),
+            default_branch: Some("main".to_string()),
             size: 1024,
             has_issues: true,
             has_wiki: false,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: Some("2024-01-01T00:00:00Z".to_string()),
             pushed_at: None,
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             html_url: format!("https://github.com/{full_name}"),
         }
     }

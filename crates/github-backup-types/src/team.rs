@@ -28,7 +28,9 @@ pub struct Team {
     /// Optional description of the team's purpose.
     #[serde(default)]
     pub description: Option<String>,
-    /// Privacy level: `"secret"` (visible only to members) or `"closed"` (visible to org members).
+    /// Privacy level: `"secret"` (visible only to members) or `"closed"`
+    /// (visible to org members); empty when GitHub omits it.
+    #[serde(default)]
     pub privacy: String,
     /// Notification setting for team activity.
     #[serde(default)]

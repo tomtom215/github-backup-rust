@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Property-based serde round-trip tests for all public types.
+//! Property-based serde round-trip tests for the main model types.
 //!
 //! Each test generates arbitrary instances of a type, serialises to JSON, and
 //! deserialises back, asserting equality with the original. This catches
 //! asymmetric Serialize/Deserialize implementations and field rename mismatches.
+//!
+//! These tests only prove that a struct is consistent with *itself*: the JSON
+//! is produced by the struct's own `Serialize`.  Whether the structs fit what
+//! GitHub really sends (nulls, absent properties, unknown fields) is covered
+//! by `golden.rs`, which parses payloads taken from GitHub's API description.
 
 use proptest::prelude::*;
 
@@ -99,6 +104,7 @@ prop_compose! {
         ],
         state in prop_oneof![Just("uploaded"), Just("open")],
         size in 0u64..10_000_000u64,
+        digest in prop::option::of("sha256:[0-9a-f]{64}"),
         download_count in 0u64..100_000u64,
     ) -> ReleaseAsset {
         ReleaseAsset {
@@ -107,6 +113,7 @@ prop_compose! {
             content_type: content_type.to_string(),
             state: state.to_string(),
             size,
+            digest,
             download_count,
             url: format!("https://api.github.com/repos/owner/repo/releases/assets/{id}"),
             browser_download_url: format!("https://github.com/owner/repo/releases/download/v1.0/{name}"),
@@ -178,8 +185,8 @@ prop_compose! {
 prop_compose! {
     fn arb_commit_detail()(
         message in "[A-Za-z ]{5,60}",
-        author in arb_git_identity(),
-        committer in arb_git_identity(),
+        author in prop::option::of(arb_git_identity()),
+        committer in prop::option::of(arb_git_identity()),
     ) -> CommitDetail {
         CommitDetail { message, author, committer }
     }
@@ -188,7 +195,7 @@ prop_compose! {
 prop_compose! {
     fn arb_vulnerable_package()(
         ecosystem in prop_oneof![Just("npm"), Just("pip"), Just("cargo"), Just("maven")],
-        name in "[a-z][a-z0-9-]{2,19}",
+        name in prop::option::of("[a-z][a-z0-9-]{2,19}"),
     ) -> VulnerablePackage {
         VulnerablePackage {
             ecosystem: ecosystem.to_string(),
@@ -197,20 +204,20 @@ prop_compose! {
     }
 }
 
+// The four properties GitHub defines for an advisory's `vulnerabilities[]`
+// entry (there is no per-vulnerability severity).
 prop_compose! {
     fn arb_vulnerability()(
-        package in arb_vulnerable_package(),
+        package in prop::option::of(arb_vulnerable_package()),
         vulnerable_version_range in prop::option::of("< 1\\.2\\.3"),
-        first_patched_version in prop::option::of(Just("1.2.3")),
-        severity in prop_oneof![
-            Just("critical"), Just("high"), Just("medium"), Just("low"),
-        ],
+        patched_versions in prop::option::of(Just("1.2.3")),
+        vulnerable_functions in prop::option::of(prop::collection::vec("[a-z_]{3,12}", 0..3)),
     ) -> Vulnerability {
         Vulnerability {
             package,
             vulnerable_version_range,
-            first_patched_version: first_patched_version.map(ToString::to_string),
-            severity: severity.to_string(),
+            patched_versions: patched_versions.map(ToString::to_string),
+            vulnerable_functions,
         }
     }
 }
@@ -253,6 +260,8 @@ proptest! {
         size in 0u64..1_000_000u64,
         has_issues in any::<bool>(),
         has_wiki in any::<bool>(),
+        created_at in prop::option::of(Just("2020-01-01T00:00:00Z")),
+        updated_at in prop::option::of(Just("2024-01-01T00:00:00Z")),
         pushed_at in prop::option::of(Just("2024-06-01T00:00:00Z")),
     ) {
         let repo = Repository {
@@ -267,13 +276,13 @@ proptest! {
             description,
             clone_url: format!("https://github.com/{}/{name}.git", owner.login),
             ssh_url: format!("git@github.com:{}/{name}.git", owner.login),
-            default_branch: default_branch.to_string(),
+            default_branch: Some(default_branch.to_string()),
             size,
             has_issues,
             has_wiki,
-            created_at: "2020-01-01T00:00:00Z".to_string(),
+            created_at: created_at.map(str::to_string),
             pushed_at: pushed_at.map(str::to_string),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: updated_at.map(str::to_string),
             html_url: format!("https://github.com/{}/{name}", owner.login),
         };
         let json = serde_json::to_string(&repo).expect("serialise");
@@ -324,12 +333,12 @@ proptest! {
 
     #[test]
     fn issue_pull_request_ref_roundtrip(
-        url in "[a-z]{5,15}",
-        html_url in "[a-z]{5,15}",
+        url in prop::option::of("[a-z]{5,15}"),
+        html_url in prop::option::of("[a-z]{5,15}"),
     ) {
         let val = IssuePullRequestRef {
-            url: format!("https://api.github.com/{url}"),
-            html_url: format!("https://github.com/{html_url}"),
+            url: url.map(|u| format!("https://api.github.com/{u}")),
+            html_url: html_url.map(|u| format!("https://github.com/{u}")),
         };
         let json = serde_json::to_string(&val).expect("serialise");
         let decoded: IssuePullRequestRef = serde_json::from_str(&json).expect("deserialise");
@@ -339,7 +348,7 @@ proptest! {
     #[test]
     fn issue_comment_roundtrip(
         id in 1u64..u32::MAX as u64,
-        user in arb_user(),
+        user in prop::option::of(arb_user()),
         body in prop::option::of("[a-zA-Z ]{1,80}"),
     ) {
         let comment = IssueComment {
@@ -417,7 +426,7 @@ proptest! {
     #[test]
     fn pr_comment_roundtrip(
         id in 1u64..u32::MAX as u64,
-        user in arb_user(),
+        user in prop::option::of(arb_user()),
         path in "[a-z][a-z0-9/._-]{2,30}",
         body in prop::option::of("[a-zA-Z ]{1,80}"),
     ) {
@@ -442,6 +451,8 @@ proptest! {
         author in prop::option::of(arb_user()),
         committer in prop::option::of(arb_user()),
     ) {
+        // `None` is written as `null` and read back through the
+        // `null`-or-`{}` tolerant deserialiser.
         let val = PullRequestCommit { sha, commit: detail, author, committer };
         let json = serde_json::to_string(&val).expect("serialise");
         let decoded: PullRequestCommit = serde_json::from_str(&json).expect("deserialise");
@@ -451,14 +462,14 @@ proptest! {
     #[test]
     fn pr_review_roundtrip(
         id in 1u64..u32::MAX as u64,
-        user in arb_user(),
+        user in prop::option::of(arb_user()),
         body in prop::option::of("[a-zA-Z ]{1,80}"),
         state in prop_oneof![
             Just("APPROVED"), Just("CHANGES_REQUESTED"),
             Just("COMMENTED"), Just("DISMISSED"), Just("PENDING"),
         ],
         submitted_at in prop::option::of(Just("2024-01-01T00:00:00Z")),
-        commit_id in "[0-9a-f]{40}",
+        commit_id in prop::option::of("[0-9a-f]{40}"),
     ) {
         let val = PullRequestReview {
             id,
@@ -486,7 +497,7 @@ proptest! {
         description in prop::option::of("[a-zA-Z ]{1,40}"),
         public in any::<bool>(),
         owner in prop::option::of(arb_user()),
-        files in prop::collection::hash_map(
+        files in prop::collection::btree_map(
             "[a-z][a-z0-9_-]{1,12}\\.(rs|py|txt)",
             arb_gist_file(),
             0..4,
@@ -494,7 +505,7 @@ proptest! {
         git_pull_url in "[0-9a-f]{20}",
     ) {
         // Ensure file keys match GistFile.filename to maintain consistency.
-        let files: std::collections::HashMap<String, GistFile> = files
+        let files: std::collections::BTreeMap<String, GistFile> = files
             .into_iter()
             .map(|(k, mut v)| { v.filename = k.clone(); (k, v) })
             .collect();
@@ -525,7 +536,7 @@ proptest! {
         ),
         config_url in "[a-z]{5,15}",
     ) {
-        let mut config = std::collections::HashMap::new();
+        let mut config = serde_json::Map::new();
         config.insert("url".to_string(), serde_json::Value::String(format!("https://example.com/{config_url}")));
         config.insert("content_type".to_string(), serde_json::Value::String("json".to_string()));
         let events: Vec<String> = events.into_iter().map(ToString::to_string).collect();
@@ -564,9 +575,13 @@ proptest! {
         cve_id in prop::option::of("CVE-[0-9]{4}-[0-9]{5}"),
         summary in "[A-Za-z ]{10,60}",
         description in prop::option::of("[A-Za-z .]{10,80}"),
-        severity in prop_oneof![Just("critical"), Just("high"), Just("medium"), Just("low")],
-        state in prop_oneof![Just("published"), Just("withdrawn")],
-        vulnerabilities in prop::collection::vec(arb_vulnerability(), 0..4),
+        severity in prop::option::of(prop_oneof![
+            Just("critical"), Just("high"), Just("medium"), Just("low"),
+        ]),
+        state in prop_oneof![Just("published"), Just("withdrawn"), Just("draft")],
+        vulnerabilities in prop::option::of(prop::collection::vec(arb_vulnerability(), 0..4)),
+        created_at in prop::option::of(Just("2024-01-01T00:00:00Z")),
+        updated_at in prop::option::of(Just("2024-01-01T00:00:00Z")),
         published_at in prop::option::of(Just("2024-01-01T00:00:00Z")),
     ) {
         let advisory = SecurityAdvisory {
@@ -574,11 +589,11 @@ proptest! {
             cve_id,
             summary,
             description,
-            severity: severity.to_string(),
+            severity: severity.map(ToString::to_string),
             state: state.to_string(),
             vulnerabilities,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: created_at.map(str::to_string),
+            updated_at: updated_at.map(str::to_string),
             published_at: published_at.map(str::to_string),
             html_url: format!("https://github.com/advisories/{ghsa_id}"),
         };

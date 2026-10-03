@@ -122,7 +122,9 @@ mod tests {
 
     fn make_protection(branch: &str) -> BranchProtection {
         BranchProtection {
-            url: format!("https://api.github.com/repos/owner/repo/branches/{branch}/protection"),
+            url: Some(format!(
+                "https://api.github.com/repos/owner/repo/branches/{branch}/protection"
+            )),
             required_status_checks: None,
             enforce_admins: None,
             required_pull_request_reviews: None,

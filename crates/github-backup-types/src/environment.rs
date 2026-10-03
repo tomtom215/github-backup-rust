@@ -45,8 +45,10 @@ pub struct Environment {
 /// A single protection rule on a deployment environment.
 ///
 /// GitHub currently supports three rule types: `required_reviewers`,
-/// `wait_timer`, and `branch_policy`.  Unknown future types are preserved
-/// as raw JSON via the `raw` field.
+/// `wait_timer`, and `branch_policy`.  This typed view models only what is
+/// common to them; anything else a rule carries (including properties of
+/// rule types GitHub adds later) is not lost, because the backup stores the
+/// original JSON of the whole environment (see [`crate::Raw`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentProtectionRule {
     /// Numeric rule identifier.
@@ -69,10 +71,10 @@ pub struct EnvironmentProtectionRule {
 /// A reviewer (user or team) required to approve a deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentReviewer {
-    /// Reviewer type: `"User"` or `"Team"`.
-    #[serde(rename = "type")]
+    /// Reviewer type: `"User"` or `"Team"` (empty when GitHub omits it).
+    #[serde(default, rename = "type")]
     pub reviewer_type: String,
-    /// The reviewer's login name (for users) or slug (for teams).
+    /// The reviewer: the user or team object, as GitHub sent it.
     #[serde(default)]
     pub reviewer: Option<serde_json::Value>,
 }
