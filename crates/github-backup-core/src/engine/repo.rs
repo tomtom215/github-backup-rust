@@ -11,7 +11,7 @@ use tracing::info;
 
 use github_backup_client::BackupClient;
 use github_backup_types::config::{BackupOptions, OutputConfig};
-use github_backup_types::Repository;
+use github_backup_types::{Raw, Repository};
 
 use super::steps::{RunControl, Steps};
 use crate::{
@@ -64,7 +64,7 @@ pub(super) enum RepoResult {
 /// one is handed to the run control so the engine stops.
 pub(super) async fn backup_one_repo<C, S, G>(
     ctx: &RepoContext<'_, C, S, G>,
-    repo: &Repository,
+    repo: &Raw<Repository>,
 ) -> RepoResult
 where
     C: BackupClient,

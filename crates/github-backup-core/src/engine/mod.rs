@@ -35,7 +35,7 @@ use tracing::{error, info, warn};
 use github_backup_client::BackupClient;
 use github_backup_types::backup_state::BackupCheckpoint;
 use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
-use github_backup_types::Repository;
+use github_backup_types::{Raw, Repository};
 
 use self::incremental::{Incremental, RunSummary};
 use self::repo::{backup_one_repo, RepoContext, RepoResult};
@@ -361,10 +361,10 @@ where
     }
 
     /// Fetches the repository list using the user or org API as appropriate.
-    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Repository>, CoreError> {
+    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Raw<Repository>>, CoreError> {
         match self.opts.target {
-            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?),
-            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?),
+            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?.into_items()),
+            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?.into_items()),
         }
     }
 
@@ -376,12 +376,12 @@ where
     async fn write_repo_list(
         &self,
         owner: &str,
-        repos: &[Repository],
+        repos: &[Raw<Repository>],
         stats: &BackupStats,
         control: &RunControl,
         secrets: &[String],
     ) {
-        let included: Vec<&Repository> = repos
+        let included: Vec<&Raw<Repository>> = repos
             .iter()
             .filter(|r| should_include(r, &self.opts))
             .collect();
@@ -405,7 +405,7 @@ where
     async fn backup_repos_concurrent(
         &self,
         owner: &str,
-        repos: Vec<Repository>,
+        repos: Vec<Raw<Repository>>,
         stats: &BackupStats,
         incremental: &Incremental,
         control: &RunControl,

@@ -18,6 +18,7 @@
 //! | [`mod@write`] | label and milestone creation (used by restore mode)  |
 
 mod actions;
+mod assets;
 mod community;
 mod issues;
 mod keys;

@@ -35,3 +35,6 @@ pub(crate) mod mock_client;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod lossless_tests;

@@ -4,6 +4,9 @@
 //! Branch-protection rule types returned by the GitHub Branch Protection API.
 //!
 //! See `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
+//!
+//! The OpenAPI `branch-protection` schema declares *no* required property, so
+//! everything here is optional or defaulted.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +19,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchProtection {
     /// GitHub API URL for this protection resource.
-    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 
     /// Status-check requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,7 +70,8 @@ pub struct BranchProtection {
 /// A feature flag that is simply enabled or disabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleEnabled {
-    /// Whether the feature is currently enabled.
+    /// Whether the feature is currently enabled (`false` when omitted).
+    #[serde(default)]
     pub enabled: bool,
 }
 
@@ -83,8 +88,13 @@ pub struct AdminEnforcement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequiredStatusChecks {
     /// Whether branches must be up-to-date before merging.
-    pub strict: bool,
+    ///
+    /// Optional in the OpenAPI description (the protection payload of a rule
+    /// without "require branches to be up to date" omits it), hence `Option`.
+    #[serde(default)]
+    pub strict: Option<bool>,
     /// Status check context names that must pass.
+    #[serde(default)]
     pub contexts: Vec<String>,
     /// Fine-grained status check requirements (GitHub-defined objects).
     #[serde(default)]
@@ -102,7 +112,8 @@ pub struct RequiredPullRequestReviews {
     pub require_last_push_approval: bool,
     /// Whether code-owner review is required.
     pub require_code_owner_reviews: bool,
-    /// Minimum number of approving reviews required.
+    /// Minimum number of approving reviews required (`0` when omitted).
+    #[serde(default)]
     pub required_approving_review_count: u32,
 }
 
@@ -137,8 +148,8 @@ mod tests {
         });
         let bp: BranchProtection = serde_json::from_value(json).expect("deserialise");
         assert_eq!(
-            bp.url,
-            "https://api.github.com/repos/owner/repo/branches/main/protection"
+            bp.url.as_deref(),
+            Some("https://api.github.com/repos/owner/repo/branches/main/protection")
         );
         assert!(bp.enforce_admins.as_ref().unwrap().enabled);
         assert!(bp.required_status_checks.is_none());
@@ -158,8 +169,55 @@ mod tests {
         });
         let bp: BranchProtection = serde_json::from_value(json).expect("deserialise");
         let checks = bp.required_status_checks.unwrap();
-        assert!(checks.strict);
+        assert_eq!(checks.strict, Some(true));
         assert_eq!(checks.contexts, ["ci/tests", "ci/lint"]);
+    }
+
+    #[test]
+    fn required_status_checks_without_strict_parses() {
+        // The `branch-protection` example of the OpenAPI description carries
+        // only `contexts` and `checks`; `strict` used to be mandatory and made
+        // the whole repository's later categories fail.
+        let json = serde_json::json!({
+            "url": "https://api.github.com/repos/o/r/branches/main/protection",
+            "required_status_checks": {
+                "url": "https://api.github.com/repos/o/r/branches/main/protection/required_status_checks",
+                "contexts": ["continuous-integration/travis-ci"],
+                "checks": [{"context": "continuous-integration/travis-ci", "app_id": null}]
+            }
+        });
+
+        let bp: BranchProtection = serde_json::from_value(json).expect("deserialise");
+
+        let checks = bp.required_status_checks.expect("checks");
+        assert_eq!(checks.strict, None);
+        assert_eq!(checks.contexts.len(), 1);
+        assert_eq!(checks.checks.len(), 1);
+    }
+
+    #[test]
+    fn branch_protection_with_no_properties_at_all_parses() {
+        // The schema declares no required property.
+        let bp: BranchProtection = serde_json::from_value(serde_json::json!({})).expect("parse");
+        assert!(bp.url.is_none());
+    }
+
+    #[test]
+    fn spec_optional_nested_fields_default() {
+        let json = serde_json::json!({
+            "required_pull_request_reviews": {
+                "dismiss_stale_reviews": true,
+                "require_code_owner_reviews": false
+            },
+            "required_linear_history": {},
+            "allow_force_pushes": {"enabled": true}
+        });
+
+        let bp: BranchProtection = serde_json::from_value(json).expect("deserialise");
+
+        let reviews = bp.required_pull_request_reviews.expect("reviews");
+        assert_eq!(reviews.required_approving_review_count, 0);
+        assert!(!bp.required_linear_history.expect("flag").enabled);
     }
 
     #[test]

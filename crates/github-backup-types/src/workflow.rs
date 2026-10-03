@@ -64,8 +64,10 @@ pub struct WorkflowRun {
     pub head_sha: String,
     /// The event that triggered this run (e.g. `"push"`, `"pull_request"`).
     pub event: String,
-    /// Current status (`"queued"`, `"in_progress"`, `"completed"`).
-    pub status: String,
+    /// Current status (`"queued"`, `"in_progress"`, `"completed"`, ...);
+    /// `None` when GitHub sends `null` (the property is nullable).
+    #[serde(default)]
+    pub status: Option<String>,
     /// Conclusion once completed (`"success"`, `"failure"`, `"cancelled"`,
     /// `"skipped"`, `"timed_out"`, `"action_required"`, or `null`).
     #[serde(default)]
@@ -148,6 +150,32 @@ mod tests {
 
         let run: WorkflowRun = serde_json::from_value(json).expect("deserialise");
         assert!(run.conclusion.is_none());
-        assert_eq!(run.status, "in_progress");
+        assert_eq!(run.status.as_deref(), Some("in_progress"));
+    }
+
+    #[test]
+    fn workflow_run_accepts_null_and_absent_status() {
+        // `status` is nullable in the `workflow-run` schema.
+        let base = serde_json::json!({
+            "id": 2,
+            "run_number": 1,
+            "head_sha": "abc",
+            "event": "dynamic",
+            "status": null,
+            "conclusion": null,
+            "workflow_id": 1,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "url": "https://api.github.com/repos/o/r/actions/runs/2",
+            "html_url": "https://github.com/o/r/actions/runs/2"
+        });
+        let mut absent = base.clone();
+        absent.as_object_mut().expect("object").remove("status");
+
+        let null: WorkflowRun = serde_json::from_value(base).expect("null status");
+        let missing: WorkflowRun = serde_json::from_value(absent).expect("absent status");
+
+        assert!(null.status.is_none());
+        assert!(missing.status.is_none());
     }
 }

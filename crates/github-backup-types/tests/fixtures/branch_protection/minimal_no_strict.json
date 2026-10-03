@@ -1,0 +1,15 @@
+{
+  "url": "https://api.github.com/repos/octocat/Hello-World/branches/main/protection",
+  "required_status_checks": {
+    "url": "https://api.github.com/repos/octocat/Hello-World/branches/main/protection/required_status_checks",
+    "contexts": [
+      "ci/build"
+    ],
+    "checks": [
+      {
+        "context": "ci/build",
+        "app_id": null
+      }
+    ]
+  }
+}

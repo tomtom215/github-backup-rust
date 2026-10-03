@@ -3,7 +3,8 @@
 
 //! Storage abstraction for writing backup artefacts.
 
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -47,6 +48,62 @@ pub trait Storage: Send + Sync {
 
     /// Returns `true` if the given path already exists.
     fn exists(&self, path: &Path) -> bool;
+
+    /// Returns the size in bytes of the file at `path`, or `None` if it does
+    /// not exist (or the store cannot tell).
+    fn file_size(&self, _path: &Path) -> Option<u64> {
+        None
+    }
+
+    /// Opens the file at `path` for reading; `Ok(None)` if it does not exist
+    /// (or the store cannot read files back).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if the file exists but cannot be opened.
+    fn open_read(&self, _path: &Path) -> Result<Option<Box<dyn Read + Send>>, CoreError> {
+        Ok(None)
+    }
+
+    /// Starts writing a file of unknown size at `path` chunk by chunk.
+    ///
+    /// Nothing appears at `path` until [`PendingFile::finish`] succeeds, and
+    /// then it appears atomically: an interrupted or failed download never
+    /// leaves a truncated file behind.  Dropping the [`PendingFile`] without
+    /// finishing discards what was written.  Used for release assets, which
+    /// can be gigabytes and are never held in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if the destination cannot be prepared, or if the
+    /// store does not support streamed writes (the default).
+    fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
+        Err(CoreError::io(
+            path.display(),
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this storage does not support streamed writes",
+            ),
+        ))
+    }
+}
+
+/// A file being written incrementally; see [`Storage::begin_write`].
+pub trait PendingFile: Send {
+    /// Appends `chunk` to the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error (disk full, ...); the file is then unusable.
+    fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()>;
+
+    /// Makes the file visible at its destination, replacing an existing file
+    /// atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if the data cannot be flushed or moved into place.
+    fn finish(self: Box<Self>) -> Result<(), CoreError>;
 }
 
 /// Production [`Storage`] implementation backed by the real filesystem.
@@ -87,6 +144,72 @@ impl Storage for FsStorage {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn file_size(&self, path: &Path) -> Option<u64> {
+        std::fs::metadata(path)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+    }
+
+    fn open_read(&self, path: &Path) -> Result<Option<Box<dyn Read + Send>>, CoreError> {
+        match std::fs::File::open(path) {
+            Ok(file) => Ok(Some(Box::new(file))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::io(path.display(), e)),
+        }
+    }
+
+    fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
+        ensure_parent(path)?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Same directory as the destination, so the final rename is atomic.
+        let temp = path.with_file_name(format!(".{name}.part"));
+        let file = std::fs::File::create(&temp).map_err(|e| CoreError::io(temp.display(), e))?;
+        Ok(Box::new(FsPendingFile {
+            file: Some(file),
+            temp,
+            dest: path.to_path_buf(),
+        }))
+    }
+}
+
+/// [`PendingFile`] backed by a temporary `.<name>.part` file next to the
+/// destination.
+struct FsPendingFile {
+    file: Option<std::fs::File>,
+    temp: PathBuf,
+    dest: PathBuf,
+}
+
+impl PendingFile for FsPendingFile {
+    fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.write_all(chunk),
+            None => Err(std::io::Error::other("file already finished")),
+        }
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<(), CoreError> {
+        if let Some(file) = self.file.take() {
+            file.sync_all()
+                .map_err(|e| CoreError::io(self.temp.display(), e))?;
+        }
+        std::fs::rename(&self.temp, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
+    }
+}
+
+impl Drop for FsPendingFile {
+    fn drop(&mut self) {
+        // Still present when the download failed or was abandoned; after a
+        // successful `finish` the rename has already moved it.
+        if self.file.take().is_some() || self.temp.exists() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
     }
 }
 
@@ -173,6 +296,46 @@ pub(crate) mod test_support {
         fn exists(&self, path: &Path) -> bool {
             self.inner.lock().unwrap().contains_key(path)
         }
+
+        fn file_size(&self, path: &Path) -> Option<u64> {
+            self.inner
+                .lock()
+                .unwrap()
+                .get(path)
+                .map(|data| data.len() as u64)
+        }
+
+        fn open_read(&self, path: &Path) -> Result<Option<Box<dyn Read + Send>>, CoreError> {
+            Ok(self
+                .get(path)
+                .map(|data| Box::new(std::io::Cursor::new(data)) as Box<dyn Read + Send>))
+        }
+
+        fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
+            Ok(Box::new(MemPendingFile {
+                store: self.clone(),
+                path: path.to_path_buf(),
+                data: Vec::new(),
+            }))
+        }
+    }
+
+    /// In-memory [`PendingFile`]: the data lands in the store on `finish`.
+    struct MemPendingFile {
+        store: MemStorage,
+        path: PathBuf,
+        data: Vec<u8>,
+    }
+
+    impl PendingFile for MemPendingFile {
+        fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+            self.data.extend_from_slice(chunk);
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>) -> Result<(), CoreError> {
+            self.store.write_bytes(&self.path, &self.data)
+        }
     }
 }
 
@@ -204,6 +367,88 @@ mod tests {
         storage.write_bytes(&path, b"hello").expect("write_bytes");
 
         assert_eq!(std::fs::read(&path).expect("read"), b"hello");
+    }
+
+    #[test]
+    fn streamed_write_is_invisible_until_finish_then_atomic() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assets").join("big.bin");
+        let storage = FsStorage::new();
+
+        let mut pending = storage.begin_write(&path).expect("begin");
+        pending.write_chunk(b"hello ").expect("chunk 1");
+        pending.write_chunk(b"world").expect("chunk 2");
+        assert!(!path.exists(), "nothing at the destination before finish");
+
+        pending.finish().expect("finish");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"hello world");
+        assert_eq!(storage.file_size(&path), Some(11));
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(leftovers, ["big.bin"], "no temporary file remains");
+    }
+
+    #[test]
+    fn abandoned_streamed_write_leaves_neither_file_nor_temp_and_keeps_the_old_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("asset.bin");
+        std::fs::write(&path, b"previous complete copy").expect("seed");
+        let storage = FsStorage::new();
+
+        let mut pending = storage.begin_write(&path).expect("begin");
+        pending.write_chunk(b"partial").expect("chunk");
+        drop(pending); // the download failed half-way
+
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            b"previous complete copy",
+            "a failed download must not clobber an existing file"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["asset.bin"], "the temporary file is removed");
+    }
+
+    #[test]
+    fn abandoned_streamed_write_of_a_new_file_leaves_nothing() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("new.bin");
+        let storage = FsStorage::new();
+
+        let mut pending = storage.begin_write(&path).expect("begin");
+        pending.write_chunk(b"partial").expect("chunk");
+        drop(pending);
+
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
+    }
+
+    #[test]
+    fn open_read_returns_content_or_none() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, b"content").expect("write");
+        let storage = FsStorage::new();
+
+        let mut text = String::new();
+        storage
+            .open_read(&path)
+            .expect("open")
+            .expect("exists")
+            .read_to_string(&mut text)
+            .expect("read");
+
+        assert_eq!(text, "content");
+        assert!(storage
+            .open_read(&dir.path().join("missing"))
+            .expect("no error")
+            .is_none());
+        assert_eq!(storage.file_size(&dir.path().join("missing")), None);
     }
 
     #[test]

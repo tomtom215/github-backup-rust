@@ -3,7 +3,7 @@
 
 //! Deploy key and collaborator listing endpoints.
 
-use github_backup_types::{Collaborator, DeployKey};
+use github_backup_types::{Collaborator, DeployKey, Page};
 
 use crate::error::ClientError;
 
@@ -24,7 +24,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<DeployKey>, ClientError> {
+    ) -> Result<Page<DeployKey>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/keys?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -44,7 +44,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Collaborator>, ClientError> {
+    ) -> Result<Page<Collaborator>, ClientError> {
         let api = self.api();
         let url =
             format!("{api}/repos/{owner}/{repo}/collaborators?per_page={PER_PAGE}&affiliation=all");

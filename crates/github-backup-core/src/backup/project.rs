@@ -3,19 +3,47 @@
 
 //! GitHub Classic Projects (v1) backup.
 //!
-//! Writes `projects.json` and per-project column files to the repository
-//! metadata directory.  If Classic Projects are not enabled on the repository
-//! or the token lacks permissions (403/404) the function returns successfully
-//! with a count of 0.
+//! # Currently not functional against github.com
+//!
+//! GitHub sunset Classic Projects; the REST routes this module calls
+//! (`/repos/{owner}/{repo}/projects`, `/projects/{id}/columns`) are not part
+//! of the published API description of github.com, GHEC or GHES 3.17-3.19 and
+//! answer 404/410, so **nothing is backed up** there.  That is reported with
+//! one warning per run instead of passing silently; no project data is
+//! written.  (Projects v2 have different routes and are not implemented.)
+//! `projects.json` and per-project column files are only written if a server
+//! still implements the classic routes.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
 use crate::{error::CoreError, storage::Storage};
+
+/// Set once the "not supported" warning has been logged in this process.
+static WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Reports that `repo` has no classic-projects endpoint: one `warn!` per
+/// process, a `debug!` for every further repository.  Returns `true` for the
+/// call that warned.
+fn report_unsupported(warned: &AtomicBool, repo: &str) -> bool {
+    if warned.swap(true, Ordering::Relaxed) {
+        debug!(repo, "classic projects not backed up (no REST endpoint)");
+        false
+    } else {
+        warn!(
+            repo,
+            "--projects is not supported by the GitHub REST API: Classic Projects \
+             were sunset and Projects v2 are not implemented, so no projects are \
+             backed up (this warning is shown once per run)"
+        );
+        true
+    }
+}
 
 /// Backs up Classic Projects for a single repository.
 ///
@@ -44,12 +72,15 @@ pub async fn backup_projects(
     let projects = match client.list_repo_projects(owner, repo_name).await {
         Ok(p) => p,
         Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404 | 410,
-            ..
+            status: 404 | 410, ..
         }) => {
+            report_unsupported(&WARNED, &format!("{owner}/{repo_name}"));
+            return Ok(0);
+        }
+        Err(github_backup_client::ClientError::ApiError { status: 403, .. }) => {
             info!(
                 repo = format!("{owner}/{repo_name}"),
-                "skipping classic projects (feature disabled or insufficient permissions)"
+                "skipping classic projects (insufficient permissions)"
             );
             return Ok(0);
         }
@@ -139,6 +170,14 @@ mod tests {
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             cards: vec![],
         }
+    }
+
+    #[test]
+    fn unsupported_warning_is_given_once_per_process() {
+        let flag = AtomicBool::new(false);
+
+        assert!(report_unsupported(&flag, "o/a"), "first repository warns");
+        assert!(!report_unsupported(&flag, "o/b"), "later ones stay quiet");
     }
 
     #[tokio::test]

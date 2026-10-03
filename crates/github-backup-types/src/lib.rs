@@ -31,6 +31,14 @@
 //! | [`starred_queue`] | Durable queue types for starred-repo clone progress |
 //! | [`workflow`] | GitHub Actions workflow and workflow-run metadata |
 //! | [`environment`] | Repository deployment environments and protection rules |
+//! | [`raw`] | [`Raw`]: a typed object that remembers the exact JSON it came from |
+//! | [`page`] | [`Page`]: a decoded API list that keeps objects it cannot parse |
+//!
+//! # Lossless storage
+//!
+//! The model structs name only the fields the backup logic needs.  Anything
+//! written to disk therefore goes through [`Raw`] / [`Page`], which serialise
+//! the *original* API JSON rather than a re-serialised projection of it.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -51,8 +59,10 @@ pub mod issue;
 pub mod label;
 pub mod milestone;
 pub mod package;
+pub mod page;
 pub mod project;
 pub mod pull_request;
+pub mod raw;
 pub mod release;
 pub mod repository;
 pub mod security_advisory;
@@ -77,12 +87,14 @@ pub use discussion::{Discussion, DiscussionCategory, DiscussionComment};
 pub use environment::{DeploymentBranchPolicy, Environment, EnvironmentProtectionRule};
 pub use gist::Gist;
 pub use hook::Hook;
-pub use issue::{Issue, IssueComment, IssueEvent};
+pub use issue::{Issue, IssueComment, IssueEvent, IssueLabel};
 pub use label::Label;
 pub use milestone::Milestone;
 pub use package::{Package, PackageVersion};
+pub use page::Page;
 pub use project::{ClassicProject, ProjectCard, ProjectColumn};
 pub use pull_request::{PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview};
+pub use raw::Raw;
 pub use release::{Release, ReleaseAsset};
 pub use repository::Repository;
 pub use security_advisory::SecurityAdvisory;

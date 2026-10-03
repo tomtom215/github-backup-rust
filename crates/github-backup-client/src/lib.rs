@@ -16,10 +16,12 @@
 //! | Capability | Details |
 //! |-----------|---------|
 //! | Authentication | Personal access token (classic & fine-grained) |
-//! | Pagination | Automatic via `Link` response header |
+//! | Pagination | Automatic via `Link` response header (including the `{"total_count", "<list>"}` wrappers of workflows, runs and environments) |
+//! | Lossless lists | Lists are decoded element by element into a [`Page`](github_backup_types::Page): the original JSON of every element is kept, and an element that does not fit its model is isolated and logged instead of failing the list |
 //! | Rate limiting | Automatic back-off when `X-RateLimit-Remaining == 0`, honours `Retry-After`, capped at 5 minutes |
 //! | Retries | Up to 3 retries on transient 5xx with exponential back-off + jitter; 4xx fail fast |
 //! | Body cap | 16 MiB cap on API responses to protect against runaway streams |
+//! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
 //! | TLS | rustls with platform CA bundle |
 //! | Proxy | Automatic HTTP `CONNECT` tunnelling via `HTTPS_PROXY` |
 //!
@@ -44,12 +46,13 @@
 
 mod api_client;
 mod client;
+mod decode;
 mod error;
 pub mod oauth;
 mod pagination;
 mod rate_limit;
 
-pub use api_client::{BackupClient, BoxFuture};
+pub use api_client::{AssetSink, BackupClient, BoxFuture};
 pub use client::GitHubClient;
 pub use error::ClientError;
 pub use pagination::parse_next_link;

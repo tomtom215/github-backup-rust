@@ -149,7 +149,7 @@ mod tests {
             html_url: format!("https://github.com/users/octocat/packages/{package_type}/{name}"),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
-            owner: make_user(),
+            owner: Some(make_user()),
             repository: Some(PackageRepository {
                 name: "my-repo".to_string(),
                 full_name: "octocat/my-repo".to_string(),
@@ -162,7 +162,9 @@ mod tests {
         PackageVersion {
             id,
             name: name.to_string(),
-            html_url: format!("https://github.com/users/octocat/packages/npm/my-pkg/versions/{id}"),
+            html_url: Some(format!(
+                "https://github.com/users/octocat/packages/npm/my-pkg/versions/{id}"
+            )),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             metadata: None,

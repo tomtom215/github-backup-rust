@@ -2,13 +2,17 @@
 
 `github-backup` organises backup targets into distinct categories.  Each category can be enabled individually with a flag, or all can be enabled at once with `--all`.
 
+Every JSON file a category writes holds GitHub's complete API response (all
+properties, GitHub's key order), not a summary: see
+[Output Directory Layout](configuration/output-layout.md).
+
 ## Repositories
 
 | Flag | Description |
 |------|-------------|
 | `--repositories` | Clone all repositories for the owner |
 | `--forks` | Include forked repositories |
-| `--private` | Include private repositories (requires `repo` scope) |
+| `--private` | Include private repositories (requires `repo` scope; see below) |
 | `--prefer-ssh` | Use SSH URLs instead of HTTPS for cloning |
 | `--clone-type` | Clone mode: `mirror` (default), `bare`, `full`, `shallow:<n>` |
 | `--lfs` | Enable Git LFS support |
@@ -33,7 +37,22 @@ github-backup octocat --token $GITHUB_TOKEN --output /backup \
   --repositories --clone-type shallow:5
 ```
 
-Output: `<output>/<owner>/git/repos/<repo-name>.git/`
+Output: `<output>/<owner>/git/repos/<repo>.git/`
+
+### Private repositories
+
+GitHub's public listing (`GET /users/<owner>/repos`) never contains private
+repositories.  When the token **belongs to the account you are backing up**
+(the login is compared case-insensitively), the tool lists
+`GET /user/repos?affiliation=owner&visibility=all` instead, which includes the
+account's own private repositories, and `--private` then takes effect.  Only
+repositories the account owns are listed this way; repositories owned by
+organisations are backed up with `--org`.
+
+For any other user, without a token, or with a token that cannot call
+`GET /user` (a GitHub App installation token; a warning is logged), only public
+repositories are visible.  Organisation targets (`--org`) list private
+repositories the token can see, as before.
 
 ---
 
@@ -42,10 +61,16 @@ Output: `<output>/<owner>/git/repos/<repo-name>.git/`
 | Flag | Description |
 |------|-------------|
 | `--issues` | Issue metadata (title, body, state, labels, assignees) |
-| `--issue-comments` | Issue comment threads |
-| `--issue-events` | Issue timeline events (e.g. label, assign, close events) |
+| `--issue-comments` | Comment threads of every issue **and pull request** (a PR's conversation) |
+| `--issue-events` | Events of every issue and pull request (`closed`, `labeled`, `assigned`, ...) |
 
-Output: `<output>/<owner>/json/repos/<repo>/issues.json`
+Issues and pull requests share one number space, and GitHub's issues API lists
+pull requests too, so `--issue-comments` and `--issue-events` also write
+`issue_comments/<n>.json` and `issue_events/<n>.json` for pull requests.  The
+events come from `/issues/<n>/events`; the richer `/timeline` (cross-references,
+commits, reviews) is not fetched.
+
+Output: `<output>/<owner>/json/repos/<repo>/issues.json`, `issue_comments/<n>.json`, `issue_events/<n>.json`
 
 ---
 
@@ -54,11 +79,14 @@ Output: `<output>/<owner>/json/repos/<repo>/issues.json`
 | Flag | Description |
 |------|-------------|
 | `--pulls` | PR metadata (title, body, state, head/base refs) |
-| `--pull-comments` | Review comments on PRs |
-| `--pull-commits` | List of commits in each PR |
+| `--pull-comments` | Inline review comments on PRs |
+| `--pull-commits` | List of commits in each PR (GitHub lists at most 250) |
 | `--pull-reviews` | PR reviews (approve/request changes/comment) |
 
-Output: `<output>/<owner>/json/repos/<repo>/pulls.json`
+Output: `<output>/<owner>/json/repos/<repo>/pulls.json`, `pull_comments/<n>.json`, `pull_commits/<n>.json`, `pull_reviews/<n>.json`
+
+A pull request's conversation thread and events are written by
+`--issue-comments` / `--issue-events` (see Issues above).
 
 ---
 
@@ -71,7 +99,7 @@ Output: `<output>/<owner>/json/repos/<repo>/pulls.json`
 
 > **Warning**: `--release-assets` can consume significant disk space for projects with large binary releases.
 
-Output: `<output>/<owner>/json/repos/<repo>/releases.json`
+Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_assets/<tag>/<file>` (+ `<file>.sha256`)
 
 ---
 
@@ -94,7 +122,7 @@ Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 | `--hooks` | Webhook configurations (requires admin access) |
 | `--security-advisories` | Published security advisories |
 | `--topics` | Repository topics (tags) |
-| `--branches` | Branch list with tip SHAs and protection status |
+| `--branches` | Branch list with tip SHAs and protection status; detailed protection rules of protected branches in `branch_protections.json` (admin access) |
 | `--deploy-keys` | Deploy keys attached to the repository (requires admin access) |
 | `--collaborators` | Collaborator list with permissions (requires admin access) |
 
@@ -109,12 +137,20 @@ Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `to
 
 | Flag | Description |
 |------|-------------|
-| `--gists` | Clone gists owned by the backup target |
-| `--starred-gists` | Clone gists starred by the authenticated user |
+| `--gists` | Clone gists owned by the backup target (secret gists too, see below) |
+| `--starred-gists` | Save the metadata of gists starred by the authenticated user (**not cloned**) |
 
 Output:
-- Git: `<output>/<owner>/git/gists/<gist-id>.git/`
-- Metadata: `<output>/<owner>/json/gists/<gist-id>.json`
+- Git (owned gists only): `<output>/<owner>/git/gists/<gist-id>.git/`
+- Metadata: `<output>/<owner>/json/gists/<gist-id>.json`, `index.json`
+- Starred gists: `<output>/<owner>/json/gists/<gist-id>.starred.json`, `starred_index.json`
+
+`--starred-gists` records the gist objects GitHub lists (description, owner,
+file names and sizes, URLs); it does not clone their contents.
+
+GitHub's public listing (`GET /users/<owner>/gists`) omits secret gists.  When
+the token belongs to the account being backed up, `GET /gists` is used and
+secret gists are included; otherwise only public gists are visible.
 
 ---
 
@@ -142,7 +178,7 @@ Cloned starred repos: `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git`
 | Flag | Description |
 |------|-------------|
 | `--actions` | Workflow metadata (id, name, path, state, badge URL) |
-| `--action-runs` | Recent run history per workflow (requires `--actions`) |
+| `--action-runs` | Run history per workflow (requires `--actions`) |
 
 `--actions` saves `workflows.json` to each repository's metadata directory.
 The actual workflow YAML files are already captured by the git clone; this flag
@@ -150,7 +186,8 @@ records the API-level metadata that is not part of the repository tree (workflow
 IDs, states, badge URLs).
 
 `--action-runs` writes one file per workflow (`workflow_runs_<id>.json`) with
-recent execution history. This can be **very large** for active repositories;
+the workflow's runs; every page of GitHub's response is fetched, so this is the
+full retained history.  This can be **very large** for active repositories;
 opt in deliberately. It is omitted from `--all`.
 
 Output: `<output>/<owner>/json/repos/<repo>/workflows.json`, `workflow_runs_<id>.json`
@@ -182,13 +219,14 @@ Output: `<output>/<owner>/json/repos/<repo>/environments.json`
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | GitHub Discussions threads and their comments |
+| `--discussions` | **Not functional on github.com** |
 
-Saves `discussions.json` plus per-thread `discussion_comments_<n>.json` files
-to each repository's metadata directory.  Repositories without Discussions
-enabled return 404, which is logged and skipped.
-
-Output: `<output>/<owner>/json/repos/<repo>/discussions.json`
+> **Not supported by the GitHub REST API.**  GitHub exposes Discussions through
+> GraphQL only; the REST route this flag calls
+> (`GET /repos/<owner>/<repo>/discussions`) does not exist in GitHub's published
+> API description (github.com, GHEC, GHES 3.17-3.19) and answers 404.  The flag
+> is accepted, a single warning per run says that nothing is backed up, and no
+> `discussions.json` is written.  Do not rely on it for a backup of Discussions.
 
 ---
 
@@ -196,13 +234,14 @@ Output: `<output>/<owner>/json/repos/<repo>/discussions.json`
 
 | Flag | Description |
 |------|-------------|
-| `--projects` | Classic Projects (v1) and their column structure |
+| `--projects` | **Not functional on github.com** |
 
-Saves `projects.json` and per-project `project_columns_<id>.json` files to
-each repository's metadata directory.  Classic Projects must be enabled on
-the repository; otherwise the call returns 404 and is skipped.
-
-Output: `<output>/<owner>/json/repos/<repo>/projects.json`
+> **Not supported by the GitHub REST API.**  GitHub sunset Classic Projects; the
+> REST routes this flag calls (`/repos/<owner>/<repo>/projects`,
+> `/projects/<id>/columns`) are absent from GitHub's published API description
+> and answer 404/410.  The flag is accepted, a single warning per run says that
+> nothing is backed up, and no `projects.json` is written.  Projects v2 are not
+> implemented.
 
 ---
 

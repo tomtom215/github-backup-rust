@@ -118,13 +118,13 @@ async fn repos_are_cloned_into_subdirectory() {
         description: None,
         clone_url: "https://github.com/rust-lang/rust.git".to_string(),
         ssh_url: "git@github.com:rust-lang/rust.git".to_string(),
-        default_branch: "master".to_string(),
+        default_branch: Some("master".to_string()),
         size: 500_000,
         has_issues: true,
         has_wiki: true,
-        created_at: "2010-01-01T00:00:00Z".to_string(),
+        created_at: Some("2010-01-01T00:00:00Z".to_string()),
         pushed_at: None,
-        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: Some("2026-01-01T00:00:00Z".to_string()),
         html_url: "https://github.com/rust-lang/rust".to_string(),
     };
 
@@ -181,13 +181,13 @@ async fn second_run_skips_done_items() {
         description: None,
         clone_url: "https://github.com/octocat/hello.git".to_string(),
         ssh_url: "git@github.com:octocat/hello.git".to_string(),
-        default_branch: "main".to_string(),
+        default_branch: Some("main".to_string()),
         size: 10,
         has_issues: true,
         has_wiki: false,
-        created_at: "2020-01-01T00:00:00Z".to_string(),
+        created_at: Some("2020-01-01T00:00:00Z".to_string()),
         pushed_at: None,
-        updated_at: "2020-01-01T00:00:00Z".to_string(),
+        updated_at: Some("2020-01-01T00:00:00Z".to_string()),
         html_url: "https://github.com/octocat/hello".to_string(),
     };
 

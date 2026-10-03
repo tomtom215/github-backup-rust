@@ -8,7 +8,6 @@
 //! serialisation → storage write works correctly without touching the network
 //! or the real filesystem.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use github_backup_types::{
@@ -75,7 +74,7 @@ async fn backup_issues_writes_issues_json_and_comments() {
         title: "Bug in foo".to_string(),
         body: Some("Details here".to_string()),
         state: "open".to_string(),
-        user: make_user(),
+        user: Some(make_user()),
         labels: vec![],
         assignees: vec![],
         comments: 1,
@@ -88,7 +87,7 @@ async fn backup_issues_writes_issues_json_and_comments() {
     };
     let comment = IssueComment {
         id: 10,
-        user: make_user(),
+        user: Some(make_user()),
         body: Some("Fixed!".to_string()),
         created_at: "2024-01-02T00:00:00Z".to_string(),
         updated_at: "2024-01-02T00:00:00Z".to_string(),
@@ -144,14 +143,9 @@ async fn backup_pull_requests_writes_prs_json() {
         title: "Add feature".to_string(),
         body: Some("Description".to_string()),
         state: "open".to_string(),
-        merged: Some(false),
-        user: make_user(),
+        user: Some(make_user()),
         labels: vec![],
         assignees: vec![],
-        commits: Some(1),
-        additions: Some(10),
-        deletions: Some(2),
-        changed_files: Some(1),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: "2024-01-01T00:00:00Z".to_string(),
         closed_at: None,
@@ -282,7 +276,7 @@ async fn backup_releases_writes_releases_json() {
 
 #[tokio::test]
 async fn backup_hooks_writes_hooks_json() {
-    let mut config = HashMap::new();
+    let mut config = serde_json::Map::new();
     config.insert(
         "url".to_string(),
         serde_json::Value::String("https://example.com/webhook".to_string()),
@@ -323,11 +317,11 @@ async fn backup_security_advisories_writes_json() {
         cve_id: None,
         summary: "Critical vulnerability".to_string(),
         description: Some("Details about the vulnerability".to_string()),
-        severity: "critical".to_string(),
+        severity: Some("critical".to_string()),
         state: "published".to_string(),
-        vulnerabilities: vec![],
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        updated_at: "2024-01-01T00:00:00Z".to_string(),
+        vulnerabilities: Some(vec![]),
+        created_at: Some("2024-01-01T00:00:00Z".to_string()),
+        updated_at: Some("2024-01-01T00:00:00Z".to_string()),
         published_at: Some("2024-01-01T00:00:00Z".to_string()),
         html_url: format!(
             "https://github.com/{OWNER}/{REPO}/security/advisories/GHSA-xxxx-yyyy-zzzz"
@@ -658,7 +652,7 @@ async fn backup_packages_writes_json_and_versions() {
         html_url: "https://github.com/users/octocat/packages/container/my-image".to_string(),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: "2024-01-01T00:00:00Z".to_string(),
-        owner: make_user(),
+        owner: Some(make_user()),
         repository: Some(PackageRepository {
             name: REPO.to_string(),
             full_name: format!("{OWNER}/{REPO}"),
@@ -668,7 +662,9 @@ async fn backup_packages_writes_json_and_versions() {
     let version = PackageVersion {
         id: 1,
         name: "sha256:abc123".to_string(),
-        html_url: "https://github.com/users/octocat/packages/container/my-image/1".to_string(),
+        html_url: Some(
+            "https://github.com/users/octocat/packages/container/my-image/1".to_string(),
+        ),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: "2024-01-01T00:00:00Z".to_string(),
         metadata: None,
@@ -715,7 +711,7 @@ async fn full_repo_metadata_pipeline_smoke_test() {
             title: "Issue 1".to_string(),
             body: None,
             state: "open".to_string(),
-            user: make_user(),
+            user: Some(make_user()),
             labels: vec![],
             assignees: vec![],
             comments: 0,
@@ -732,14 +728,9 @@ async fn full_repo_metadata_pipeline_smoke_test() {
             title: "PR 1".to_string(),
             body: None,
             state: "open".to_string(),
-            merged: Some(false),
-            user: make_user(),
+            user: Some(make_user()),
             labels: vec![],
             assignees: vec![],
-            commits: Some(1),
-            additions: Some(1),
-            deletions: Some(0),
-            changed_files: Some(1),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             closed_at: None,

@@ -29,7 +29,7 @@
 //! A rolling log of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
 //! Used by the TUI dashboard to display a run history table.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -266,7 +266,9 @@ impl BackupRunHistory {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackupCheckpoint {
     /// Full names (`owner/repo`) of repositories that have been fully backed up.
-    pub completed_repos: HashSet<String>,
+    ///
+    /// A sorted set, so the checkpoint file is written in a stable order.
+    pub completed_repos: BTreeSet<String>,
 
     /// ISO 8601 timestamp when this checkpoint was first created (= run start).
     pub run_started_at: String,
@@ -511,7 +513,7 @@ mod tests {
         let path = dir.path().join("checkpoint.json");
 
         let mut cp = BackupCheckpoint {
-            completed_repos: HashSet::new(),
+            completed_repos: BTreeSet::new(),
             run_started_at: "2026-01-01T00:00:00Z".to_string(),
         };
         cp.mark_complete_and_save("owner/repo-a", &path)
@@ -605,6 +607,21 @@ mod tests {
         assert!(cp.is_complete("owner/b"));
         assert!(!cp.is_complete("owner/c"));
         assert!(!cp.is_complete("owner/A")); // case-sensitive
+    }
+
+    #[test]
+    fn checkpoint_is_written_in_a_stable_order() {
+        // A `HashSet` iterated in a different order per instance, so two
+        // checkpoints with the same members could serialise differently.
+        let make = || {
+            let mut cp = BackupCheckpoint::default();
+            for i in 0..12 {
+                cp.completed_repos.insert(format!("owner/repo-{i}"));
+            }
+            serde_json::to_string(&cp).expect("serialise")
+        };
+
+        assert_eq!(make(), make());
     }
 
     #[test]

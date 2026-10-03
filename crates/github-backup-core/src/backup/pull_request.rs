@@ -146,8 +146,7 @@ mod tests {
             title: format!("PR #{number}"),
             body: None,
             state: "open".to_string(),
-            merged: None,
-            user: make_user(),
+            user: Some(make_user()),
             labels: vec![],
             assignees: vec![],
             milestone: None,
@@ -158,10 +157,6 @@ mod tests {
             merged_at: None,
             closed_at: None,
             html_url: format!("https://github.com/octocat/repo/pull/{number}"),
-            commits: None,
-            changed_files: None,
-            additions: None,
-            deletions: None,
         }
     }
 

@@ -101,13 +101,13 @@ mod tests {
             description: None,
             clone_url: "https://github.com/octocat/Hello-World.git".to_string(),
             ssh_url: "git@github.com:octocat/Hello-World.git".to_string(),
-            default_branch: "main".to_string(),
+            default_branch: Some("main".to_string()),
             size: 0,
             has_issues: true,
             has_wiki,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: Some("2024-01-01T00:00:00Z".to_string()),
             pushed_at: None,
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             html_url: "https://github.com/octocat/Hello-World".to_string(),
         }
     }

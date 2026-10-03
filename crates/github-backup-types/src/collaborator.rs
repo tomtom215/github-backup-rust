@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 pub struct CollaboratorPermissions {
     /// Can read (pull) the repository.
     pub pull: bool,
-    /// Can triage issues and pull requests.
+    /// Can triage issues and pull requests (`false` when GitHub omits it, as
+    /// older GitHub Enterprise Server releases do).
+    #[serde(default)]
     pub triage: bool,
     /// Can write (push) to the repository.
     pub push: bool,
-    /// Can manage the repository (but not settings/access).
+    /// Can manage the repository but not its settings/access (`false` when
+    /// GitHub omits it).
+    #[serde(default)]
     pub maintain: bool,
     /// Full administrative access.
     pub admin: bool,
@@ -87,5 +91,22 @@ mod tests {
         assert_eq!(c.login, "contributor");
         assert!(c.permissions.is_none());
         assert!(c.role_name.is_none());
+    }
+
+    #[test]
+    fn collaborator_permissions_without_triage_and_maintain_default_to_false() {
+        // `triage` and `maintain` are optional in the OpenAPI description.
+        let json = r#"{
+            "id": 6, "login": "old-ghes-user", "type": "User",
+            "avatar_url": "https://example.com/av.png",
+            "html_url": "https://github.example.com/old-ghes-user",
+            "permissions": {"pull": true, "push": true, "admin": false}
+        }"#;
+
+        let c: Collaborator = serde_json::from_str(json).expect("deserialise");
+
+        let p = c.permissions.expect("permissions");
+        assert!(p.pull && p.push);
+        assert!(!p.triage && !p.maintain && !p.admin);
     }
 }

@@ -9,7 +9,7 @@ use tracing::info;
 
 use github_backup_types::{
     config::{glob_match, BackupOptions, CloneType},
-    Repository,
+    Raw, Repository,
 };
 
 use url::Url;
@@ -23,11 +23,14 @@ use crate::{
 /// Backs up a single repository by writing its metadata JSON and performing a
 /// git clone (using the mode selected by `opts.clone_type`).
 ///
+/// `info.json` holds the repository object exactly as the API returned it
+/// (all ~90 properties), not just the typed fields.
+///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from storage writes or git operations.
 pub async fn backup_repository(
-    repo: &Repository,
+    repo: &Raw<Repository>,
     opts: &BackupOptions,
     repos_dir: &Path,
     meta_dir: &Path,

@@ -24,6 +24,10 @@ pub enum ClientError {
     #[error("JSON deserialisation error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Storing a streamed download at its local destination failed.
+    #[error("local write error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// GitHub returned a non-success HTTP status code.
     ///
     /// The `status` field contains the numeric code; `body` contains the
