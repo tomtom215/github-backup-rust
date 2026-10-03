@@ -95,7 +95,8 @@ fn render_info(frame: &mut Frame, dash: &DashboardState, cfg: &ConfigState, area
         .split(inner);
 
     // Left column: 8 columns of label.
-    let lw = (cols[0].width as usize).saturating_sub(8);
+    // One column of gap before the right-hand column.
+    let lw = (cols[0].width as usize).saturating_sub(8 + 1);
     let output = if cfg.output_dir.trim().is_empty() {
         "(not set)".to_string()
     } else {
@@ -115,7 +116,7 @@ fn render_info(frame: &mut Frame, dash: &DashboardState, cfg: &ConfigState, area
     frame.render_widget(left, cols[0]);
 
     // Right column: 10 columns of label.
-    let rw = (cols[1].width as usize).saturating_sub(10);
+    let rw = (cols[1].width as usize).saturating_sub(10 + 1);
     let last_run = fit(dash.last_backup_time.as_deref().unwrap_or("never"), rw);
     let last_repos = dash
         .last_backup_repos

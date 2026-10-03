@@ -58,6 +58,9 @@ fn render_tab_bar(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
                 .title(Span::styled(" Configure ", theme::TITLE)),
         )
         .highlight_style(theme::TAB_ACTIVE)
+        // No padding: all six titles then fit in 54 columns (the bar is only
+        // used from 56), and the dividers already carry the spacing.
+        .padding("", "")
         .divider(Span::styled(" | ", theme::DIM));
 
     frame.render_widget(tabs, area);

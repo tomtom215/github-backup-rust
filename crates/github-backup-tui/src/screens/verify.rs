@@ -64,10 +64,7 @@ fn render_header(
     } else if verify.done {
         if verify.is_clean() {
             Span::styled(
-                fit(
-                    "CLEAN - JSON manifest matches (git data is not covered)",
-                    w.saturating_sub(8),
-                ),
+                fit("CLEAN - manifest matches", w.saturating_sub(8)),
                 theme::OK_STYLE,
             )
         } else {
@@ -154,7 +151,10 @@ fn render_results(frame: &mut Frame, verify: &VerifyState, area: Rect, bordered:
     let mut lines: Vec<Line<'static>> = vec![Line::from(vec![
         Span::styled("OK:          ", theme::DIM),
         Span::styled(verify.ok.to_string(), theme::OK_STYLE),
-        Span::styled(" files verified", theme::DIM),
+        Span::styled(
+            " files verified (JSON data only; git mirrors are not covered)",
+            theme::DIM,
+        ),
     ])];
     push_section(
         &mut lines,

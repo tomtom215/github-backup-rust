@@ -163,9 +163,9 @@ fn display_order(run: &RunState) -> Vec<&RepoEntry> {
 fn render_repo_list(frame: &mut Frame, run: &RunState, area: Rect) {
     let failed = run.incomplete_repos();
     let title = if failed > 0 {
-        format!(" Repositories ({}, {failed} failed) ", run.repos.len())
+        format!(" Repos ({}, {failed} failed) ", run.repos.len())
     } else {
-        format!(" Repositories ({}) ", run.repos.len())
+        format!(" Repos ({}) ", run.repos.len())
     };
     let block = Block::default()
         .title(Span::styled(

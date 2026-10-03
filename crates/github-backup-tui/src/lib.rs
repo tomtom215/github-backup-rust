@@ -16,6 +16,7 @@
 //! A panic hook restores the terminal *before* the panic message is printed so
 //! the message is readable, and SIGINT/SIGTERM/SIGHUP are turned into an
 //! orderly cancel-then-quit instead of killing the process in raw mode.
+//! (SIGKILL cannot be handled; nothing can restore the terminal after it.)
 
 use std::io::{stdout, IsTerminal};
 use std::process::ExitCode;
@@ -179,7 +180,18 @@ pub async fn run_tui(initial: InitialConfig) -> ExitCode {
     .await;
 
     stop_input.store(true, Ordering::Relaxed);
-    let _ = input_thread.join();
+    // The reader normally notices the flag within 100 ms.  If the terminal has
+    // hung up, crossterm's blocking `read` can spin on EOF forever and never
+    // return, so waiting for it unconditionally would hang the process (this
+    // happened when the terminal window was closed): give it a moment, then
+    // leave it behind; it dies with the process.
+    let patience = Instant::now() + Duration::from_millis(400);
+    while !input_thread.is_finished() && Instant::now() < patience {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if input_thread.is_finished() {
+        let _ = input_thread.join();
+    }
 
     // Leave the alternate screen before anything is printed.
     drop(terminal);
@@ -214,7 +226,7 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(DEFAULT))
 }
 
-/// Turns SIGINT/SIGTERM/SIGHUP into [`event::BackupEvent::Shutdown`].
+/// Turns SIGINT/SIGTERM/SIGHUP/SIGQUIT into [`event::BackupEvent::Shutdown`].
 ///
 /// In raw mode Ctrl+C is an ordinary key; these signals only arrive from
 /// outside (`kill`, `docker stop`, a closing terminal).
@@ -222,10 +234,11 @@ fn spawn_signal_task(tx: progress::ProgressTx) {
     #[cfg(unix)]
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
-        let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (
+        let (Ok(mut term), Ok(mut hup), Ok(mut int), Ok(mut quit)) = (
             signal(SignalKind::terminate()),
             signal(SignalKind::hangup()),
             signal(SignalKind::interrupt()),
+            signal(SignalKind::quit()),
         ) else {
             return;
         };
@@ -234,6 +247,7 @@ fn spawn_signal_task(tx: progress::ProgressTx) {
                 _ = term.recv() => 143u8,
                 _ = hup.recv() => 129u8,
                 _ = int.recv() => 130u8,
+                _ = quit.recv() => 131u8,
             };
             if tx.send(event::BackupEvent::Shutdown { code }).is_err() {
                 return;

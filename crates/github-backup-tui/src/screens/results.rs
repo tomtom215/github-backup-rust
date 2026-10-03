@@ -151,7 +151,8 @@ enum StatsLayout {
 impl StatsLayout {
     /// Picks the richest layout that still leaves room for the failure panel.
     fn choose(remaining: u16, width: u16, has_panel: bool) -> Self {
-        let panel_min = if has_panel { 6 } else { 0 };
+        // The failure panel needs 3 list rows + 3 detail rows + borders to be useful.
+        let panel_min = if has_panel { 10 } else { 0 };
         if remaining >= 10 + panel_min {
             Self::Table
         } else if remaining >= 6 + panel_min && width >= 56 {
@@ -351,23 +352,37 @@ fn render_failures(frame: &mut Frame, res: &ResultsState, area: Rect) {
     }
 
     // Show the full text of the selected failure underneath when there is room.
-    let detail_h: u16 = if inner.height >= 8 { 3 } else { 0 };
+    let detail_h: u16 = if inner.height >= 7 { 3 } else { 0 };
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(detail_h)])
         .split(inner);
 
     let width = parts[0].width as usize;
-    let scope_w = (width * 3 / 10).clamp(8, 32).min(width.saturating_sub(4));
-    let step_w = res
+    let longest_scope = res
         .failures
         .iter()
-        .map(|f| f.step.chars().count())
+        .map(|f| f.scope.chars().count())
         .max()
-        .unwrap_or(4)
-        .clamp(4, 14)
-        .min(width.saturating_sub(scope_w + 6));
-    let msg_w = width.saturating_sub(2 + scope_w + 1 + step_w + 1);
+        .unwrap_or(8);
+    let scope_w = longest_scope
+        .clamp(8, 40)
+        .min(width * 45 / 100)
+        .min(width.saturating_sub(4));
+    // Narrow panels fold the step into the message ("clone: ...") instead of
+    // giving it a column of its own.
+    let own_step_col = width >= 64;
+    let step_w = if own_step_col {
+        res.failures
+            .iter()
+            .map(|f| f.step.chars().count())
+            .max()
+            .unwrap_or(4)
+            .clamp(4, 14)
+    } else {
+        0
+    };
+    let msg_w = width.saturating_sub(2 + scope_w + 1 + if own_step_col { step_w + 1 } else { 0 });
 
     let items: Vec<ListItem> = res
         .failures
@@ -383,11 +398,24 @@ fn render_failures(frame: &mut Frame, res: &ResultsState, area: Rect) {
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{:<step_w$}", fit(&f.step, step_w)),
+                    if own_step_col {
+                        format!("{:<step_w$} ", fit(&f.step, step_w))
+                    } else {
+                        String::new()
+                    },
                     theme::WARN_STYLE,
                 ),
-                Span::raw(" "),
-                Span::styled(fit(&one_line(&f.message), msg_w), theme::NORMAL),
+                Span::styled(
+                    fit(
+                        &if own_step_col {
+                            one_line(&f.message)
+                        } else {
+                            format!("{}: {}", f.step, one_line(&f.message))
+                        },
+                        msg_w,
+                    ),
+                    theme::NORMAL,
+                ),
             ]))
         })
         .collect();

@@ -895,13 +895,47 @@ fn title_bar_fits_and_marks_the_active_screen() {
 }
 
 #[test]
-fn tab_bar_shows_every_tab_at_80_columns() {
+fn tab_bar_shows_every_tab_from_56_columns_up() {
     let mut app = ready_app();
     app.screen = Screen::Configure;
-    let t = text(&app, 80, 24);
-    for name in crate::state::ConfigState::TAB_NAMES {
-        assert!(t.contains(name), "tab {name} missing at 80 columns:\n{t}");
+    for (w, h) in [(56u16, 16u16), (60, 16), (80, 24), (120, 40)] {
+        let t = text(&app, w, h);
+        for name in crate::state::ConfigState::TAB_NAMES {
+            assert!(t.contains(name), "{w}x{h}: tab {name} missing:\n{t}");
+        }
     }
+    // Narrower than that the bar collapses to the active tab and its position.
+    let t = text(&app, 40, 12);
+    assert!(t.contains("Auth  1/6"), "{t}");
+}
+
+#[test]
+fn dashboard_columns_do_not_run_into_each_other() {
+    let mut app = ready_app();
+    app.config.output_dir = "/a/very/long/output/directory/that/does/not/fit/anywhere".into();
+    for (w, h) in [(60u16, 16u16), (80, 24), (120, 40)] {
+        let rows = dump(&app, w, h);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("Output:"))
+            .expect("output row");
+        assert!(
+            row.contains(" Repos:"),
+            "{w}x{h}: no gap before right column: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn narrow_failure_list_folds_the_step_into_the_message() {
+    let app = app_with_results(done_event(
+        vec![failure("octocat/bad1", "clone", "git clone failed")],
+        1,
+        false,
+    ));
+    let t = text(&app, 40, 14);
+    assert!(t.contains("octocat/bad1"), "{t}");
+    assert!(t.contains("clone: git"), "{t}");
 }
 
 #[test]
