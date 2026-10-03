@@ -232,7 +232,10 @@ mod tests {
         assert_eq!(page.len(), 3);
         assert_eq!(page.unparsed_count(), 0);
         assert_eq!(page[1].name, "item-2");
-        assert_eq!(serde_json::to_value(&page).expect("serialise"), Value::Array(values));
+        assert_eq!(
+            serde_json::to_value(&page).expect("serialise"),
+            Value::Array(values)
+        );
     }
 
     #[test]
@@ -241,7 +244,7 @@ mod tests {
         let page: Page<Item> = Page::from_values(vec![good(1), bad.clone(), good(3)]);
 
         assert_eq!(page.len(), 2, "the two good elements stay typed");
-        assert_eq!(page.unparsed(), &[bad.clone()]);
+        assert_eq!(page.unparsed(), std::slice::from_ref(&bad));
         // Typed elements first (in order), then the unparsed ones: nothing lost.
         assert_eq!(
             serde_json::to_value(&page).expect("serialise"),
@@ -251,7 +254,13 @@ mod tests {
 
     #[test]
     fn non_object_garbage_is_kept_not_dropped() {
-        let garbage = vec![Value::Null, json!(42), json!("text"), json!([1, 2]), json!({})];
+        let garbage = vec![
+            Value::Null,
+            json!(42),
+            json!("text"),
+            json!([1, 2]),
+            json!({}),
+        ];
         let mut input = vec![good(1)];
         input.extend(garbage.clone());
 
@@ -295,8 +304,14 @@ mod tests {
     #[test]
     fn from_typed_builds_a_page_without_unparsed_elements() {
         let page = Page::from_typed(vec![
-            Item { id: 1, name: "a".into() },
-            Item { id: 2, name: "b".into() },
+            Item {
+                id: 1,
+                name: "a".into(),
+            },
+            Item {
+                id: 2,
+                name: "b".into(),
+            },
         ]);
 
         assert_eq!(page.len(), 2);

@@ -122,7 +122,8 @@ mod tests {
     fn well_formed_elements_are_typed_and_nothing_is_logged() {
         let mut page: Page<Item> = Page::new();
 
-        let log = captured(|| extend_page(&mut page, "https://api.test/items", vec![good(1), good(2)]));
+        let log =
+            captured(|| extend_page(&mut page, "https://api.test/items", vec![good(1), good(2)]));
 
         assert_eq!(page.len(), 2);
         assert_eq!(page.unparsed_count(), 0);
@@ -136,11 +137,11 @@ mod tests {
         let wrong_type = json!({"id": 4, "number": 9, "title": 5});
         let values = vec![
             good(1),
-            Value::Null,                  // index 1: null
-            absent.clone(),               // index 2: `title` absent
-            json!(42),                    // index 3: a number
-            wrong_type.clone(),           // index 4: wrong type
-            json!("text"),                // index 5: a string
+            Value::Null,        // index 1: null
+            absent.clone(),     // index 2: `title` absent
+            json!(42),          // index 3: a number
+            wrong_type.clone(), // index 4: wrong type
+            json!("text"),      // index 5: a string
             good(2),
         ];
         let mut page: Page<Item> = Page::new();
@@ -156,7 +157,11 @@ mod tests {
         assert_eq!(written.as_array().map(Vec::len), Some(7));
         assert_eq!(written[2], Value::Null);
         // ...and every one of them was reported.
-        assert_eq!(log.matches("WARN").count(), 5, "one warning per bad element:\n{log}");
+        assert_eq!(
+            log.matches("WARN").count(),
+            5,
+            "one warning per bad element:\n{log}"
+        );
         assert!(log.contains("https://api.test/items?page=1"), "{log}");
     }
 
@@ -170,7 +175,10 @@ mod tests {
         assert!(log.contains("https://api.test/repos/o/r/issues"), "{log}");
         assert!(log.contains("index=1"), "{log}");
         assert!(log.contains("id=77 number=5"), "{log}");
-        assert!(log.contains("invalid type"), "serde error is included: {log}");
+        assert!(
+            log.contains("invalid type"),
+            "serde error is included: {log}"
+        );
     }
 
     #[test]

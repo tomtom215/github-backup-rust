@@ -37,9 +37,7 @@ where
     match Option::<Value>::deserialize(deserializer)? {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(fields)) if fields.is_empty() => Ok(None),
-        Some(other) => User::deserialize(other)
-            .map(Some)
-            .map_err(D::Error::custom),
+        Some(other) => User::deserialize(other).map(Some).map_err(D::Error::custom),
     }
 }
 

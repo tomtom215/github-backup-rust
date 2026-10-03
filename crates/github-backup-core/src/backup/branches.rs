@@ -9,7 +9,7 @@
 //! `branch_protections.json`.  Requires admin access; 403/404 responses per
 //! branch are silently skipped.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use tracing::{debug, info};
@@ -23,7 +23,8 @@ use crate::{error::CoreError, storage::Storage};
 ///
 /// Saves `branches.json`.  When any branch has `protected: true` and the
 /// token has admin access, also saves `branch_protections.json` mapping
-/// branch name → protection rules.
+/// branch name → protection rules, each exactly as the API returned it
+/// (sorted by branch name, so the file is deterministic).
 ///
 /// Skipped when `opts.branches` is `false` or `opts.dry_run` is `true`.
 /// Individual protection-rule fetches that return 403/404 are skipped
@@ -66,7 +67,7 @@ pub async fn backup_branches(
         "fetching branch protection rules"
     );
 
-    let mut protections = HashMap::new();
+    let mut protections = BTreeMap::new();
     for branch_name in protected {
         match client.get_branch_protection(owner, repo, branch_name).await {
             Ok(rules) => {
@@ -105,6 +106,7 @@ mod tests {
     use crate::backup::mock_client::MockBackupClient;
     use crate::storage::test_support::MemStorage;
     use github_backup_types::{Branch, BranchCommit, BranchProtection, SimpleEnabled};
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     const META: &str = "/meta";

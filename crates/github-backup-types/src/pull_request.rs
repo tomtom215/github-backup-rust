@@ -222,7 +222,13 @@ mod tests {
         let object = value.as_object().expect("object");
 
         // These used to be invented as explicit `null`s in every backup.
-        for key in ["merged", "commits", "changed_files", "additions", "deletions"] {
+        for key in [
+            "merged",
+            "commits",
+            "changed_files",
+            "additions",
+            "deletions",
+        ] {
             assert!(!object.contains_key(key), "{key} must not be invented");
         }
     }

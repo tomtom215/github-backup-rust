@@ -176,7 +176,14 @@ mod tests {
 
         assert_eq!(raw.id, 7);
         assert_eq!(raw.name, "seven");
-        assert_eq!(raw.typed(), &Item { id: 7, name: "seven".into(), note: None });
+        assert_eq!(
+            raw.typed(),
+            &Item {
+                id: 7,
+                name: "seven".into(),
+                note: None
+            }
+        );
         assert_eq!(raw.clone().into_typed().id, 7);
         assert_eq!(raw.into_json(), sample());
     }
@@ -202,7 +209,11 @@ mod tests {
 
     #[test]
     fn from_typed_serialises_what_the_typed_value_serialises_to() {
-        let item = Item { id: 1, name: "one".into(), note: Some("n".into()) };
+        let item = Item {
+            id: 1,
+            name: "one".into(),
+            note: Some("n".into()),
+        };
 
         let raw = Raw::from_typed(item.clone());
 

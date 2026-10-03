@@ -300,7 +300,8 @@ impl GitHubClient {
 
         while let Some(url) = next_url.take() {
             debug!(url = %url, "GET");
-            let (mut body, link_header) = self.get_json_with_link::<Map<String, Value>>(&url).await?;
+            let (mut body, link_header) =
+                self.get_json_with_link::<Map<String, Value>>(&url).await?;
             let Some(Value::Array(values)) = body.remove(key) else {
                 return Err(ClientError::Json(serde::de::Error::custom(format!(
                     "response from {url} has no `{key}` array"
@@ -341,7 +342,10 @@ impl GitHubClient {
         let url = format!("{}/user", self.api_base);
         match self.get_json_with_link::<Value>(&url).await {
             Ok((user, _)) => {
-                let login = user.get("login").and_then(Value::as_str).map(str::to_string);
+                let login = user
+                    .get("login")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 if login.is_none() {
                     warn!("GET /user returned no `login`; listing public data only");
                 }

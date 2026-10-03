@@ -251,7 +251,10 @@ impl BackupClient for GitHubClient {
         Box::pin(GitHubClient::list_org_members(self, org))
     }
 
-    fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Page<Team>, ClientError>> {
+    fn list_org_teams<'a>(
+        &'a self,
+        org: &'a str,
+    ) -> BoxFuture<'a, Result<Page<Team>, ClientError>> {
         Box::pin(GitHubClient::list_org_teams(self, org))
     }
 

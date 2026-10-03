@@ -206,7 +206,7 @@ fn fixture_names(endpoint: &str) -> Vec<String> {
 }
 
 /// The part of a fixture that holds the elements.
-fn payload<'a>(shape: Shape, json: &'a Value) -> &'a Value {
+fn payload(shape: Shape, json: &Value) -> &Value {
     match shape {
         Shape::Wrapped(key) => &json[key],
         _ => json,
@@ -267,7 +267,10 @@ fn every_fixture_parses_and_is_written_back_exactly() {
             checked += 1;
         }
     }
-    assert!(checked >= 54, "expected at least 54 fixtures, saw {checked}");
+    assert!(
+        checked >= 54,
+        "expected at least 54 fixtures, saw {checked}"
+    );
 }
 
 #[test]
@@ -282,7 +285,10 @@ fn there_is_one_base_example_per_endpoint_and_no_orphan_fixture_directory() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     let on_disk: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
-    assert_eq!(on_disk, table, "fixture directories and endpoint table differ");
+    assert_eq!(
+        on_disk, table,
+        "fixture directories and endpoint table differ"
+    );
 
     for dir in &table {
         assert!(
@@ -292,7 +298,10 @@ fn there_is_one_base_example_per_endpoint_and_no_orphan_fixture_directory() {
     }
 
     let variants: usize = table.iter().map(|d| fixture_names(d).len() - 1).sum();
-    assert!(variants >= 13, "expected at least 13 variants, saw {variants}");
+    assert!(
+        variants >= 13,
+        "expected at least 13 variants, saw {variants}"
+    );
 }
 
 // ── 1 + 2 in detail: what the null / absent variants mean for the models ─────
@@ -312,7 +321,10 @@ fn issue_labels_may_have_a_null_colour_and_be_bare() {
     let issue = &page[0];
     assert!(issue.labels[0].color.is_none());
     assert_eq!(issue.labels[1].name, "bare-label");
-    assert!(issue.assignees.is_empty(), "absent assignees default to empty");
+    assert!(
+        issue.assignees.is_empty(),
+        "absent assignees default to empty"
+    );
 }
 
 #[test]
@@ -321,7 +333,10 @@ fn issue_that_is_a_pull_request_with_a_null_stub() {
 
     assert_eq!(page.unparsed_count(), 0);
     assert!(page[0].is_pull_request());
-    assert!(page[0].pull_request.as_ref().is_some_and(|s| s.url.is_none()));
+    assert!(page[0]
+        .pull_request
+        .as_ref()
+        .is_some_and(|s| s.url.is_none()));
 }
 
 #[test]
@@ -413,7 +428,10 @@ fn the_documented_security_advisory_parses_with_its_vulnerabilities() {
     assert_eq!(vulnerabilities.len(), 2);
     assert!(vulnerabilities[0].patched_versions.is_some());
     assert_eq!(
-        vulnerabilities[0].package.as_ref().and_then(|p| p.name.as_deref()),
+        vulnerabilities[0]
+            .package
+            .as_ref()
+            .and_then(|p| p.name.as_deref()),
         Some("a-package")
     );
 }
@@ -495,14 +513,23 @@ fn properties_the_models_do_not_name_survive_in_the_written_json() {
 
     // The typed projection drops these...
     let typed_only = serde_json::to_value(issues[0].typed()).expect("typed");
-    for key in ["node_id", "reactions", "author_association", "locked", "state_reason"] {
+    for key in [
+        "node_id",
+        "reactions",
+        "author_association",
+        "locked",
+        "state_reason",
+    ] {
         assert!(typed_only.get(key).is_none(), "{key} is not modelled");
     }
     // ...the written file keeps what GitHub sent.
     for key in ["node_id", "author_association", "locked", "state_reason"] {
         assert!(written[0].get(key).is_some(), "{key} lost from issues.json");
     }
-    assert!(written[0]["user"].get("gravatar_id").is_some(), "nested user fields kept");
+    assert!(
+        written[0]["user"].get("gravatar_id").is_some(),
+        "nested user fields kept"
+    );
 }
 
 #[test]
@@ -513,10 +540,22 @@ fn nothing_is_invented_for_pull_requests() {
 
     // The typed struct once carried these and wrote them as `null`; they exist
     // only on the single-PR endpoint, which the backup never calls.
-    for key in ["merged", "commits", "changed_files", "additions", "deletions"] {
+    for key in [
+        "merged",
+        "commits",
+        "changed_files",
+        "additions",
+        "deletions",
+    ] {
         assert!(!object.contains_key(key), "{key} must not appear");
     }
-    for key in ["_links", "requested_reviewers", "auto_merge", "diff_url", "merge_commit_sha"] {
+    for key in [
+        "_links",
+        "requested_reviewers",
+        "auto_merge",
+        "diff_url",
+        "merge_commit_sha",
+    ] {
         assert!(object.contains_key(key), "{key} lost from pulls.json");
     }
 }
@@ -533,12 +572,20 @@ fn webhook_last_response_is_kept_although_the_model_has_no_field_for_it() {
 #[test]
 fn environment_reviewer_properties_survive() {
     let json = read_json("environments", "example");
-    let page: Page<Environment> =
-        Page::from_values(json["environments"].as_array().expect("array").iter().cloned());
+    let page: Page<Environment> = Page::from_values(
+        json["environments"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .cloned(),
+    );
     let written = serde_json::to_value(&page).expect("serialise");
 
     assert_eq!(page.unparsed_count(), 0);
-    assert_eq!(written, json["environments"], "environments written unchanged");
+    assert_eq!(
+        written, json["environments"],
+        "environments written unchanged"
+    );
 }
 
 // ── 3: an element no model can parse is isolated, not fatal, not dropped ─────
@@ -553,7 +600,10 @@ fn garbage_among_issues_is_isolated_and_still_written() {
     assert_eq!(page[0].number, 1347);
     assert_eq!(page[1].number, 1348);
     assert_eq!(page.unparsed_count(), 3);
-    assert_eq!(page.unparsed(), &[input[1].clone(), input[2].clone(), input[3].clone()]);
+    assert_eq!(
+        page.unparsed(),
+        &[input[1].clone(), input[2].clone(), input[3].clone()]
+    );
 
     let written = serde_json::to_value(&page).expect("serialise");
     assert_eq!(
@@ -578,7 +628,10 @@ fn garbage_among_pull_requests_is_isolated_and_still_written() {
     assert_eq!(page.len(), 2);
     assert_eq!(page.unparsed(), &[input[1].clone(), input[3].clone()]);
     assert_eq!(
-        serde_json::to_value(&page).expect("serialise").as_array().map(Vec::len),
+        serde_json::to_value(&page)
+            .expect("serialise")
+            .as_array()
+            .map(Vec::len),
         Some(4)
     );
 }
@@ -609,7 +662,12 @@ fn serialising_every_list_fixture_twice_gives_identical_bytes() {
             let first = serde_json::to_string_pretty(&(endpoint.decode)(&json).written);
             let second = serde_json::to_string_pretty(&(endpoint.decode)(&json).written);
 
-            assert_eq!(first.expect("first"), second.expect("second"), "{}/{name}", endpoint.dir);
+            assert_eq!(
+                first.expect("first"),
+                second.expect("second"),
+                "{}/{name}",
+                endpoint.dir
+            );
         }
     }
 }

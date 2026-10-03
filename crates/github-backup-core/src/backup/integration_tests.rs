@@ -662,7 +662,9 @@ async fn backup_packages_writes_json_and_versions() {
     let version = PackageVersion {
         id: 1,
         name: "sha256:abc123".to_string(),
-        html_url: Some("https://github.com/users/octocat/packages/container/my-image/1".to_string()),
+        html_url: Some(
+            "https://github.com/users/octocat/packages/container/my-image/1".to_string(),
+        ),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         updated_at: "2024-01-01T00:00:00Z".to_string(),
         metadata: None,

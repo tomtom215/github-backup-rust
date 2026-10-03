@@ -123,8 +123,10 @@ pub trait BackupClient: Send + Sync {
     /// When the credential belongs to `username` the listing includes the
     /// account's secret gists (`GET /gists`); otherwise only public gists are
     /// visible (`GET /users/{username}/gists`).
-    fn list_gists<'a>(&'a self, username: &'a str)
-        -> BoxFuture<'a, Result<Page<Gist>, ClientError>>;
+    fn list_gists<'a>(
+        &'a self,
+        username: &'a str,
+    ) -> BoxFuture<'a, Result<Page<Gist>, ClientError>>;
 
     /// Returns gists starred by the authenticated user.
     fn list_starred_gists<'a>(&'a self) -> BoxFuture<'a, Result<Page<Gist>, ClientError>>;
@@ -316,7 +318,8 @@ pub trait BackupClient: Send + Sync {
     ) -> BoxFuture<'a, Result<Page<User>, ClientError>>;
 
     /// Lists teams in a GitHub organisation.
-    fn list_org_teams<'a>(&'a self, org: &'a str) -> BoxFuture<'a, Result<Page<Team>, ClientError>>;
+    fn list_org_teams<'a>(&'a self, org: &'a str)
+        -> BoxFuture<'a, Result<Page<Team>, ClientError>>;
 
     // ── GitHub Actions ────────────────────────────────────────────────────
 

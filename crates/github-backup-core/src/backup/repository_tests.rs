@@ -7,11 +7,11 @@
 use super::*;
 use crate::git::{test_support::SpyGitRunner, CloneOptions};
 use crate::storage::test_support::MemStorage;
-use github_backup_types::{config::BackupOptions, user::User, Repository};
+use github_backup_types::{config::BackupOptions, user::User, Raw, Repository};
 use std::path::PathBuf;
 
-fn make_repo(name: &str, private: bool, fork: bool) -> Repository {
-    Repository {
+fn make_repo(name: &str, private: bool, fork: bool) -> Raw<Repository> {
+    Raw::from_typed(Repository {
         id: 1,
         full_name: format!("octocat/{name}"),
         name: name.to_string(),
@@ -37,7 +37,7 @@ fn make_repo(name: &str, private: bool, fork: bool) -> Repository {
         pushed_at: None,
         updated_at: Some("2024-01-01T00:00:00Z".to_string()),
         html_url: format!("https://github.com/octocat/{name}"),
-    }
+    })
 }
 
 #[tokio::test]

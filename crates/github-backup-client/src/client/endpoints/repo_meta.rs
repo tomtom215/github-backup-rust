@@ -144,7 +144,11 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Page<Branch>, ClientError> {
+    pub async fn list_branches(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Page<Branch>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
         self.get_all_pages(&url).await

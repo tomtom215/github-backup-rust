@@ -19,8 +19,12 @@ use crate::{error::CoreError, storage::Storage};
 /// - `meta_dir/issue_comments/<number>.json` – comments per issue
 /// - `meta_dir/issue_events/<number>.json` – events per issue
 ///
-/// Returns the total number of issues fetched (including PR-linked ones, which
-/// are skipped for per-issue sub-resources).
+/// Returns the total number of issues fetched (including PR-linked ones).
+///
+/// Pull requests are issues too, so a pull request `N` gets its conversation
+/// in `issue_comments/N.json` and its events in `issue_events/N.json` like any
+/// issue does; its review comments, commits and reviews are in
+/// `pull_comments/N.json`, `pull_commits/N.json` and `pull_reviews/N.json`.
 ///
 /// # Errors
 ///
@@ -51,13 +55,12 @@ pub async fn backup_issues(
         return Ok(count);
     }
 
+    // Issues and pull requests share one number space, and the issues API
+    // returns every pull request too.  A pull request's conversation comments
+    // and events are served by the same `issues/{n}/...` endpoints, so they are
+    // fetched here for PRs as well (the PR backup only has the inline review
+    // comments, commits and reviews).
     for issue in &issues {
-        // The GitHub Issues API returns PRs too; skip them for issue-specific
-        // per-issue data (they are handled in the PR backup path).
-        if issue.is_pull_request() {
-            continue;
-        }
-
         if opts.issue_comments {
             let comments = client
                 .list_issue_comments(owner, repo_name, issue.number)
@@ -204,7 +207,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backup_issues_pr_linked_issues_skipped_for_per_issue_data() {
+    async fn backup_issues_pull_requests_get_their_conversation_and_events() {
+        // A pull request is an issue in the issues API and shares its number
+        // space; its conversation thread lives in `issues/{n}/comments`.
         let pr_issue = make_issue(1, true);
         let real_issue = make_issue(2, false);
         let client = MockBackupClient::new().with_issues(vec![pr_issue, real_issue]);
@@ -226,18 +231,16 @@ mod tests {
         .await
         .expect("backup_issues");
 
-        assert!(
-            storage
-                .get(&PathBuf::from("/meta/issue_comments/1.json"))
-                .is_none(),
-            "PR-linked issue #1 must not produce comment file"
-        );
-        assert!(
-            storage
-                .get(&PathBuf::from("/meta/issue_comments/2.json"))
-                .is_some(),
-            "regular issue #2 must produce comment file"
-        );
+        for n in [1, 2] {
+            for dir in ["issue_comments", "issue_events"] {
+                assert!(
+                    storage
+                        .get(&PathBuf::from(format!("/meta/{dir}/{n}.json")))
+                        .is_some(),
+                    "{dir}/{n}.json must exist (#1 is a pull request, #2 an issue)"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use std::path::Path;
 use chrono::Utc;
 
 use github_backup_types::starred_queue::{CloneState, StarredCloneQueue, StarredQueueItem};
-use github_backup_types::Repository;
+use github_backup_types::{Raw, Repository};
 
 use crate::error::CoreError;
 
@@ -72,7 +72,7 @@ pub struct QueueStats {
 pub fn load_or_create(
     path: &Path,
     owner: &str,
-    starred: &[Repository],
+    starred: &[Raw<Repository>],
 ) -> Result<StarredCloneQueue, CoreError> {
     let mut queue = if path.exists() {
         let data = std::fs::read_to_string(path)
@@ -138,7 +138,7 @@ pub fn compute_stats(queue: &StarredCloneQueue) -> QueueStats {
 /// Appends newly discovered starred repos to the queue.
 ///
 /// Items already present (by numeric repo ID) are never modified.
-fn merge_starred(queue: &mut StarredCloneQueue, repos: &[Repository]) {
+fn merge_starred(queue: &mut StarredCloneQueue, repos: &[Raw<Repository>]) {
     let known_ids: HashSet<u64> = queue.items.iter().map(|i| i.id).collect();
 
     for repo in repos {
@@ -177,9 +177,9 @@ mod tests {
         }
     }
 
-    fn make_repo(id: u64, full_name: &str) -> Repository {
+    fn make_repo(id: u64, full_name: &str) -> Raw<Repository> {
         let name = full_name.split('/').nth(1).unwrap_or(full_name).to_string();
-        Repository {
+        Raw::from_typed(Repository {
             id,
             full_name: full_name.to_string(),
             name: name.clone(),
@@ -199,7 +199,7 @@ mod tests {
             pushed_at: None,
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             html_url: format!("https://github.com/{full_name}"),
-        }
+        })
     }
 
     fn empty_queue(owner: &str) -> StarredCloneQueue {

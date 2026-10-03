@@ -3,19 +3,46 @@
 
 //! GitHub Discussions backup.
 //!
-//! Writes `discussions.json` and per-discussion comment files to the repository
-//! metadata directory.  The feature must be enabled on the repository; if the
-//! API returns 404 the function logs an informational message and returns
-//! successfully.
+//! # Currently not functional against github.com
+//!
+//! GitHub exposes Discussions through GraphQL only.  The REST route this
+//! module calls (`GET /repos/{owner}/{repo}/discussions`) does not exist in
+//! GitHub's published API description (github.com, GHEC, GHES 3.17-3.19), so
+//! it answers 404 and **nothing is backed up**.  That is reported with one
+//! warning per run (not silently as "feature not enabled"); no discussion data
+//! is written.  Writing `discussions.json` and per-discussion comment files
+//! only happens if a server does implement the route.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
 use crate::{error::CoreError, storage::Storage};
+
+/// Set once the "not supported" warning has been logged in this process.
+static WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Reports that `repo` has no discussions endpoint: one `warn!` per process,
+/// a `debug!` for every further repository.  Returns `true` for the call that
+/// warned.
+fn report_unsupported(warned: &AtomicBool, repo: &str) -> bool {
+    if warned.swap(true, Ordering::Relaxed) {
+        debug!(repo, "discussions not backed up (no REST endpoint)");
+        false
+    } else {
+        warn!(
+            repo,
+            "--discussions is not supported by the GitHub REST API: GitHub offers \
+             Discussions through GraphQL only, so no discussions are backed up \
+             (this warning is shown once per run)"
+        );
+        true
+    }
+}
 
 /// Backs up GitHub Discussions for a single repository.
 ///
@@ -24,9 +51,9 @@ use crate::{error::CoreError, storage::Storage};
 /// - For each discussion, writes `meta_dir/discussion_comments_<number>.json`
 ///   with the comments thread.
 ///
-/// Discussions must be enabled on the repository.  The API returns 404 when
-/// the feature is disabled; this is treated as a non-error and the function
-/// returns `Ok(0)`.
+/// The REST route does not exist on github.com, so the API answers 404/410.
+/// That is not an error: it is reported with a one-time warning and the
+/// function returns `Ok(0)`.
 ///
 /// Returns the number of discussions backed up.
 ///
@@ -50,10 +77,7 @@ pub async fn backup_discussions(
         Err(github_backup_client::ClientError::ApiError {
             status: 404 | 410, ..
         }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping discussions (feature not enabled on this repository)"
-            );
+            report_unsupported(&WARNED, &format!("{owner}/{repo_name}"));
             return Ok(0);
         }
         Err(e) => return Err(e.into()),
@@ -142,6 +166,15 @@ mod tests {
             html_url: format!("https://github.com/octocat/repo/discussions/1#comment-{id}"),
             user: make_user(),
         }
+    }
+
+    #[test]
+    fn unsupported_warning_is_given_once_per_process() {
+        let flag = AtomicBool::new(false);
+
+        assert!(report_unsupported(&flag, "o/a"), "first repository warns");
+        assert!(!report_unsupported(&flag, "o/b"), "later ones stay quiet");
+        assert!(!report_unsupported(&flag, "o/c"));
     }
 
     #[tokio::test]

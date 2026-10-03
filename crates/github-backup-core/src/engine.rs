@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use github_backup_client::GitHubClient;
 use github_backup_types::backup_state::BackupCheckpoint;
 use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
-use github_backup_types::Repository;
+use github_backup_types::{Raw, Repository};
 
 use crate::{
     backup::{
@@ -246,10 +246,10 @@ where
     }
 
     /// Fetches the repository list using the user or org API as appropriate.
-    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Repository>, CoreError> {
+    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Raw<Repository>>, CoreError> {
         match self.opts.target {
-            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?),
-            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?),
+            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?.into_items()),
+            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?.into_items()),
         }
     }
 
@@ -261,7 +261,7 @@ where
     async fn backup_repos_concurrent(
         &self,
         owner: &str,
-        repos: Vec<Repository>,
+        repos: Vec<Raw<Repository>>,
         stats: &BackupStats,
     ) {
         let total = repos.len();
@@ -452,7 +452,7 @@ struct RepoBackupContext<'a, S, G> {
 /// Extracted as a free function so it can be spawned as an independent task.
 async fn backup_one_repo<S, G>(
     ctx: &RepoBackupContext<'_, S, G>,
-    repo: &Repository,
+    repo: &Raw<Repository>,
 ) -> Result<bool, CoreError>
 where
     S: Storage,

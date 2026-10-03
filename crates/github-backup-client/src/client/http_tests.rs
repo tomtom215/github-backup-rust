@@ -69,7 +69,9 @@ impl FakeApi {
         let next_base = base.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
                 let routes = Arc::clone(&routes);
                 let log = Arc::clone(&log);
                 let next_base = next_base.clone();
@@ -180,7 +182,11 @@ async fn workflows_follow_every_page_and_merge_them() {
     ])
     .await;
 
-    let page = api.client(token()).list_workflows("o", "r").await.expect("workflows");
+    let page = api
+        .client(token())
+        .list_workflows("o", "r")
+        .await
+        .expect("workflows");
 
     assert_eq!(page.len(), 3, "all pages merged");
     assert_eq!(page[2].id, 3);
@@ -214,7 +220,10 @@ async fn workflow_runs_follow_every_page_and_merge_them() {
 
     assert_eq!(page.len(), 2);
     assert_eq!(api.targets(), [first, second]);
-    assert_eq!(serde_json::to_value(&page).expect("serialise")[1]["check_suite_id"], 99);
+    assert_eq!(
+        serde_json::to_value(&page).expect("serialise")[1]["check_suite_id"],
+        99
+    );
 }
 
 #[tokio::test]
@@ -224,7 +233,8 @@ async fn environments_follow_every_page_and_keep_unmodelled_properties() {
     let api = FakeApi::start(vec![
         (
             first,
-            Reply::ok(json!({"total_count": 2, "environments": [environment(1)]})).with_next(second),
+            Reply::ok(json!({"total_count": 2, "environments": [environment(1)]}))
+                .with_next(second),
         ),
         (
             second,
@@ -233,11 +243,18 @@ async fn environments_follow_every_page_and_keep_unmodelled_properties() {
     ])
     .await;
 
-    let page = api.client(token()).list_environments("o", "r").await.expect("environments");
+    let page = api
+        .client(token())
+        .list_environments("o", "r")
+        .await
+        .expect("environments");
 
     assert_eq!(page.len(), 2);
     let written = serde_json::to_value(&page).expect("serialise");
-    assert_eq!(written[0]["protection_rules"][0]["prevent_self_review"], false);
+    assert_eq!(
+        written[0]["protection_rules"][0]["prevent_self_review"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -252,7 +269,10 @@ async fn a_wrapper_without_the_expected_array_is_an_error_naming_the_url() {
         .expect_err("no `workflows` key");
 
     let text = err.to_string();
-    assert!(text.contains("`workflows`") && text.contains(target), "{text}");
+    assert!(
+        text.contains("`workflows`") && text.contains(target),
+        "{text}"
+    );
 }
 
 // ── Lossless, per-element decoding through the real HTTP path ────────────────
@@ -271,7 +291,11 @@ async fn a_garbage_element_in_a_list_does_not_fail_the_list() {
     )])
     .await;
 
-    let page = api.client(token()).list_org_repos("acme").await.expect("listing succeeds");
+    let page = api
+        .client(token())
+        .list_org_repos("acme")
+        .await
+        .expect("listing succeeds");
 
     assert_eq!(page.len(), 2);
     assert_eq!(page.unparsed_count(), 2);
@@ -288,16 +312,26 @@ async fn own_account_lists_private_repositories_through_user_repos() {
     let own_2 = "/user/repos?affiliation=owner&visibility=all&per_page=100&page=2";
     let api = FakeApi::start(vec![
         ("/user", Reply::ok(json!({"login": "Octocat"}))),
-        (own, Reply::ok(json!([repo(1, "public", false)])).with_next(own_2)),
+        (
+            own,
+            Reply::ok(json!([repo(1, "public", false)])).with_next(own_2),
+        ),
         (own_2, Reply::ok(json!([repo(2, "secret", true)]))),
     ])
     .await;
 
     // The login differs in case: GitHub logins are case-insensitive.
-    let page = api.client(token()).list_user_repos("octocat").await.expect("repos");
+    let page = api
+        .client(token())
+        .list_user_repos("octocat")
+        .await
+        .expect("repos");
 
     assert_eq!(page.len(), 2);
-    assert!(page.iter().any(|r| r.private), "the private repository is listed");
+    assert!(
+        page.iter().any(|r| r.private),
+        "the private repository is listed"
+    );
     assert_eq!(api.targets(), ["/user", own, own_2]);
 }
 
@@ -310,7 +344,11 @@ async fn other_users_keep_the_public_listing() {
     ])
     .await;
 
-    let page = api.client(token()).list_user_repos("someone").await.expect("repos");
+    let page = api
+        .client(token())
+        .list_user_repos("someone")
+        .await
+        .expect("repos");
 
     assert_eq!(page.len(), 1);
     assert_eq!(api.targets(), ["/user", public]);
@@ -343,10 +381,18 @@ async fn the_login_is_looked_up_once_per_client_and_shared_by_clones() {
 
     client.list_user_repos("octocat").await.expect("repos");
     client.clone().list_gists("octocat").await.expect("gists");
-    client.list_user_repos("octocat").await.expect("repos again");
+    client
+        .list_user_repos("octocat")
+        .await
+        .expect("repos again");
 
     let user_calls = api.targets().iter().filter(|t| *t == "/user").count();
-    assert_eq!(user_calls, 1, "one GET /user for the whole client: {:?}", api.targets());
+    assert_eq!(
+        user_calls,
+        1,
+        "one GET /user for the whole client: {:?}",
+        api.targets()
+    );
 }
 
 #[tokio::test]
@@ -376,9 +422,16 @@ async fn a_token_that_cannot_read_user_falls_back_to_public_listings() {
 #[tokio::test]
 async fn a_revoked_token_falls_back_on_401_too() {
     let public = "/users/octocat/repos?type=all&per_page=100";
-    let api = FakeApi::start(vec![("/user", Reply::status(401)), (public, Reply::ok(json!([])))]).await;
+    let api = FakeApi::start(vec![
+        ("/user", Reply::status(401)),
+        (public, Reply::ok(json!([]))),
+    ])
+    .await;
 
-    api.client(token()).list_user_repos("octocat").await.expect("falls back");
+    api.client(token())
+        .list_user_repos("octocat")
+        .await
+        .expect("falls back");
 
     assert_eq!(api.targets(), ["/user", public]);
 }
@@ -399,7 +452,11 @@ async fn own_account_lists_secret_gists_through_gists() {
     ])
     .await;
 
-    let page = api.client(token()).list_gists("octocat").await.expect("gists");
+    let page = api
+        .client(token())
+        .list_gists("octocat")
+        .await
+        .expect("gists");
 
     assert_eq!(page.len(), 1);
     assert!(!page[0].public, "a secret gist is listed");
@@ -415,7 +472,10 @@ async fn other_users_gists_keep_the_public_route() {
     ])
     .await;
 
-    api.client(token()).list_gists("someone").await.expect("gists");
+    api.client(token())
+        .list_gists("someone")
+        .await
+        .expect("gists");
 
     assert_eq!(api.targets(), ["/user", public]);
 }
@@ -430,5 +490,8 @@ async fn a_client_error_other_than_401_403_from_user_is_not_swallowed() {
         .await
         .expect_err("must propagate");
 
-    assert!(matches!(err, ClientError::ApiError { status: 404, .. }), "{err}");
+    assert!(
+        matches!(err, ClientError::ApiError { status: 404, .. }),
+        "{err}"
+    );
 }

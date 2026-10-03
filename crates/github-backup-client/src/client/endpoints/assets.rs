@@ -43,7 +43,8 @@ fn classify_redirect(from: &Url, to: &Url) -> Hop {
         return Hop::Refuse;
     }
     let same_origin = from.scheme() == to.scheme()
-        && from.host_str().map(str::to_ascii_lowercase) == to.host_str().map(str::to_ascii_lowercase)
+        && from.host_str().map(str::to_ascii_lowercase)
+            == to.host_str().map(str::to_ascii_lowercase)
         && from.port_or_known_default() == to.port_or_known_default();
     if same_origin {
         Hop::SameOrigin
@@ -197,7 +198,11 @@ mod tests {
             "https://api.github.com:8443/a",
             "https://api.github.com.evil.example/a",
         ] {
-            assert_eq!(classify_redirect(&from, &url(to)), Hop::DropCredential, "{to}");
+            assert_eq!(
+                classify_redirect(&from, &url(to)),
+                Hop::DropCredential,
+                "{to}"
+            );
         }
         // http -> https is an upgrade to another origin: followed, credential dropped.
         assert_eq!(
@@ -246,7 +251,9 @@ mod tests {
         let log = Arc::clone(&seen);
         tokio::spawn(async move {
             for response in responses {
-                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
                 let mut buf = vec![0u8; 8192];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 log.lock()
@@ -296,7 +303,11 @@ mod tests {
         let storage = storage_seen.lock().expect("storage");
         assert!(has_auth(&api[0]), "the API hop carries the credential");
         assert!(api[0].contains("ghp_SECRET"));
-        assert!(!has_auth(&storage[0]), "the storage hop must not: {}", storage[0]);
+        assert!(
+            !has_auth(&storage[0]),
+            "the storage hop must not: {}",
+            storage[0]
+        );
         assert!(!storage[0].contains("ghp_SECRET"));
         assert!(storage[0].starts_with("GET /blob?sig=abc "));
     }
@@ -340,11 +351,20 @@ mod tests {
 
     #[tokio::test]
     async fn too_many_redirects_is_an_error() {
-        let (port, _) = serve(vec![redirect("/a"), redirect("/b"), redirect("/c"), redirect("/d")]).await;
+        let (port, _) = serve(vec![
+            redirect("/a"),
+            redirect("/b"),
+            redirect("/c"),
+            redirect("/d"),
+        ])
+        .await;
         let client = GitHubClient::for_tests(Credential::Anonymous);
 
         let err = client
-            .download_release_asset(&format!("http://127.0.0.1:{port}/start"), &mut VecSink::default())
+            .download_release_asset(
+                &format!("http://127.0.0.1:{port}/start"),
+                &mut VecSink::default(),
+            )
             .await
             .expect_err("loop");
 
@@ -354,7 +374,8 @@ mod tests {
     #[tokio::test]
     async fn an_error_status_is_reported_and_nothing_is_written() {
         let (port, _) = serve(vec![
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope".to_string(),
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"
+                .to_string(),
         ])
         .await;
         let client = GitHubClient::for_tests(Credential::Anonymous);
@@ -365,7 +386,10 @@ mod tests {
             .await
             .expect_err("404");
 
-        assert!(matches!(err, ClientError::ApiError { status: 404, .. }), "{err}");
+        assert!(
+            matches!(err, ClientError::ApiError { status: 404, .. }),
+            "{err}"
+        );
         assert!(sink.0.is_empty());
     }
 
@@ -411,7 +435,10 @@ mod tests {
 
         assert_eq!(n as usize, body.len());
         assert_eq!(sink.total, body.len());
-        assert!(sink.chunks > 1, "must arrive in several chunks, not one buffer");
+        assert!(
+            sink.chunks > 1,
+            "must arrive in several chunks, not one buffer"
+        );
         assert!(sink.largest < body.len());
     }
 }
