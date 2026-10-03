@@ -34,7 +34,8 @@ After each backup run, confirm the following:
    ```
    INFO S3 sync complete uploaded=N skipped=M errored=0 deleted=0
    ```
-   Non-zero `errored` means some files were not uploaded.
+   If any upload or deletion failed the run exits non-zero and the error
+   lists the failed keys with the S3 status, code and a hint.
 
 ---
 
@@ -84,18 +85,18 @@ schedule the backup in an off-peak window.
 
 ### S3 upload failures
 
-Inspect the logs for lines matching `failed to upload file to S3`.  Common
-causes:
-- Invalid or expired AWS credentials
-- Bucket name or region mismatch
-- IAM policy missing `s3:PutObject` / `s3:HeadObject` permissions
+Look for `S3 ... failed with HTTP <status> <Code>` in the log; it ends with a
+hint. Common causes:
+- `SignatureDoesNotMatch` / `InvalidAccessKeyId`: wrong or expired credentials,
+  or an endpoint that belongs to another provider
+- `NoSuchBucket`: the bucket does not exist (it is never created) or the
+  endpoint/region is wrong
+- `AccessDenied`: the policy lacks `s3:ListBucket` / `s3:GetObject` /
+  `s3:PutObject` (see the [S3 guide](storage/s3.md#required-permissions))
+- `RequestTimeTooSkewed`: fix the system clock
+- "cannot reach the endpoint": network, DNS, or a proxy (S3 ignores `HTTPS_PROXY`)
 
-Validate credentials manually:
-```bash
-aws s3 ls s3://your-bucket/your-prefix/ --region us-east-1
-```
-
----
+Use `--dry-run` to test access without writing anything.
 
 ## Retention Management
 
@@ -127,45 +128,30 @@ github-backup octocat \
   ...
 ```
 
-**Warning:** this permanently deletes objects from S3 that are no longer in the
-local backup.  Review your local retention policy before enabling.
+Only objects under `<prefix>/<owner>/json/` are considered, and nothing is
+deleted when the backup run had failures, the local tree could not be fully
+read or is empty, or an upload failed. Try it with `--dry-run` first; it lists
+what would be removed. Deletion is permanent unless bucket versioning is on.
 
 ---
 
 ## Encryption Key Rotation
 
-To rotate the AES-256-GCM at-rest encryption key:
+Changing the key makes the next run upload every file again under the new
+key (the stored content digest is keyed). Objects whose local file is gone stay
+under the old key. The full procedure, including what to keep and when to
+retire the old key, is in the [encryption guide](storage/encryption.md#rotating-the-key).
 
-1. Generate a new key:
-   ```bash
-   openssl rand -hex 32
-   ```
+Short form:
 
-2. Download and decrypt all objects from S3 using the **old** key:
-   ```bash
-   # Example: decrypt a single file
-   github-backup \
-     --encrypt-key "$OLD_KEY" \
-     --decrypt \
-     --decrypt-input issues.json.enc \
-     --decrypt-output issues.json
-   ```
+1. Generate a new key: `openssl rand -hex 32`.
+2. Run a backup with `BACKUP_ENCRYPT_KEY=<new key>`.
+3. Decrypt one object with the new key to verify it.
+4. Optionally run once with `--s3-delete-stale` to drop objects still under the
+   old key, then retire the old key.
 
-3. Re-encrypt and upload with the **new** key by running a full backup:
-   ```bash
-   export BACKUP_ENCRYPT_KEY="$NEW_KEY"
-   github-backup octocat --all --s3-bucket my-backups
-   ```
-
-4. Delete the old `.enc` objects from S3:
-   ```bash
-   aws s3 rm s3://my-backups/ --recursive --exclude "*" --include "*.enc"
-   ```
-
-   Or use `--s3-delete-stale` on the next backup run to remove stale objects
-   automatically.
-
-5. Update the key stored in your secrets manager and revoke the old key.
+Do not run `aws s3 rm ... --include "*.enc"`: it deletes every encrypted
+object, new ones included.
 
 ---
 

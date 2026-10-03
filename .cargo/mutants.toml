@@ -69,10 +69,10 @@ exclude_globs = [
 
     # ── S3 client and sync ───────────────────────────────────────────────
     # The S3 client speaks raw HTTP to an S3-compatible endpoint with SigV4
-    # signing, multipart uploads, and XML parsing.  These need a real S3 or
-    # MinIO instance to exercise.  The pure cryptographic primitives in
-    # `signing.rs` and `encrypt.rs` are unit-tested directly with the
-    # AWS SigV4 test vectors.
+    # signing, multipart uploads, and XML parsing.  They are exercised by the
+    # in-process fake S3 server in `crates/github-backup-s3/tests/`, which
+    # verifies SigV4 independently; `signing.rs` also carries AWS's published
+    # S3 signature examples as known-answer tests.
     "crates/github-backup-s3/src/client.rs",
     "crates/github-backup-s3/src/sync.rs",
     "crates/github-backup-s3/src/signing.rs",
