@@ -68,6 +68,40 @@ pub async fn run_mirror_push_dest(
     }
 }
 
+/// Names of the repositories the backup's `repos.json` lists as public.
+///
+/// Mirrors are created private unless the source is known to be public, so a
+/// missing or unreadable listing means "everything private", never the reverse.
+fn public_repo_names(repos_json: &std::path::Path) -> std::collections::HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(repos_json) else {
+        return Default::default();
+    };
+    let Ok(serde_json::Value::Array(repos)) = serde_json::from_str(&text) else {
+        return Default::default();
+    };
+    repos
+        .iter()
+        .filter(|r| r.get("private").and_then(serde_json::Value::as_bool) == Some(false))
+        .filter_map(|r| r.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Turns the per-repository results of a mirror push into the run's outcome:
+/// any failed repository makes the push an error (the CLI maps it to a
+/// non-zero exit status), with every failure named.
+fn mirror_outcome(stats: &github_backup_mirror::runner::MirrorStats) -> Result<(), String> {
+    if stats.errored == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{} of {} repositories failed to push: {}",
+        stats.errored,
+        stats.errored + stats.pushed,
+        stats.failures.join("; ")
+    ))
+}
+
 /// Pushes repositories to a Gitea-compatible destination.
 async fn run_mirror_push_gitea(
     config: &GiteaConfig,
@@ -83,9 +117,16 @@ async fn run_mirror_push_gitea(
     }
 
     let description_prefix = format!("GitHub mirror of {owner}/");
-    let stats = push_mirrors(&client, config, &repos_dir, &description_prefix)
-        .await
-        .map_err(|e| e.to_string())?;
+    let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
+    let stats = push_mirrors(
+        &client,
+        config,
+        &repos_dir,
+        &description_prefix,
+        &public_repos,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     info!(
         pushed = stats.pushed,
@@ -93,14 +134,7 @@ async fn run_mirror_push_gitea(
         "Gitea mirror push complete"
     );
 
-    if stats.errored > 0 {
-        warn!(
-            errored = stats.errored,
-            "some repositories failed to push to Gitea mirror"
-        );
-    }
-
-    Ok(())
+    mirror_outcome(&stats)
 }
 
 /// Pushes repositories to a GitLab destination.
@@ -118,9 +152,16 @@ async fn run_mirror_push_gitlab(
     }
 
     let description_prefix = format!("GitHub mirror of {owner}/");
-    let stats = push_mirrors_gitlab(&client, config, &repos_dir, &description_prefix)
-        .await
-        .map_err(|e| e.to_string())?;
+    let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
+    let stats = push_mirrors_gitlab(
+        &client,
+        config,
+        &repos_dir,
+        &description_prefix,
+        &public_repos,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     info!(
         pushed = stats.pushed,
@@ -128,14 +169,7 @@ async fn run_mirror_push_gitlab(
         "GitLab mirror push complete"
     );
 
-    if stats.errored > 0 {
-        warn!(
-            errored = stats.errored,
-            "some repositories failed to push to GitLab mirror"
-        );
-    }
-
-    Ok(())
+    mirror_outcome(&stats)
 }
 
 /// Options for [`run_s3_sync_with`].
@@ -659,5 +693,45 @@ mod tests {
         assert!(summary.contains("1 added, 1 removed"), "{summary}");
         assert!(summary.contains("added:   new"), "{summary}");
         assert!(summary.contains("removed: gone"), "{summary}");
+    }
+
+    #[test]
+    fn only_repositories_listed_as_public_are_public() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("repos.json");
+        fs::write(
+            &path,
+            r#"[{"name":"open","private":false},{"name":"secret","private":true},{"name":"odd"}]"#,
+        )
+        .unwrap();
+        let public = public_repo_names(&path);
+        assert!(public.contains("open"));
+        assert!(!public.contains("secret"));
+        assert!(!public.contains("odd"), "unknown visibility is not public");
+    }
+
+    #[test]
+    fn missing_or_corrupt_listing_means_nothing_is_public() {
+        let dir = tempdir().unwrap();
+        assert!(public_repo_names(&dir.path().join("absent.json")).is_empty());
+        let bad = dir.path().join("bad.json");
+        fs::write(&bad, "not json").unwrap();
+        assert!(public_repo_names(&bad).is_empty());
+    }
+
+    #[test]
+    fn a_failed_repository_makes_the_mirror_push_an_error() {
+        let ok = github_backup_mirror::runner::MirrorStats {
+            pushed: 2,
+            ..Default::default()
+        };
+        assert!(mirror_outcome(&ok).is_ok());
+        let bad = github_backup_mirror::runner::MirrorStats {
+            pushed: 1,
+            errored: 1,
+            failures: vec!["r2: boom".to_owned()],
+        };
+        let err = mirror_outcome(&bad).expect_err("must fail");
+        assert!(err.contains("1 of 2") && err.contains("r2: boom"), "{err}");
     }
 }

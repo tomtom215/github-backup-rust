@@ -18,6 +18,7 @@ use tracing::{debug, info};
 
 use crate::config::GitLabConfig;
 use crate::error::MirrorError;
+use crate::push::verify_ours;
 
 const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -66,6 +67,12 @@ struct CreateProjectRequest<'a> {
 struct GitLabProject {
     id: u64,
     path_with_namespace: String,
+    /// Free-text description; carries the mirror marker.
+    #[serde(default)]
+    description: Option<String>,
+    /// `true` while the project has no commits.
+    #[serde(default)]
+    empty_repo: bool,
 }
 
 impl GitLabClient {
@@ -87,9 +94,11 @@ impl GitLabClient {
 
     /// Ensures the project `name` exists at the GitLab destination.
     ///
-    /// If it already exists, this is a no-op.  If not, it is created as an
-    /// empty (uninitialised) project so the subsequent `git push --mirror`
-    /// can succeed.
+    /// If it already exists it must carry `description` (the marker set when
+    /// this tool created it) or still be empty; otherwise
+    /// [`MirrorError::ForeignRepository`] is returned.  If not, it is created
+    /// as an empty (uninitialised) project, private or public, so the
+    /// subsequent push can succeed.
     ///
     /// # Errors
     ///
@@ -98,8 +107,15 @@ impl GitLabClient {
         &self,
         name: &str,
         description: &str,
+        private: bool,
     ) -> Result<(), MirrorError> {
-        if self.project_exists(name).await? {
+        if let Some(existing) = self.fetch_project(name).await? {
+            verify_ours(
+                name,
+                existing.description.as_deref(),
+                existing.empty_repo,
+                description,
+            )?;
             info!(
                 namespace = %self.config.namespace,
                 project = %name,
@@ -113,11 +129,11 @@ impl GitLabClient {
             project = %name,
             "creating GitLab mirror project"
         );
-        self.create_project(name, description).await
+        self.create_project(name, description, private).await
     }
 
-    /// Returns `true` if project `name` exists under the configured namespace.
-    async fn project_exists(&self, name: &str) -> Result<bool, MirrorError> {
+    /// Returns project `name` under the configured namespace, if it exists.
+    async fn fetch_project(&self, name: &str) -> Result<Option<GitLabProject>, MirrorError> {
         // GitLab identifies projects by `namespace/name` (URL-encoded).
         let path = format!("{}/{}", self.config.namespace, name);
         let encoded = percent_encode(&path);
@@ -137,8 +153,11 @@ impl GitLabClient {
         .map_err(|_| MirrorError::Timeout { url: url.clone() })??;
 
         match response.status() {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
+            StatusCode::OK => {
+                let body = collect_body(response.into_body()).await?;
+                Ok(Some(serde_json::from_slice(&body)?))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
             status => {
                 let body = collect_body(response.into_body()).await?;
                 Err(MirrorError::Api {
@@ -150,13 +169,14 @@ impl GitLabClient {
     }
 
     /// Creates a new uninitialised project at the GitLab destination.
-    async fn create_project(&self, name: &str, description: &str) -> Result<(), MirrorError> {
+    async fn create_project(
+        &self,
+        name: &str,
+        description: &str,
+        private: bool,
+    ) -> Result<(), MirrorError> {
         let url = format!("{}/projects", self.config.api_base());
-        let visibility = if self.config.private {
-            "private"
-        } else {
-            "public"
-        };
+        let visibility = if private { "private" } else { "public" };
 
         let body = serde_json::to_vec(&CreateProjectRequest {
             name,
