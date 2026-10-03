@@ -651,3 +651,34 @@ async fn a_checkpoint_without_an_activity_time_is_not_resumed() {
     engine.run(OWNER).await.expect("run");
     assert_eq!(git.recorded_calls().len(), 1);
 }
+
+/// A repository name from the API becomes a directory name; one that could
+/// leave the output tree must be refused, loudly, without any git or file work.
+#[tokio::test]
+async fn a_repository_named_like_a_path_is_refused_not_cloned() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let git = SpyGitRunner::default();
+    let client = MockBackupClient::new().with_user_repos(vec![repo("../../escape"), repo("fine")]);
+    let engine = engine_with(
+        client,
+        MemStorage::default(),
+        git.clone(),
+        root.path(),
+        opts(),
+    );
+
+    let stats = engine.run(OWNER).await.expect("run");
+
+    assert_eq!(
+        stats.repos_backed_up(),
+        1,
+        "the safe repository is still backed up"
+    );
+    assert_eq!(stats.failure_count(), 1, "{:?}", stats.failures());
+    assert!(stats.failures()[0]
+        .message
+        .contains("not a safe directory name"));
+    let urls: Vec<String> = git.recorded_calls().into_iter().map(|c| c.url).collect();
+    assert_eq!(urls.len(), 1, "{urls:?}");
+    assert!(urls[0].ends_with("/fine.git"));
+}

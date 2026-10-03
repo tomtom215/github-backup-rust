@@ -65,6 +65,13 @@ pub async fn backup_gists(
         info!(username, "fetching gists");
         let gists = client.list_gists(username).await?;
         for gist in &gists {
+            if !crate::paths::is_safe_component(&gist.id) {
+                warn!(gist = %gist.id, "gist id is not a safe file name; skipping it");
+                outcome
+                    .failed
+                    .push((gist.id.clone(), "unsafe gist id".to_string()));
+                continue;
+            }
             let meta_path = gists_meta_dir.join(format!("{}.json", gist.id));
             storage.write_json(&meta_path, gist)?;
 

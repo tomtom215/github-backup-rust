@@ -40,6 +40,7 @@ pub mod events;
 pub mod git;
 pub mod lock;
 pub mod manifest;
+pub(crate) mod paths;
 pub mod redact;
 pub mod starred_queue;
 pub mod stats;

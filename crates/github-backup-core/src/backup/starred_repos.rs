@@ -112,6 +112,7 @@ pub async fn backup_starred_repos(
 
     // ── Load or create queue ──────────────────────────────────────────────────
     let mut queue = starred_queue::load_or_create(queue_path, username, &starred)?;
+    starred_queue::begin_pass(&mut queue);
     let initial = starred_queue::compute_stats(&queue);
 
     info!(
@@ -174,6 +175,7 @@ pub async fn backup_starred_repos(
 
         // ── Retry loop ──────────────────────────────────────────────────────
         let mut success = false;
+        let mut gone = false;
         let mut last_err: Option<String> = None;
 
         for attempt in 0..MAX_ATTEMPTS {
@@ -187,6 +189,13 @@ pub async fn backup_starred_repos(
                     // it stays `Pending` with its retry budget untouched.
                     starred_queue::save(&mut queue, queue_path)?;
                     return Err(e);
+                }
+                // Deleted, blocked or made private upstream: retrying cannot help
+                // and it is not a failure of the backup — the earlier copy stays.
+                Err(e) if e.is_remote_missing() => {
+                    last_err = Some(e.to_string());
+                    gone = true;
+                    break;
                 }
                 Err(e) => {
                     last_err = Some(e.to_string());
@@ -241,6 +250,14 @@ pub async fn backup_starred_repos(
                 rate_per_min = format_rate(rate),
                 eta_secs = eta,
                 "starred repo cloned"
+            );
+        } else if gone {
+            queue.items[idx].state = CloneState::Done;
+            queue.items[idx].finished_at = Some(now);
+            queue.items[idx].last_error = last_err.clone();
+            warn!(
+                repo = %full_name,
+                "starred repository is no longer available upstream; keeping the copy from an earlier run"
             );
         } else {
             queue.items[idx].state = CloneState::Failed;

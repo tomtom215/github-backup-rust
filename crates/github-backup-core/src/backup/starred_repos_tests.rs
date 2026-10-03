@@ -158,7 +158,7 @@ async fn repos_are_cloned_into_subdirectory() {
 }
 
 #[tokio::test]
-async fn second_run_skips_done_items() {
+async fn a_finished_queue_is_refreshed_on_the_next_run() {
     use github_backup_types::starred_queue::StarredQueueItem;
     use github_backup_types::user::User;
     use github_backup_types::Repository;
@@ -231,8 +231,8 @@ async fn second_run_skips_done_items() {
 
     assert_eq!(
         git.recorded_calls().len(),
-        0,
-        "Done item must not be re-cloned"
+        1,
+        "a completed pass starts a new one: the mirror is updated, not left to go stale"
     );
 }
 
@@ -311,4 +311,130 @@ fn format_rate_is_not_constant_string() {
     assert_ne!(format_rate(1.0), format_rate(2.0));
     assert_ne!(format_rate(7.5), "");
     assert_ne!(format_rate(7.5), "xyzzy");
+}
+
+fn starred_repo(id: u64, full_name: &str) -> github_backup_types::Repository {
+    let (owner, name) = full_name.split_once('/').expect("owner/name");
+    serde_json::from_value(serde_json::json!({
+        "id": id, "full_name": full_name, "name": name,
+        "owner": {"id": 1, "login": owner, "type": "User", "avatar_url": "", "html_url": ""},
+        "private": false, "fork": false, "archived": false, "disabled": false,
+        "description": null,
+        "clone_url": format!("https://github.com/{full_name}.git"),
+        "ssh_url": format!("git@github.com:{full_name}.git"),
+        "default_branch": "main", "size": 1, "has_issues": true, "has_wiki": false,
+        "created_at": "2020-01-01T00:00:00Z", "pushed_at": null,
+        "updated_at": "2020-01-01T00:00:00Z",
+        "html_url": format!("https://github.com/{full_name}")
+    }))
+    .expect("repository")
+}
+
+fn item(
+    id: u64,
+    full_name: &str,
+    state: CloneState,
+) -> github_backup_types::starred_queue::StarredQueueItem {
+    github_backup_types::starred_queue::StarredQueueItem {
+        id,
+        full_name: full_name.to_string(),
+        clone_url: format!("https://github.com/{full_name}.git"),
+        ssh_url: format!("git@github.com:{full_name}.git"),
+        size_kb: 1,
+        state,
+        retries: 0,
+        last_error: None,
+        finished_at: None,
+    }
+}
+
+fn save_queue(
+    path: &std::path::Path,
+    items: Vec<github_backup_types::starred_queue::StarredQueueItem>,
+) {
+    let mut q = github_backup_types::starred_queue::StarredCloneQueue {
+        version: starred_queue::QUEUE_VERSION,
+        owner: "octocat".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        items,
+    };
+    starred_queue::save(&mut q, path).expect("save queue");
+}
+
+/// An interrupted pass resumes: items already done in it are not redone.
+#[tokio::test]
+async fn an_interrupted_pass_resumes_without_redoing_finished_items() {
+    let dir = TempDir::new().unwrap();
+    let queue_path = dir.path().join("queue.json");
+    save_queue(
+        &queue_path,
+        vec![
+            item(1, "a/done", CloneState::Done),
+            item(2, "b/todo", CloneState::Pending),
+        ],
+    );
+    let client = MockBackupClient::new()
+        .with_starred(vec![starred_repo(1, "a/done"), starred_repo(2, "b/todo")]);
+    let git = SpyGitRunner::default();
+
+    backup_starred_repos(
+        &client,
+        &git,
+        "octocat",
+        &starred_opts(),
+        dir.path(),
+        &queue_path,
+        &clone_opts(),
+    )
+    .await
+    .expect("run");
+
+    let urls: Vec<String> = git.recorded_calls().into_iter().map(|c| c.url).collect();
+    assert_eq!(urls.len(), 1, "{urls:?}");
+    assert!(urls[0].ends_with("b/todo.git"));
+}
+
+/// A repository deleted or made private upstream is not a backup failure: the
+/// earlier copy stays, it is not retried, and the run does not exit non-zero.
+#[tokio::test]
+async fn a_repository_that_vanished_upstream_is_kept_and_not_reported_as_a_failure() {
+    use crate::git::spy::SpyFailure;
+    let dir = TempDir::new().unwrap();
+    let queue_path = dir.path().join("queue.json");
+    let client = MockBackupClient::new()
+        .with_starred(vec![starred_repo(1, "a/gone"), starred_repo(2, "b/fine")]);
+    let git = SpyGitRunner::default().failing_when_url_contains(
+        "a/gone.git",
+        SpyFailure::Git {
+            code: 128,
+            stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/a/gone.git/' not found".into(),
+        },
+    );
+
+    let outcome = backup_starred_repos(
+        &client,
+        &git,
+        "octocat",
+        &starred_opts(),
+        dir.path(),
+        &queue_path,
+        &clone_opts(),
+    )
+    .await
+    .expect("run");
+
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+    assert_eq!(
+        git.recorded_calls().len(),
+        2,
+        "no retry of the vanished repository"
+    );
+    let q: github_backup_types::starred_queue::StarredCloneQueue =
+        serde_json::from_slice(&std::fs::read(&queue_path).unwrap()).unwrap();
+    assert!(
+        q.items.iter().all(|i| i.state == CloneState::Done),
+        "{:?}",
+        q.items.iter().map(|i| &i.state).collect::<Vec<_>>()
+    );
 }

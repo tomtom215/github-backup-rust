@@ -64,7 +64,8 @@ pub struct QueueStats {
 ///
 /// New repositories from `starred` are appended in [`CloneState::Pending`].
 /// Repositories already present in the queue (matched by GitHub repo ID) are
-/// left untouched — their `Done` or `Failed` state is preserved.
+/// left untouched — their state is preserved.  (See [`begin_pass`] for how a
+/// finished queue is refreshed on the next run.)
 ///
 /// # Errors
 ///
@@ -91,6 +92,25 @@ pub fn load_or_create(
 
     merge_starred(&mut queue, starred);
     Ok(queue)
+}
+
+/// Starts a new pass over the queue when the previous one is complete.
+///
+/// While a pass is **in progress** (some item is `Pending`) nothing changes, so
+/// an interrupted run resumes where it stopped.  Once nothing is `Pending`,
+/// every item goes back to `Pending` with its retry budget reset: each run
+/// refreshes every starred mirror and retries earlier failures, instead of
+/// cloning once and never updating.
+pub fn begin_pass(queue: &mut StarredCloneQueue) {
+    if queue.items.is_empty() || queue.items.iter().any(|i| i.state == CloneState::Pending) {
+        return;
+    }
+    for item in &mut queue.items {
+        item.state = CloneState::Pending;
+        item.retries = 0;
+        item.last_error = None;
+        item.finished_at = None;
+    }
 }
 
 /// Writes `queue` to `path` atomically.
@@ -320,5 +340,61 @@ mod tests {
         assert_eq!(queue.owner, "alice");
         assert_eq!(queue.items.len(), 1);
         assert_eq!(queue.items[0].id, 99);
+    }
+
+    fn qitem(id: u64, state: CloneState) -> github_backup_types::starred_queue::StarredQueueItem {
+        github_backup_types::starred_queue::StarredQueueItem {
+            id,
+            full_name: format!("o/r{id}"),
+            clone_url: String::new(),
+            ssh_url: String::new(),
+            size_kb: 0,
+            state,
+            retries: 3,
+            last_error: Some("boom".into()),
+            finished_at: Some("2026-01-01T00:00:00Z".into()),
+        }
+    }
+
+    fn q(items: Vec<github_backup_types::starred_queue::StarredQueueItem>) -> StarredCloneQueue {
+        StarredCloneQueue {
+            version: QUEUE_VERSION,
+            owner: "o".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            items,
+        }
+    }
+
+    #[test]
+    fn a_completed_pass_is_restarted_with_failures_retried() {
+        let mut queue = q(vec![
+            qitem(1, CloneState::Done),
+            qitem(2, CloneState::Failed),
+        ]);
+        begin_pass(&mut queue);
+        for item in &queue.items {
+            assert_eq!(item.state, CloneState::Pending);
+            assert_eq!(item.retries, 0);
+            assert!(item.last_error.is_none() && item.finished_at.is_none());
+        }
+    }
+
+    #[test]
+    fn a_pass_in_progress_is_left_alone() {
+        let mut queue = q(vec![
+            qitem(1, CloneState::Done),
+            qitem(2, CloneState::Pending),
+        ]);
+        begin_pass(&mut queue);
+        assert_eq!(queue.items[0].state, CloneState::Done);
+        assert_eq!(queue.items[1].state, CloneState::Pending);
+    }
+
+    #[test]
+    fn an_empty_queue_stays_empty() {
+        let mut queue = q(vec![]);
+        begin_pass(&mut queue);
+        assert!(queue.items.is_empty());
     }
 }

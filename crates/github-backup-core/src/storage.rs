@@ -268,6 +268,11 @@ pub(crate) mod test_support {
             self.inner.lock().unwrap().get(path).cloned()
         }
 
+        /// Returns every path that has been written.
+        pub fn written_paths(&self) -> Vec<PathBuf> {
+            self.inner.lock().unwrap().keys().cloned().collect()
+        }
+
         /// Returns the number of paths that have been written.
         pub fn len(&self) -> usize {
             self.inner.lock().unwrap().len()

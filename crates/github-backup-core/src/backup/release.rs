@@ -73,10 +73,11 @@ pub async fn backup_releases(
                 continue;
             }
 
+            // Both come from the API: neither may leave the assets directory.
             let asset_path = meta_dir
                 .join("release_assets")
-                .join(&release.tag_name)
-                .join(&asset.name);
+                .join(crate::paths::nested(&release.tag_name))
+                .join(crate::paths::file_name(&asset.name));
 
             if let Err(e) = backup_asset(client, asset, &asset_path, storage).await {
                 warn!(
@@ -600,5 +601,40 @@ mod tests {
         assert_eq!(parse_sha256_digest(&format!("sha1:{hex}")), None);
         assert_eq!(parse_sha256_digest("sha256:abc"), None);
         assert_eq!(parse_sha256_digest(&hex), None);
+    }
+
+    /// A hostile or buggy API (GitHub Enterprise Server, a proxy) must not be
+    /// able to place files outside the assets directory through a tag name or
+    /// an asset name.
+    #[tokio::test]
+    async fn tag_and_asset_names_cannot_escape_the_assets_directory() {
+        let mut asset = make_asset("../../../../outside/pwned.txt", "uploaded");
+        asset.size = 10;
+        let client = MockBackupClient::new()
+            .with_releases(vec![make_release("../../tagdir", vec![asset])])
+            .with_asset_bytes(b"asset-data".to_vec());
+        let storage = MemStorage::default();
+
+        run(&client, &storage).await.expect("backup_releases");
+
+        let root = PathBuf::from("/meta/release_assets");
+        let written: Vec<PathBuf> = storage
+            .written_paths()
+            .into_iter()
+            .filter(|p| p.to_string_lossy().contains("pwned"))
+            .collect();
+        assert!(
+            !written.is_empty(),
+            "the asset is still backed up, safely named"
+        );
+        for path in written {
+            assert!(path.starts_with(&root), "{path:?} escaped {root:?}");
+            assert!(
+                !path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)),
+                "{path:?}"
+            );
+        }
     }
 }

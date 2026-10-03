@@ -79,6 +79,16 @@ where
         return RepoResult::Skipped;
     }
 
+    // The name becomes a directory name; never let it leave the output tree.
+    if !crate::paths::is_safe_component(&repo.name) {
+        let mut steps = Steps::new(&repo.full_name, ctx.stats, ctx.control, ctx.secrets);
+        steps.record(
+            "repository",
+            "repository name is not a safe directory name; not backed up",
+        );
+        return RepoResult::Failed(steps.first_failure().unwrap_or_default().to_string());
+    }
+
     let repos_dir = ctx.output.repos_dir(ctx.owner);
     let wikis_dir = ctx.output.wikis_dir(ctx.owner);
     let meta_dir = ctx.output.repo_meta_dir(ctx.owner, &repo.name);
