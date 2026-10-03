@@ -35,22 +35,37 @@ pub struct GitCall {
 }
 
 impl GitRunner for SpyGitRunner {
-    fn mirror_clone(&self, url: &str, dest: &Path, _opts: &CloneOptions) -> Result<(), CoreError> {
+    async fn mirror_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        _opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
         self.record("mirror_clone", url, dest);
         Ok(())
     }
 
-    fn bare_clone(&self, url: &str, dest: &Path, _opts: &CloneOptions) -> Result<(), CoreError> {
+    async fn bare_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        _opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
         self.record("bare_clone", url, dest);
         Ok(())
     }
 
-    fn full_clone(&self, url: &str, dest: &Path, _opts: &CloneOptions) -> Result<(), CoreError> {
+    async fn full_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        _opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
         self.record("full_clone", url, dest);
         Ok(())
     }
 
-    fn shallow_clone(
+    async fn shallow_clone(
         &self,
         url: &str,
         dest: &Path,
@@ -61,12 +76,17 @@ impl GitRunner for SpyGitRunner {
         Ok(())
     }
 
-    fn lfs_clone(&self, url: &str, dest: &Path, _opts: &CloneOptions) -> Result<(), CoreError> {
+    async fn lfs_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        _opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
         self.record("lfs_clone", url, dest);
         Ok(())
     }
 
-    fn push_mirror(
+    async fn push_mirror(
         &self,
         src: &Path,
         remote_url: &str,
@@ -103,12 +123,13 @@ mod tests {
         CloneOptions::unauthenticated()
     }
 
-    #[test]
-    fn mirror_clone_records_call() {
+    #[tokio::test]
+    async fn mirror_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/test.git");
         runner
             .mirror_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .await
             .expect("mirror clone");
 
         let calls = runner.recorded_calls();
@@ -117,12 +138,13 @@ mod tests {
         assert_eq!(calls[0].dest, dest);
     }
 
-    #[test]
-    fn bare_clone_records_call() {
+    #[tokio::test]
+    async fn bare_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/bare.git");
         runner
             .bare_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .await
             .expect("bare clone");
 
         let calls = runner.recorded_calls();
@@ -130,12 +152,13 @@ mod tests {
         assert_eq!(calls[0].method, "bare_clone");
     }
 
-    #[test]
-    fn full_clone_records_call() {
+    #[tokio::test]
+    async fn full_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/full");
         runner
             .full_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .await
             .expect("full clone");
 
         let calls = runner.recorded_calls();
@@ -143,8 +166,8 @@ mod tests {
         assert_eq!(calls[0].method, "full_clone");
     }
 
-    #[test]
-    fn shallow_clone_records_call() {
+    #[tokio::test]
+    async fn shallow_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/shallow.git");
         runner
@@ -154,6 +177,7 @@ mod tests {
                 &opts(),
                 10,
             )
+            .await
             .expect("shallow clone");
 
         let calls = runner.recorded_calls();
@@ -161,12 +185,13 @@ mod tests {
         assert_eq!(calls[0].method, "shallow_clone");
     }
 
-    #[test]
-    fn lfs_clone_records_call() {
+    #[tokio::test]
+    async fn lfs_clone_records_call() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/lfs.git");
         runner
             .lfs_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .await
             .expect("lfs clone");
 
         let calls = runner.recorded_calls();
@@ -174,12 +199,13 @@ mod tests {
         assert_eq!(calls[0].method, "lfs_clone");
     }
 
-    #[test]
-    fn push_mirror_records_call() {
+    #[tokio::test]
+    async fn push_mirror_records_call() {
         let runner = SpyGitRunner::default();
         let src = PathBuf::from("/tmp/local.git");
         runner
             .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
+            .await
             .expect("push mirror");
 
         let calls = runner.recorded_calls();
@@ -187,15 +213,17 @@ mod tests {
         assert_eq!(calls[0].method, "push_mirror");
     }
 
-    #[test]
-    fn multiple_calls_all_recorded() {
+    #[tokio::test]
+    async fn multiple_calls_all_recorded() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/repo.git");
         runner
             .mirror_clone("https://github.com/a/b.git", &dest, &opts())
+            .await
             .unwrap();
         runner
             .bare_clone("https://github.com/c/d.git", &dest, &opts())
+            .await
             .unwrap();
         assert_eq!(runner.recorded_calls().len(), 2);
     }

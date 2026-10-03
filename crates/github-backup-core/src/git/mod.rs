@@ -10,9 +10,19 @@
 //!
 //! # Hardening features
 //!
-//! - **Clone timeout** — each git subprocess is killed if it exceeds
-//!   `CloneOptions::clone_timeout_secs` (default 600 s).  This prevents a
-//!   single stalled clone from blocking a worker indefinitely.
+//! - **Non-blocking** — the trait methods are `async`; [`ProcessGitRunner`]
+//!   runs each git invocation on Tokio's blocking pool, so a clone that takes
+//!   minutes never occupies an async worker thread and signal handling stays
+//!   responsive.
+//!
+//! - **Stall timeout, not a wall-clock limit** — a git subprocess is stopped
+//!   only when it has produced no output for
+//!   `CloneOptions::stall_timeout_secs` (default 600 s).  git is run with
+//!   `--progress`, so a huge repository that takes hours to clone is never
+//!   interrupted while it is making progress, but a hung connection is.
+//!
+//! - **Prompt shutdown** — [`request_shutdown`] stops running git processes
+//!   (and their transport helpers) within a fraction of a second.
 //!
 //! - **Partial clone cleanup** — if a fresh clone fails (destination did not
 //!   exist before the attempt), any partially written directory is removed so
@@ -26,20 +36,23 @@
 //! # Sub-modules
 //!
 //! - `askpass` — RAII guard that writes and cleans up the `GIT_ASKPASS` script
+//! - `process` — spawns and supervises one git subprocess
 //! - `spy` — test-only `SpyGitRunner` stub (available under `test_support` in tests)
 
 mod askpass;
+mod process;
 pub mod spy;
 
-use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tracing::{debug, info, warn};
 
 use crate::error::CoreError;
-use askpass::AskpassScript;
+use process::run_git;
+
+pub use process::{request_shutdown, shutdown_requested};
 
 // ── Public test-support re-export ─────────────────────────────────────────────
 
@@ -54,8 +67,9 @@ pub mod test_support {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/// Default per-clone timeout: 10 minutes.
-const DEFAULT_CLONE_TIMEOUT_SECS: u64 = 600;
+/// Default stall limit: a git process that prints nothing for 10 minutes is
+/// considered hung.
+const DEFAULT_STALL_TIMEOUT_SECS: u64 = 600;
 
 /// Git clone options passed to the runner.
 #[derive(Debug, Clone)]
@@ -65,24 +79,26 @@ pub struct CloneOptions {
     pub token: Option<String>,
     /// When `true`, skip `--prune` during updates.
     pub no_prune: bool,
-    /// Maximum seconds to wait for any single git subprocess before killing
-    /// it and returning [`CoreError::GitTimeout`].
+    /// Seconds a git subprocess may go without producing any output before it
+    /// is killed and [`CoreError::GitTimeout`] is returned.
     ///
-    /// Defaults to 600 s.
-    pub clone_timeout_secs: u64,
+    /// This is a *stall* limit, not a total time limit: git runs with
+    /// `--progress`, so a long transfer that keeps reporting progress is never
+    /// interrupted.  Defaults to 600 s.
+    pub stall_timeout_secs: u64,
     /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
     /// detect repository corruption early.
     pub run_fsck: bool,
 }
 
 impl CloneOptions {
-    /// No authentication, prune enabled, default timeout, fsck disabled.
+    /// No authentication, prune enabled, default stall limit, fsck disabled.
     #[must_use]
     pub fn unauthenticated() -> Self {
         Self {
             token: None,
             no_prune: false,
-            clone_timeout_secs: DEFAULT_CLONE_TIMEOUT_SECS,
+            stall_timeout_secs: DEFAULT_STALL_TIMEOUT_SECS,
             run_fsck: false,
         }
     }
@@ -108,17 +124,25 @@ impl Default for CloneOptions {
 ///
 /// For HTTPS URLs, `opts.token` is injected via a temporary `GIT_ASKPASS`
 /// script that is removed by a RAII guard after the git process exits.
+///
+/// The methods return `Send` futures so they can be awaited inside spawned
+/// Tokio tasks.
 pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a bare mirror (`git clone --mirror`).
     ///
-    /// If `dest` already exists, updates with `git remote update` (pruning
+    /// If `dest` already exists, updates it with `git fetch --all` (pruning
     /// deleted refs unless `opts.no_prune` is set).
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::GitFailed`] if git exits non-zero, or
     /// [`CoreError::GitSpawn`] if the binary cannot be started.
-    fn mirror_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+    fn mirror_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     /// Clones `url` into `dest` as a bare clone (`git clone --bare`).
     ///
@@ -128,7 +152,12 @@ pub trait GitRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
-    fn bare_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+    fn bare_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     /// Clones `url` into `dest` as a full working-tree clone.
     ///
@@ -138,7 +167,12 @@ pub trait GitRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
-    fn full_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+    fn full_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     /// Clones `url` into `dest` as a shallow clone with limited history.
     ///
@@ -155,7 +189,7 @@ pub trait GitRunner: Send + Sync {
         dest: &Path,
         opts: &CloneOptions,
         depth: u32,
-    ) -> Result<(), CoreError>;
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     /// Clones `url` into `dest` using Git LFS.
     ///
@@ -164,7 +198,12 @@ pub trait GitRunner: Send + Sync {
     /// # Errors
     ///
     /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
-    fn lfs_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError>;
+    fn lfs_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 
     /// Pushes all refs from the local repository at `src` to `remote_url`.
     ///
@@ -180,73 +219,92 @@ pub trait GitRunner: Send + Sync {
         src: &Path,
         remote_url: &str,
         opts: &CloneOptions,
-    ) -> Result<(), CoreError>;
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 }
 
 // ── Production implementation ─────────────────────────────────────────────────
 
 /// Production [`GitRunner`] that shells out to the system `git` binary.
-#[derive(Debug, Clone, Default)]
-pub struct ProcessGitRunner;
+#[derive(Debug, Clone)]
+pub struct ProcessGitRunner {
+    /// The program to execute; `git` (resolved through `PATH`) by default.
+    program: PathBuf,
+}
 
-impl ProcessGitRunner {
-    /// Creates a new [`ProcessGitRunner`].
-    #[must_use]
-    pub fn new() -> Self {
-        Self
+impl Default for ProcessGitRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
+impl ProcessGitRunner {
+    /// Creates a runner that executes the `git` found on `PATH`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_program("git")
+    }
+
+    /// Creates a runner that executes `program` instead of `git`.
+    ///
+    /// Intended for tests, which substitute a small script so process
+    /// handling can be exercised without a real remote.
+    #[must_use]
+    pub fn with_program(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+
+    /// Captures everything a blocking git job needs, by value.
+    fn job(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Job {
+        Job {
+            program: self.program.clone(),
+            url: url.to_owned(),
+            dest: dest.to_owned(),
+            opts: opts.clone(),
+        }
+    }
+}
+
+/// Runs `work` on Tokio's blocking pool so it never stalls an async worker.
+async fn blocking<F>(work: F) -> Result<(), CoreError>
+where
+    F: FnOnce() -> Result<(), CoreError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|join_err| Err(CoreError::TaskFailed(join_err.to_string())))
+}
+
 impl GitRunner for ProcessGitRunner {
-    fn mirror_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
-        let dest_str = path_to_str(dest)?;
-        if dest.exists() {
-            info!(dest = %dest.display(), "repository exists, updating mirror");
-            let update_args: &[&str] = if opts.no_prune {
-                &["remote", "update"]
-            } else {
-                &["remote", "update", "--prune"]
-            };
-            run_git(update_args, dest, opts.token.as_deref(), opts)
-        } else {
-            info!(url = %url, dest = %dest.display(), "cloning bare mirror");
-            let args = &["clone", "--mirror", url, dest_str];
-            clone_with_cleanup(args, dest, opts)
-        }
+    fn mirror_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        let job = self.job(url, dest, opts);
+        async move { blocking(move || job.mirror_clone()).await }
     }
 
-    fn bare_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
-        let dest_str = path_to_str(dest)?;
-        if dest.exists() {
-            info!(dest = %dest.display(), "bare repository exists, fetching");
-            let fetch_args: &[&str] = if opts.no_prune {
-                &["fetch", "--all"]
-            } else {
-                &["fetch", "--all", "--prune"]
-            };
-            run_git(fetch_args, dest, opts.token.as_deref(), opts)
-        } else {
-            info!(url = %url, dest = %dest.display(), "cloning bare");
-            let args = &["clone", "--bare", url, dest_str];
-            clone_with_cleanup(args, dest, opts)
-        }
+    fn bare_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        let job = self.job(url, dest, opts);
+        async move { blocking(move || job.bare_clone()).await }
     }
 
-    fn full_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
-        let dest_str = path_to_str(dest)?;
-        if dest.exists() {
-            info!(dest = %dest.display(), "full clone exists, fetching all branches");
-            let fetch_args: &[&str] = if opts.no_prune {
-                &["fetch", "--all"]
-            } else {
-                &["fetch", "--all", "--prune"]
-            };
-            run_git(fetch_args, dest, opts.token.as_deref(), opts)
-        } else {
-            info!(url = %url, dest = %dest.display(), "cloning full working tree");
-            let args = &["clone", "--no-local", url, dest_str];
-            clone_with_cleanup(args, dest, opts)
-        }
+    fn full_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        let job = self.job(url, dest, opts);
+        async move { blocking(move || job.full_clone()).await }
     }
 
     fn shallow_clone(
@@ -255,39 +313,19 @@ impl GitRunner for ProcessGitRunner {
         dest: &Path,
         opts: &CloneOptions,
         depth: u32,
-    ) -> Result<(), CoreError> {
-        let dest_str = path_to_str(dest)?;
-        let depth_str = depth.to_string();
-        if dest.exists() {
-            info!(dest = %dest.display(), depth, "shallow clone exists, deepening fetch");
-            run_git(
-                &["fetch", "--depth", &depth_str],
-                dest,
-                opts.token.as_deref(),
-                opts,
-            )
-        } else {
-            info!(url = %url, dest = %dest.display(), depth, "cloning shallow");
-            let args = &["clone", "--mirror", "--depth", &depth_str, url, dest_str];
-            clone_with_cleanup(args, dest, opts)
-        }
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        let job = self.job(url, dest, opts);
+        async move { blocking(move || job.shallow_clone(depth)).await }
     }
 
-    fn lfs_clone(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
-        let dest_str = path_to_str(dest)?;
-        if dest.exists() {
-            info!(dest = %dest.display(), "LFS repository exists, updating");
-            run_git(
-                &["lfs", "fetch", "--all"],
-                dest,
-                opts.token.as_deref(),
-                opts,
-            )
-        } else {
-            info!(url = %url, dest = %dest.display(), "cloning with LFS");
-            let args = &["lfs", "clone", url, dest_str];
-            clone_with_cleanup(args, dest, opts)
-        }
+    fn lfs_clone(
+        &self,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        let job = self.job(url, dest, opts);
+        async move { blocking(move || job.lfs_clone()).await }
     }
 
     fn push_mirror(
@@ -295,18 +333,159 @@ impl GitRunner for ProcessGitRunner {
         src: &Path,
         remote_url: &str,
         opts: &CloneOptions,
-    ) -> Result<(), CoreError> {
+    ) -> impl Future<Output = Result<(), CoreError>> + Send {
+        // For a push, `dest` is the local repository and `url` the remote.
+        let job = self.job(remote_url, src, opts);
+        async move { blocking(move || job.push_mirror()).await }
+    }
+}
+
+/// One owned, blocking git operation.  Holds no borrows so it can move onto
+/// the blocking pool.
+struct Job {
+    program: PathBuf,
+    url: String,
+    dest: PathBuf,
+    opts: CloneOptions,
+}
+
+impl Job {
+    fn mirror_clone(&self) -> Result<(), CoreError> {
+        let dest_str = path_to_str(&self.dest)?;
+        if self.dest.exists() {
+            info!(dest = %self.dest.display(), "repository exists, updating mirror");
+            self.update(self.fetch_all_args())
+        } else {
+            info!(url = %self.url, dest = %self.dest.display(), "cloning bare mirror");
+            self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, dest_str])
+        }
+    }
+
+    fn bare_clone(&self) -> Result<(), CoreError> {
+        let dest_str = path_to_str(&self.dest)?;
+        if self.dest.exists() {
+            info!(dest = %self.dest.display(), "bare repository exists, fetching");
+            self.update(self.fetch_all_args())
+        } else {
+            info!(url = %self.url, dest = %self.dest.display(), "cloning bare");
+            self.fresh_clone(&["clone", "--progress", "--bare", &self.url, dest_str])
+        }
+    }
+
+    fn full_clone(&self) -> Result<(), CoreError> {
+        let dest_str = path_to_str(&self.dest)?;
+        if self.dest.exists() {
+            info!(dest = %self.dest.display(), "full clone exists, fetching all branches");
+            self.update(self.fetch_all_args())
+        } else {
+            info!(url = %self.url, dest = %self.dest.display(), "cloning full working tree");
+            self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, dest_str])
+        }
+    }
+
+    fn shallow_clone(&self, depth: u32) -> Result<(), CoreError> {
+        let dest_str = path_to_str(&self.dest)?;
+        let depth_str = depth.to_string();
+        if self.dest.exists() {
+            info!(dest = %self.dest.display(), depth, "shallow clone exists, deepening fetch");
+            self.update(&["fetch", "--progress", "--depth", &depth_str])
+        } else {
+            info!(url = %self.url, dest = %self.dest.display(), depth, "cloning shallow");
+            self.fresh_clone(&[
+                "clone",
+                "--progress",
+                "--mirror",
+                "--depth",
+                &depth_str,
+                &self.url,
+                dest_str,
+            ])
+        }
+    }
+
+    fn lfs_clone(&self) -> Result<(), CoreError> {
+        let dest_str = path_to_str(&self.dest)?;
+        if self.dest.exists() {
+            info!(dest = %self.dest.display(), "LFS repository exists, updating");
+            self.update(&["lfs", "fetch", "--all"])
+        } else {
+            info!(url = %self.url, dest = %self.dest.display(), "cloning with LFS");
+            self.fresh_clone(&["lfs", "clone", &self.url, dest_str])
+        }
+    }
+
+    fn push_mirror(&self) -> Result<(), CoreError> {
         info!(
-            src = %src.display(),
-            remote = %remote_url,
+            src = %self.dest.display(),
+            remote = %self.url,
             "pushing mirror to remote"
         );
         run_git(
-            &["push", "--mirror", remote_url],
-            src,
-            opts.token.as_deref(),
-            opts,
+            &self.program,
+            &["push", "--progress", "--mirror", &self.url],
+            &self.dest,
+            self.opts.token.as_deref(),
+            &self.opts,
         )
+    }
+
+    /// Arguments that bring an existing clone up to date with its remote.
+    ///
+    /// `git fetch --all` is used rather than `git remote update` because it
+    /// accepts `--progress`; on a mirror clone the two yield identical refs
+    /// (including force-pushed branches and deleted tags with `--prune`).
+    fn fetch_all_args(&self) -> &'static [&'static str] {
+        if self.opts.no_prune {
+            &["fetch", "--progress", "--all"]
+        } else {
+            &["fetch", "--progress", "--all", "--prune"]
+        }
+    }
+
+    /// Runs an update command inside the existing repository.
+    fn update(&self, args: &[&str]) -> Result<(), CoreError> {
+        run_git(
+            &self.program,
+            args,
+            &self.dest,
+            self.opts.token.as_deref(),
+            &self.opts,
+        )
+    }
+
+    /// Performs a **fresh** clone: runs git with `args`, then:
+    /// - On failure: removes the partially-written destination directory.
+    /// - On success (when `opts.run_fsck`): runs `git fsck` and logs issues.
+    fn fresh_clone(&self, args: &[&str]) -> Result<(), CoreError> {
+        match run_git(
+            &self.program,
+            args,
+            Path::new("."),
+            self.opts.token.as_deref(),
+            &self.opts,
+        ) {
+            Ok(()) => {
+                if self.opts.run_fsck && self.dest.exists() {
+                    run_fsck(&self.program, &self.dest);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Remove any partial clone directory so the next run starts fresh.
+                if self.dest.exists() {
+                    if let Err(rm_err) = std::fs::remove_dir_all(&self.dest) {
+                        warn!(
+                            dest = %self.dest.display(),
+                            error = %rm_err,
+                            "failed to remove partial clone directory after git failure"
+                        );
+                    } else {
+                        debug!(dest = %self.dest.display(), "removed partial clone directory");
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -320,43 +499,14 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
     })
 }
 
-/// Performs a **fresh** clone: runs `git` with `args`, then:
-/// - On failure: removes the partially-written `dest` directory.
-/// - On success (when `opts.run_fsck`): runs `git fsck` and logs issues.
-fn clone_with_cleanup(args: &[&str], dest: &Path, opts: &CloneOptions) -> Result<(), CoreError> {
-    match run_git(args, Path::new("."), opts.token.as_deref(), opts) {
-        Ok(()) => {
-            if opts.run_fsck && dest.exists() {
-                run_fsck(dest);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            // Remove any partial clone directory so the next run starts fresh.
-            if dest.exists() {
-                if let Err(rm_err) = std::fs::remove_dir_all(dest) {
-                    warn!(
-                        dest = %dest.display(),
-                        error = %rm_err,
-                        "failed to remove partial clone directory after git failure"
-                    );
-                } else {
-                    debug!(dest = %dest.display(), "removed partial clone directory");
-                }
-            }
-            Err(e)
-        }
-    }
-}
-
 /// Runs `git fsck --no-dangling` on `repo_dir` and logs any issues found.
 ///
 /// Corruption is not treated as a fatal error — the backup has already
 /// completed — but the issues are logged at `warn` level so operators can
 /// investigate.
-fn run_fsck(repo_dir: &Path) {
+fn run_fsck(program: &Path, repo_dir: &Path) {
     debug!(repo = %repo_dir.display(), "running git fsck");
-    let output = Command::new("git")
+    let output = Command::new(program)
         .args(["fsck", "--no-dangling"])
         .current_dir(repo_dir)
         .output();
@@ -385,97 +535,13 @@ fn run_fsck(repo_dir: &Path) {
     }
 }
 
-/// Runs `git` with `args` in `cwd`, enforcing a per-process timeout.
-///
-/// If `token` is `Some`, `GIT_TERMINAL_PROMPT` is disabled and `GIT_ASKPASS`
-/// is set to a small inline script that echoes the token.  This keeps the
-/// credential out of the command line and the process list.
-///
-/// The subprocess is polled every 100 ms.  If `opts.clone_timeout_secs`
-/// elapses before it exits, the process is killed and
-/// [`CoreError::GitTimeout`] is returned.
-fn run_git(
-    args: &[&str],
-    cwd: &Path,
-    token: Option<&str>,
-    opts: &CloneOptions,
-) -> Result<(), CoreError> {
-    debug!(args = ?args, cwd = %cwd.display(), "running git");
-
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Inject token via GIT_ASKPASS to avoid embedding it in the URL.
-    let _askpass_guard;
-    if let Some(tok) = token {
-        _askpass_guard = AskpassScript::create(tok);
-        if let Some(ref script) = _askpass_guard {
-            cmd.env("GIT_TERMINAL_PROMPT", "0");
-            cmd.env("GIT_ASKPASS", script.path());
-            cmd.env("GIT_USERNAME", "x-access-token");
-        }
-    } else {
-        _askpass_guard = None;
-    }
-
-    let timeout = Duration::from_secs(opts.clone_timeout_secs);
-    let mut child = cmd.spawn().map_err(CoreError::GitSpawn)?;
-    // _askpass_guard kept alive until after process exits.
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait().map_err(CoreError::GitSpawn)? {
-            Some(status) => {
-                // Collect output from piped streams.
-                let stderr = read_child_stream(child.stderr.take());
-                let stdout = read_child_stream(child.stdout.take());
-
-                if status.success() {
-                    return Ok(());
-                }
-                let _ = stdout; // stdout rarely has useful info for errors
-                return Err(CoreError::GitFailed {
-                    args: args.join(" "),
-                    code: status.code().unwrap_or(-1),
-                    stderr,
-                });
-            }
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    // Reap the child to avoid zombies.
-                    let _ = child.wait();
-                    return Err(CoreError::GitTimeout {
-                        args: args.join(" "),
-                        timeout_secs: opts.clone_timeout_secs,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-}
-
-/// Reads all bytes from an optional piped stream into a lossy UTF-8 string.
-fn read_child_stream(stream: Option<impl Read>) -> String {
-    let Some(mut s) = stream else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    let _ = s.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::spy::SpyGitRunner;
     use super::*;
-    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     fn opts() -> CloneOptions {
         CloneOptions::unauthenticated()
@@ -507,7 +573,7 @@ mod tests {
         let opts = CloneOptions::unauthenticated();
         assert!(opts.token.is_none());
         assert!(!opts.no_prune);
-        assert_eq!(opts.clone_timeout_secs, DEFAULT_CLONE_TIMEOUT_SECS);
+        assert_eq!(opts.stall_timeout_secs, DEFAULT_STALL_TIMEOUT_SECS);
         assert!(!opts.run_fsck);
     }
 
@@ -515,31 +581,253 @@ mod tests {
     fn clone_options_default_matches_unauthenticated() {
         let a = CloneOptions::default();
         let b = CloneOptions::unauthenticated();
-        assert_eq!(a.clone_timeout_secs, b.clone_timeout_secs);
+        assert_eq!(a.stall_timeout_secs, b.stall_timeout_secs);
         assert_eq!(a.run_fsck, b.run_fsck);
         assert_eq!(a.no_prune, b.no_prune);
     }
 
-    #[test]
-    fn spy_runner_mirror_clone() {
+    #[tokio::test]
+    async fn spy_runner_mirror_clone() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/test.git");
         runner
             .mirror_clone("https://github.com/octocat/Hello-World.git", &dest, &opts())
+            .await
             .expect("mirror clone");
         let calls = runner.recorded_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].method, "mirror_clone");
     }
 
-    #[test]
-    fn spy_runner_push_mirror() {
+    #[tokio::test]
+    async fn spy_runner_push_mirror() {
         let runner = SpyGitRunner::default();
         let src = PathBuf::from("/tmp/local.git");
         runner
             .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
+            .await
             .expect("push mirror");
         let calls = runner.recorded_calls();
         assert_eq!(calls[0].method, "push_mirror");
+    }
+
+    // ── Process handling (stand-in `git` scripts, Unix only) ─────────────
+    //
+    // Process-wide shutdown (`request_shutdown`) is covered by the
+    // integration test `tests/git_shutdown.rs`, which runs in its own process
+    // so the one-way flag cannot leak into these tests.
+
+    /// Writes an executable shell script into `dir` and returns a runner that
+    /// executes it instead of the real `git`.
+    #[cfg(unix)]
+    fn runner_with_script(dir: &Path, body: &str) -> ProcessGitRunner {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-git");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        ProcessGitRunner::with_program(script)
+    }
+
+    #[cfg(unix)]
+    fn with_stall(secs: u64) -> CloneOptions {
+        CloneOptions {
+            stall_timeout_secs: secs,
+            ..CloneOptions::unauthenticated()
+        }
+    }
+
+    /// Regression: stdout/stderr were piped but only read after the child
+    /// exited, so a child writing more than the pipe buffer (64 KiB on Linux)
+    /// blocked forever and was killed by the timeout.  `git fetch` prints one
+    /// line per updated ref, so a repository with thousands of new refs
+    /// (`refs/pull/*`) hit this in practice.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn large_stderr_output_does_not_deadlock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(
+            dir.path(),
+            r"head -c 1048576 /dev/zero | tr '\0' 'x' >&2; exit 0",
+        );
+        let dest = dir.path().join("repo.git");
+        let started = Instant::now();
+        let result = runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await;
+        assert!(result.is_ok(), "1 MiB of stderr must not fail: {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "took {:?}: the child was stuck on a full pipe until the stall limit",
+            started.elapsed()
+        );
+    }
+
+    /// The error text must come from the END of stderr (where git prints the
+    /// `fatal:` line), not be lost behind a flood of earlier output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failure_reports_the_tail_of_a_long_stderr() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(
+            dir.path(),
+            r#"head -c 500000 /dev/zero | tr '\0' 'x' >&2
+echo >&2
+echo "fatal: repository 'https://example.invalid/r.git/' not found" >&2
+exit 128"#,
+        );
+        let dest = dir.path().join("repo.git");
+        let err = runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect_err("must fail");
+        match err {
+            CoreError::GitFailed { code, stderr, .. } => {
+                assert_eq!(code, 128);
+                assert!(
+                    stderr.contains("not found"),
+                    "tail lost: {} bytes",
+                    stderr.len()
+                );
+                assert!(stderr.len() <= 64 * 1024, "stderr must be bounded");
+            }
+            other => panic!("expected GitFailed, got {other:?}"),
+        }
+    }
+
+    /// A child that produces no output is a hung connection: it is stopped
+    /// after the stall limit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_child_is_stopped_after_the_stall_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(dir.path(), "exec sleep 30");
+        let dest = dir.path().join("repo.git");
+        let started = Instant::now();
+        let err = runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(1))
+            .await
+            .expect_err("a silent child must be stopped");
+        assert!(
+            matches!(
+                err,
+                CoreError::GitTimeout {
+                    timeout_secs: 1,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The limit is a *stall* limit: a slow child that keeps reporting
+    /// progress must never be interrupted, however long it runs.  (The old
+    /// 600 s wall-clock limit made repositories that take longer than ten
+    /// minutes to clone impossible to back up.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chatty_child_is_not_stopped_by_the_stall_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(
+            dir.path(),
+            r#"i=0
+while [ $i -lt 8 ]; do
+  echo "Receiving objects: $((i * 12))% ($i/8)" >&2
+  sleep 0.5
+  i=$((i + 1))
+done
+exit 0"#,
+        );
+        let dest = dir.path().join("repo.git");
+        let started = Instant::now();
+        let result = runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(2))
+            .await;
+        assert!(
+            result.is_ok(),
+            "progress must keep the child alive: {result:?}"
+        );
+        assert!(
+            started.elapsed() > Duration::from_secs(3),
+            "the script runs for ~4 s, longer than the 2 s stall limit"
+        );
+    }
+
+    /// A failed fresh clone must not leave a half-written directory behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_fresh_clone_removes_the_partial_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(
+            dir.path(),
+            r#"for last in "$@"; do :; done
+mkdir -p "$last/objects"
+echo "fatal: early EOF" >&2
+exit 128"#,
+        );
+        let dest = dir.path().join("repo.git");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect_err("must fail");
+        assert!(!dest.exists(), "partial clone directory must be removed");
+    }
+
+    /// git must never be able to prompt (cron/Docker have no terminal) and
+    /// must emit stable English messages.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_gets_no_terminal_and_a_stable_locale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("seen.txt");
+        let runner = runner_with_script(
+            dir.path(),
+            &format!(
+                r#"{{ echo "prompt=$GIT_TERMINAL_PROMPT"; echo "lc=$LC_ALL"; \
+if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
+                seen.display()
+            ),
+        );
+        let dest = dir.path().join("repo.git");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect("ok");
+        let text = std::fs::read_to_string(&seen).expect("script output");
+        assert!(text.contains("prompt=0"), "{text}");
+        assert!(text.contains("lc=C"), "{text}");
+        assert!(text.contains("stdin=none"), "{text}");
+    }
+
+    /// Network operations pass `--progress` so a stall can be told apart from
+    /// a slow transfer even when stderr is not a terminal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn network_operations_request_progress() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("argv.txt");
+        let runner =
+            runner_with_script(dir.path(), &format!(r#"echo "$@" >> '{}'"#, log.display()));
+        let fresh = dir.path().join("fresh.git");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &fresh, &with_stall(10))
+            .await
+            .expect("fresh clone");
+        let existing = dir.path().join("existing.git");
+        std::fs::create_dir(&existing).expect("mkdir");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &existing, &with_stall(10))
+            .await
+            .expect("update");
+        let argv = std::fs::read_to_string(&log).expect("argv log");
+        let lines: Vec<&str> = argv.lines().collect();
+        assert_eq!(lines.len(), 2, "{argv}");
+        assert!(lines[0].starts_with("clone --progress --mirror "), "{argv}");
+        assert_eq!(lines[1], "fetch --progress --all --prune", "{argv}");
     }
 }

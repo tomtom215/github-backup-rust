@@ -39,14 +39,24 @@ pub enum CoreError {
         stderr: String,
     },
 
-    /// A `git` subprocess was killed because it exceeded its time limit.
-    #[error("git {args} timed out after {timeout_secs}s")]
+    /// A `git` subprocess was stopped because it made no progress (produced no
+    /// output) for longer than the stall limit.
+    #[error("git {args} made no progress for {timeout_secs}s and was stopped")]
     GitTimeout {
         /// The git arguments (for context).
         args: String,
-        /// The timeout that was exceeded, in seconds.
+        /// The stall limit that was exceeded, in seconds.
         timeout_secs: u64,
     },
+
+    /// The operation was abandoned because the process is shutting down
+    /// (SIGINT/SIGTERM).
+    #[error("interrupted: the process is shutting down")]
+    Interrupted,
+
+    /// A background task panicked or was cancelled before finishing.
+    #[error("background task failed: {0}")]
+    TaskFailed(String),
 
     /// The `git` binary could not be found or launched.
     #[error("could not start git: {0}")]

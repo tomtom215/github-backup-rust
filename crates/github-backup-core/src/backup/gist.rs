@@ -64,7 +64,7 @@ pub async fn backup_gists(
             } else {
                 &gist.git_pull_url
             };
-            git.mirror_clone(gist_url, &dest, clone_opts)?;
+            git.mirror_clone(gist_url, &dest, clone_opts).await?;
             count += 1;
         }
         storage.write_json(&gists_meta_dir.join("index.json"), &gists)?;

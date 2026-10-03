@@ -50,7 +50,7 @@ pub async fn backup_wiki(
 
     info!(repo = %repo.full_name, dest = %dest.display(), "cloning wiki");
 
-    match git.mirror_clone(wiki_url, &dest, clone_opts) {
+    match git.mirror_clone(wiki_url, &dest, clone_opts).await {
         Ok(()) => Ok(()),
         Err(CoreError::GitFailed { code: 128, .. }) => {
             // Code 128 is returned when the wiki exists but is empty.

@@ -961,6 +961,7 @@ dependencies = [
  "chrono",
  "github-backup-client",
  "github-backup-types",
+ "nix 0.30.1",
  "serde",
  "serde_json",
  "sha2",

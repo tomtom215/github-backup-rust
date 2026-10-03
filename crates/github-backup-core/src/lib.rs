@@ -46,7 +46,7 @@ pub mod storage;
 pub use engine::BackupEngine;
 pub use error::CoreError;
 pub use events::{EngineEvent, EngineEventTx};
-pub use git::{GitRunner, ProcessGitRunner};
+pub use git::{request_shutdown, GitRunner, ProcessGitRunner};
 pub use lock::BackupLock;
 pub use manifest::{verify_manifest, write_manifest, VerifyReport};
 pub use stats::BackupStats;

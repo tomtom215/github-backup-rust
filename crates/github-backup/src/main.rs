@@ -394,6 +394,7 @@ async fn main() -> ExitCode {
                 "backup interrupted by signal — partial data may remain on disk; \
                  re-run to resume"
             );
+            begin_shutdown(code);
             return ExitCode::from(code);
         }
     };
@@ -800,6 +801,28 @@ async fn wait_for_shutdown_signal() -> u8 {
     {
         ctrl_c.await
     }
+}
+
+/// How long the process may take to wind down after a shutdown signal.
+///
+/// `docker stop` waits 10 s before SIGKILL; staying under that lets the
+/// process leave on its own terms (lock released, askpass scripts removed).
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Starts an orderly shutdown after SIGINT/SIGTERM.
+///
+/// Running `git` subprocesses (and their transport helpers) are stopped and
+/// new ones refused, so the runtime can drop promptly.  A watchdog thread then
+/// forces the exit if anything still blocks it: the tokio signal handler
+/// swallows further Ctrl+C presses, so without it a stuck task could not be
+/// interrupted except with SIGKILL.
+fn begin_shutdown(exit_code: u8) {
+    github_backup_core::request_shutdown();
+    std::thread::spawn(move || {
+        std::thread::sleep(SHUTDOWN_GRACE);
+        eprintln!("shutdown did not finish within {SHUTDOWN_GRACE:?}; forcing exit");
+        std::process::exit(i32::from(exit_code));
+    });
 }
 
 /// Initialises the `tracing` subscriber.

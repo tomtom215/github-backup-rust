@@ -121,14 +121,8 @@ pub async fn backup_starred_repos(
         return Ok(());
     }
 
-    // ── Shutdown signal (Ctrl+C) ──────────────────────────────────────────────
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl+C received; finishing current clone and stopping");
-            let _ = shutdown_tx.send(true);
-        }
-    });
+    // Shutdown is process-wide: the binary calls `git::request_shutdown()` on
+    // SIGINT/SIGTERM, which also stops the git process that is running now.
 
     // ── Process queue ─────────────────────────────────────────────────────────
     let run_start = Instant::now();
@@ -140,8 +134,8 @@ pub async fn backup_starred_repos(
         }
 
         // Graceful shutdown: save and exit.
-        if *shutdown_rx.borrow() {
-            info!("shutdown signal received; saving queue and stopping");
+        if crate::git::shutdown_requested() {
+            info!("shutdown requested; saving queue and stopping");
             starred_queue::save(&mut queue, queue_path)?;
             break;
         }
@@ -172,7 +166,7 @@ pub async fn backup_starred_repos(
         let mut last_err: Option<String> = None;
 
         for attempt in 0..MAX_ATTEMPTS {
-            match do_clone(git, &url, &dest, opts, clone_opts) {
+            match do_clone(git, &url, &dest, opts, clone_opts).await {
                 Ok(()) => {
                     success = true;
                     break;
@@ -201,7 +195,7 @@ pub async fn backup_starred_repos(
                     starred_queue::save(&mut queue, queue_path)?;
                     tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
 
-                    if *shutdown_rx.borrow() {
+                    if crate::git::shutdown_requested() {
                         info!("shutdown during backoff; saving and stopping");
                         starred_queue::save(&mut queue, queue_path)?;
                         return Ok(());
@@ -264,7 +258,7 @@ pub async fn backup_starred_repos(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Dispatches to the appropriate [`GitRunner`] method based on `opts.clone_type`.
-fn do_clone(
+async fn do_clone(
     git: &impl GitRunner,
     url: &str,
     dest: &Path,
@@ -272,13 +266,13 @@ fn do_clone(
     clone_opts: &CloneOptions,
 ) -> Result<(), CoreError> {
     if opts.lfs {
-        return git.lfs_clone(url, dest, clone_opts);
+        return git.lfs_clone(url, dest, clone_opts).await;
     }
     match &opts.clone_type {
-        CloneType::Mirror => git.mirror_clone(url, dest, clone_opts),
-        CloneType::Bare => git.bare_clone(url, dest, clone_opts),
-        CloneType::Full => git.full_clone(url, dest, clone_opts),
-        CloneType::Shallow(depth) => git.shallow_clone(url, dest, clone_opts, *depth),
+        CloneType::Mirror => git.mirror_clone(url, dest, clone_opts).await,
+        CloneType::Bare => git.bare_clone(url, dest, clone_opts).await,
+        CloneType::Full => git.full_clone(url, dest, clone_opts).await,
+        CloneType::Shallow(depth) => git.shallow_clone(url, dest, clone_opts, *depth).await,
     }
 }
 
