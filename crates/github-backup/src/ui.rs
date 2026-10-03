@@ -4,15 +4,19 @@
 //! Human-facing terminal output: colour detection, the pre-run plan banner,
 //! the post-run summary, and the first-contact quickstart.
 
+use github_backup_core::{BackupStats, Failure};
 use github_backup_types::backup_state::BackupRunHistory;
 use github_backup_types::config::OutputConfig;
 
 use crate::cli::Args;
 
-/// Returns `true` if the current stdout supports ANSI colour codes.
+/// Returns `true` if the human-facing output may use ANSI colour codes.
 ///
-/// Honours the same conventions as [`init_tracing`]: `NO_COLOR` disables,
-/// `CLICOLOR_FORCE=1` forces, otherwise we autodetect TTY.
+/// Everything in this module is written to **stderr** (stdout stays free for
+/// machine-readable output), so it is stderr that must be a terminal: with
+/// `2>run.log` the codes would otherwise end up in the log file.  Honours the
+/// same conventions as `setup::init_tracing`: `NO_COLOR` disables,
+/// `CLICOLOR_FORCE=1` forces, otherwise autodetect.
 pub(crate) fn use_ansi() -> bool {
     use std::io::IsTerminal as _;
     if no_color_env_set() {
@@ -21,7 +25,7 @@ pub(crate) fn use_ansi() -> bool {
     if std::env::var("CLICOLOR_FORCE").as_deref() == Ok("1") {
         return true;
     }
-    std::io::stdout().is_terminal()
+    std::io::stderr().is_terminal()
 }
 
 /// Returns `true` iff `NO_COLOR` is set to a non-empty value, per the
@@ -76,74 +80,185 @@ pub(crate) fn print_plan(
     eprintln!();
 }
 
-/// Prints a colour-coded summary banner at the end of a run.
-///
-/// Non-technical users tend to scroll past pages of structured log lines
-/// without internalising the numbers; this single block gives them a
-/// clear pass/fail signal and a one-line tally they can copy into a
-/// ticket or status update.
-pub(crate) fn print_summary_banner(stats: &github_backup_core::BackupStats, elapsed_secs: u64) {
-    let ansi = use_ansi();
-    let bold = if ansi { "\x1b[1m" } else { "" };
-    let green = if ansi { "\x1b[32m" } else { "" };
-    let yellow = if ansi { "\x1b[33m" } else { "" };
-    let red = if ansi { "\x1b[31m" } else { "" };
-    let reset = if ansi { "\x1b[0m" } else { "" };
+/// The facts the end-of-run summary reports.
+#[derive(Debug, Clone)]
+pub(crate) struct SummaryView {
+    pub backed_up: u64,
+    pub skipped: u64,
+    pub errored: u64,
+    pub issues: u64,
+    pub prs: u64,
+    pub gists: u64,
+    pub failures: Vec<Failure>,
+    pub elapsed_secs: u64,
+    pub dry_run: bool,
+}
 
-    let errored = stats.repos_errored();
-    let backed_up = stats.repos_backed_up();
-    let skipped = stats.repos_skipped();
-    let (glyph, colour, headline) = if errored > 0 {
+impl SummaryView {
+    pub(crate) fn from_stats(stats: &BackupStats, elapsed_secs: u64, dry_run: bool) -> Self {
+        Self {
+            backed_up: stats.repos_backed_up(),
+            skipped: stats.repos_skipped(),
+            errored: stats.repos_errored(),
+            issues: stats.issues_fetched(),
+            prs: stats.prs_fetched(),
+            gists: stats.gists_backed_up(),
+            failures: stats.failures(),
+            elapsed_secs,
+            dry_run,
+        }
+    }
+}
+
+/// How many failures the summary lists before pointing at the report.
+const SUMMARY_FAILURES_SHOWN: usize = 15;
+
+/// Longest failure message shown on one summary line.
+const SUMMARY_MESSAGE_WIDTH: usize = 90;
+
+/// Shortens `message` to its first line, at most `max` characters.
+fn one_line(message: &str, max: usize) -> String {
+    let first = message.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= max {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
+/// Renders the end-of-run summary.
+///
+/// The headline is decided by what actually happened: a run with any failure is
+/// reported as **incomplete** and lists what failed; a dry run says nothing was
+/// written; only a run with no failures that processed something is a success.
+pub(crate) fn render_summary(v: &SummaryView, ansi: bool) -> String {
+    use std::fmt::Write as _;
+
+    let (bold, green, yellow, red, reset) = if ansi {
+        ("\x1b[1m", "\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[0m")
+    } else {
+        ("", "", "", "", "")
+    };
+
+    let failures = v.failures.len();
+    let processed = v.backed_up + v.errored;
+    let (glyph, colour, headline) = if failures > 0 {
         (
             if ansi { "✗" } else { "[fail]" },
             red,
-            "backup completed with errors",
+            format!(
+                "backup finished with {failures} failure{} — it is incomplete",
+                if failures == 1 { "" } else { "s" }
+            ),
         )
-    } else if backed_up == 0 && skipped == 0 {
-        // Zero repos found often means a wrong target or insufficient
-        // scope.  Surface it loudly with an actionable suggestion.
+    } else if v.dry_run {
+        (
+            if ansi { "○" } else { "[dry ]" },
+            yellow,
+            "dry run complete — nothing was written".to_string(),
+        )
+    } else if processed == 0 && v.skipped == 0 {
+        // Zero repos found often means a wrong target or insufficient scope.
         (
             if ansi { "⚠" } else { "[warn]" },
             yellow,
-            "backup completed but no repositories were processed",
+            "backup finished but no repositories were processed".to_string(),
         )
     } else {
         (
             if ansi { "✓" } else { "[ ok ]" },
             green,
-            "backup completed successfully",
+            "backup completed successfully".to_string(),
         )
     };
 
-    eprintln!();
-    eprintln!("{colour}{glyph}{reset}  {bold}{headline}{reset}");
-    eprintln!("   {} repo(s) backed up", backed_up);
-    if skipped > 0 {
-        eprintln!("   {} repo(s) skipped (already in checkpoint)", skipped);
+    let mut out = String::new();
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{colour}{glyph}{reset}  {bold}{headline}{reset}");
+    if v.dry_run {
+        let _ = writeln!(
+            out,
+            "   {} repositor{} would be backed up",
+            v.skipped,
+            if v.skipped == 1 { "y" } else { "ies" }
+        );
+    } else {
+        let _ = writeln!(out, "   {} repo(s) backed up completely", v.backed_up);
+        if v.errored > 0 {
+            let _ = writeln!(out, "   {colour}{} repo(s) incomplete{reset}", v.errored);
+        }
+        if v.skipped > 0 {
+            let _ = writeln!(
+                out,
+                "   {} repo(s) skipped (filtered out, or already done in an interrupted run)",
+                v.skipped
+            );
+        }
+        if v.issues > 0 {
+            let _ = writeln!(out, "   {} issue(s) fetched", v.issues);
+        }
+        if v.prs > 0 {
+            let _ = writeln!(out, "   {} pull request(s) fetched", v.prs);
+        }
+        if v.gists > 0 {
+            let _ = writeln!(out, "   {} gist(s) backed up", v.gists);
+        }
     }
-    if errored > 0 {
-        eprintln!("   {colour}{errored} repo(s) errored{reset}");
-    }
-    if stats.issues_fetched() > 0 {
-        eprintln!("   {} issue(s) fetched", stats.issues_fetched());
-    }
-    if stats.prs_fetched() > 0 {
-        eprintln!("   {} pull request(s) fetched", stats.prs_fetched());
-    }
-    if stats.gists_backed_up() > 0 {
-        eprintln!("   {} gist(s) backed up", stats.gists_backed_up());
-    }
-    eprintln!("   elapsed: {}", format_duration(elapsed_secs));
+    let _ = writeln!(out, "   elapsed: {}", format_duration(v.elapsed_secs));
 
-    if backed_up == 0 && skipped == 0 && errored == 0 {
-        eprintln!();
-        eprintln!(
+    if failures > 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "   {bold}what failed{reset}");
+        let width = v
+            .failures
+            .iter()
+            .take(SUMMARY_FAILURES_SHOWN)
+            .map(|f| f.scope.chars().count())
+            .max()
+            .unwrap_or(0);
+        for f in v.failures.iter().take(SUMMARY_FAILURES_SHOWN) {
+            let _ = writeln!(
+                out,
+                "   {colour}•{reset} {:<width$}  {}: {}",
+                f.scope,
+                f.step,
+                one_line(&f.message, SUMMARY_MESSAGE_WIDTH),
+            );
+        }
+        if failures > SUMMARY_FAILURES_SHOWN {
+            let _ = writeln!(
+                out,
+                "   … and {} more (all of them are in the --report file and the log)",
+                failures - SUMMARY_FAILURES_SHOWN
+            );
+        }
+        let _ = writeln!(
+            out,
+            "   Re-running retries them; progress on everything that succeeded is kept."
+        );
+    }
+
+    if !v.dry_run && processed == 0 && v.skipped == 0 && failures == 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
             "   {yellow}hint{reset}: zero repositories found.  \
              Check OWNER spelling, confirm the token has access, and \
              enable at least one of --repositories / --all / --gists / …"
         );
     }
-    eprintln!();
+    let _ = writeln!(out);
+    out
+}
+
+/// Prints the end-of-run summary to stderr.
+///
+/// Non-technical users tend to scroll past pages of structured log lines
+/// without internalising the numbers; this block gives them a clear pass/fail
+/// signal, the tally, and — when something failed — exactly what.
+pub(crate) fn print_summary_banner(stats: &BackupStats, elapsed_secs: u64, dry_run: bool) {
+    let view = SummaryView::from_stats(stats, elapsed_secs, dry_run);
+    eprint!("{}", render_summary(&view, use_ansi()));
 }
 
 /// Formats a duration in seconds as `Hh Mm Ss`, dropping leading zero
@@ -366,5 +481,132 @@ mod tests {
         };
         let out = enabled_category_list(&opts);
         assert!(out.contains("+"), "expected truncation marker in: {out}");
+    }
+
+    // ── render_summary ────────────────────────────────────────────────────
+
+    fn view() -> SummaryView {
+        SummaryView {
+            backed_up: 10,
+            skipped: 0,
+            errored: 0,
+            issues: 0,
+            prs: 0,
+            gists: 0,
+            failures: vec![],
+            elapsed_secs: 42,
+            dry_run: false,
+        }
+    }
+
+    fn failure(scope: &str, step: &str, message: &str) -> Failure {
+        Failure {
+            scope: scope.into(),
+            step: step.into(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn a_clean_run_is_reported_as_success() {
+        let out = render_summary(&view(), false);
+        assert!(
+            out.contains("[ ok ]  backup completed successfully"),
+            "{out}"
+        );
+        assert!(out.contains("10 repo(s) backed up completely"), "{out}");
+        assert!(!out.contains("what failed"), "{out}");
+        assert!(out.contains("elapsed: 42s"), "{out}");
+    }
+
+    /// The audit's headline defect: a run that lost data used to print the
+    /// same green "successfully" banner.
+    #[test]
+    fn any_failure_makes_the_headline_incomplete_and_lists_it() {
+        let mut v = view();
+        v.backed_up = 8;
+        v.errored = 2;
+        v.failures = vec![
+            failure("octocat/a", "clone", "fatal: unable to access\nsecond line"),
+            failure("octocat/long-name", "issues", "HTTP 500"),
+        ];
+        let out = render_summary(&v, false);
+        assert!(
+            out.contains("[fail]  backup finished with 2 failures — it is incomplete"),
+            "{out}"
+        );
+        assert!(!out.contains("completed successfully"), "{out}");
+        assert!(out.contains("2 repo(s) incomplete"), "{out}");
+        assert!(out.contains("octocat/a"), "{out}");
+        assert!(out.contains("clone: fatal: unable to access"), "{out}");
+        assert!(
+            !out.contains("second line"),
+            "only the first line is shown: {out}"
+        );
+        assert!(out.contains("issues: HTTP 500"), "{out}");
+        assert!(out.contains("Re-running retries them"), "{out}");
+    }
+
+    #[test]
+    fn a_single_failure_uses_the_singular() {
+        let mut v = view();
+        v.failures = vec![failure("o/r", "wiki", "x")];
+        assert!(render_summary(&v, false).contains("with 1 failure — it is incomplete"));
+    }
+
+    #[test]
+    fn the_failure_list_is_capped_with_a_pointer_to_the_report() {
+        let mut v = view();
+        v.failures = (0..SUMMARY_FAILURES_SHOWN + 7)
+            .map(|i| failure(&format!("o/r{i}"), "clone", "x"))
+            .collect();
+        let out = render_summary(&v, false);
+        assert!(out.contains("and 7 more"), "{out}");
+        assert!(out.contains("--report"), "{out}");
+        assert!(
+            !out.contains(&format!("o/r{}", SUMMARY_FAILURES_SHOWN)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_says_nothing_was_written_and_never_claims_success() {
+        let mut v = view();
+        v.dry_run = true;
+        v.backed_up = 0;
+        v.skipped = 7;
+        let out = render_summary(&v, false);
+        assert!(
+            out.contains("dry run complete — nothing was written"),
+            "{out}"
+        );
+        assert!(out.contains("7 repositories would be backed up"), "{out}");
+        assert!(!out.contains("backed up completely"), "{out}");
+        assert!(!out.contains("completed successfully"), "{out}");
+    }
+
+    #[test]
+    fn zero_repositories_is_a_warning_with_a_hint() {
+        let mut v = view();
+        v.backed_up = 0;
+        let out = render_summary(&v, false);
+        assert!(out.contains("[warn]"), "{out}");
+        assert!(out.contains("zero repositories found"), "{out}");
+    }
+
+    #[test]
+    fn colour_is_only_emitted_when_asked_for() {
+        let mut v = view();
+        v.failures = vec![failure("o/r", "clone", "x")];
+        assert!(!render_summary(&v, false).contains('\x1b'));
+        assert!(render_summary(&v, true).contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn one_line_keeps_the_first_line_and_truncates_with_an_ellipsis() {
+        assert_eq!(one_line("a\nb", 10), "a");
+        assert_eq!(one_line("abcdefghij", 5), "abcd…");
+        assert_eq!(one_line("abc", 5), "abc");
+        assert_eq!(one_line("", 5), "");
     }
 }

@@ -5,51 +5,11 @@
 //! for anything that is about to be printed, and plain-language hints for the
 //! failure patterns users hit most.
 
-/// Redacts anything that looks like a GitHub token in `s`.
-///
-/// Last-line-of-defence — the rest of the codebase already takes care to
-/// keep tokens out of error and log strings, but a misbehaving proxy
-/// (which can echo a request URL) or an unusual GitHub error body could
-/// in principle still surface a token in `--verbose` output.  This
-/// scrubber recognises every official GitHub token prefix and replaces
-/// the body with `<redacted>` while preserving the prefix so the
-/// operator can still tell *what kind* of token it was.
+/// Redacts credentials in `s` before it is printed: GitHub tokens of every
+/// official format, and `user:password@` in URLs.  See
+/// [`github_backup_core::redact`].
 pub(crate) fn redact_secrets(s: &str) -> String {
-    // Order matters: `github_pat_` must be checked before `gh*_` so the
-    // longer prefix wins.
-    const PREFIXES: &[&str] = &["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while !rest.is_empty() {
-        let mut hit: Option<(usize, &'static str)> = None;
-        for prefix in PREFIXES {
-            if let Some(idx) = rest.find(prefix) {
-                if hit.map(|(j, _)| idx < j).unwrap_or(true) {
-                    hit = Some((idx, prefix));
-                }
-            }
-        }
-        match hit {
-            Some((idx, prefix)) => {
-                out.push_str(&rest[..idx]);
-                out.push_str(prefix);
-                out.push_str("<redacted>");
-                let after = &rest[idx + prefix.len()..];
-                // Skip the alphanumeric run that constitutes the token body.
-                let body_end = after
-                    .char_indices()
-                    .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
-                    .map(|(i, _)| i)
-                    .unwrap_or(after.len());
-                rest = &after[body_end..];
-            }
-            None => {
-                out.push_str(rest);
-                break;
-            }
-        }
-    }
-    out
+    github_backup_core::redact::secrets(s, &[])
 }
 
 /// Translates a raw error message string into an actionable hint for the
@@ -154,54 +114,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redact_secrets_replaces_classic_pat() {
-        let s = "401 Unauthorized: ghp_abcdef1234567890";
-        let out = redact_secrets(s);
-        assert!(!out.contains("ghp_abcdef1234567890"));
-        assert!(out.contains("ghp_<redacted>"));
-    }
-
-    #[test]
-    fn redact_secrets_replaces_fine_grained_pat() {
-        let s = "url=https://x@github.com?token=github_pat_X9Y8Z7Q";
-        let out = redact_secrets(s);
-        assert!(!out.contains("github_pat_X9Y8Z7Q"));
-        assert!(out.contains("github_pat_<redacted>"));
-    }
-
-    #[test]
-    fn redact_secrets_replaces_every_known_prefix() {
-        for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
-            let raw = format!("token={prefix}xyz123");
-            let out = redact_secrets(&raw);
-            assert!(
-                out.contains(&format!("{prefix}<redacted>")),
-                "prefix {prefix:?} not redacted: {out}"
-            );
-            assert!(!out.contains("xyz123"), "literal body leaked: {out}");
-        }
-    }
-
-    #[test]
-    fn redact_secrets_preserves_text_around_token() {
-        let s = "Before: ghp_LEAKED After";
-        let out = redact_secrets(s);
-        assert_eq!(out, "Before: ghp_<redacted> After");
-    }
-
-    #[test]
-    fn redact_secrets_handles_text_without_secrets() {
-        assert_eq!(redact_secrets("just a regular log"), "just a regular log");
-    }
-
-    #[test]
-    fn redact_secrets_handles_multiple_tokens() {
-        let s = "first ghp_AAA second github_pat_BBB done";
-        let out = redact_secrets(s);
-        assert!(!out.contains("ghp_AAA"));
-        assert!(!out.contains("github_pat_BBB"));
-        assert!(out.contains("ghp_<redacted>"));
-        assert!(out.contains("github_pat_<redacted>"));
+    fn redact_secrets_delegates_to_the_core_scrubber() {
+        let out = redact_secrets("401 ghp_abcdef1234567890 at https://u:pw@h/x");
+        assert!(out.contains("ghp_<redacted>"), "{out}");
+        assert!(!out.contains("pw@"), "{out}");
     }
 
     #[test]

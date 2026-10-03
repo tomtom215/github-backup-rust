@@ -316,6 +316,7 @@ impl Args {
                     include_repos: self.include_repos,
                     exclude_repos: self.exclude_repos,
                     since: self.since,
+                    full: self.full,
                     clone_host: self.clone_host,
                     ..BackupOptions::all()
                 },
@@ -370,6 +371,7 @@ impl Args {
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,
+                full: self.full,
                 clone_host: self.clone_host,
                 dry_run: self.dry_run,
                 concurrency,

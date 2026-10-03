@@ -33,21 +33,24 @@
 #![warn(missing_debug_implementations)]
 
 pub mod backup;
+pub mod cancel;
 pub mod engine;
 pub mod error;
 pub mod events;
 pub mod git;
 pub mod lock;
 pub mod manifest;
+pub mod redact;
 pub mod starred_queue;
 pub mod stats;
 pub mod storage;
 
+pub use cancel::CancelFlag;
 pub use engine::BackupEngine;
 pub use error::CoreError;
 pub use events::{EngineEvent, EngineEventTx};
-pub use git::{request_shutdown, GitRunner, ProcessGitRunner};
+pub use git::{GitRunner, ProcessGitRunner};
 pub use lock::BackupLock;
 pub use manifest::{verify_manifest, write_manifest, VerifyReport};
-pub use stats::BackupStats;
+pub use stats::{BackupStats, Failure};
 pub use storage::{FsStorage, Storage};

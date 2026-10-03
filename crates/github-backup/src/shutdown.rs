@@ -3,6 +3,8 @@
 
 //! Orderly shutdown on SIGINT / SIGTERM.
 
+use github_backup_core::CancelFlag;
+
 /// Waits for a process shutdown signal and returns the conventional exit code.
 ///
 /// Handles:
@@ -44,13 +46,13 @@ pub(crate) const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from
 
 /// Starts an orderly shutdown after SIGINT/SIGTERM.
 ///
-/// Running `git` subprocesses (and their transport helpers) are stopped and
-/// new ones refused, so the runtime can drop promptly.  A watchdog thread then
-/// forces the exit if anything still blocks it: the tokio signal handler
-/// swallows further Ctrl+C presses, so without it a stuck task could not be
-/// interrupted except with SIGKILL.
-pub(crate) fn begin_shutdown(exit_code: u8) {
-    github_backup_core::request_shutdown();
+/// Cancelling the engine's [`CancelFlag`] stops running `git` subprocesses (and
+/// their transport helpers) and refuses new ones, so the runtime can drop
+/// promptly.  A watchdog thread then forces the exit if anything still blocks
+/// it: the tokio signal handler swallows further Ctrl+C presses, so without it
+/// a stuck task could not be interrupted except with SIGKILL.
+pub(crate) fn begin_shutdown(cancel: &CancelFlag, exit_code: u8) {
+    cancel.cancel();
     std::thread::spawn(move || {
         std::thread::sleep(SHUTDOWN_GRACE);
         eprintln!("shutdown did not finish within {SHUTDOWN_GRACE:?}; forcing exit");

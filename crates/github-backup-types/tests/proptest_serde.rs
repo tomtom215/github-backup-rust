@@ -674,6 +674,7 @@ proptest! {
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
+            full: false,
             clone_host: None,
             dry_run, concurrency,
         };

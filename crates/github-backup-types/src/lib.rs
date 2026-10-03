@@ -72,7 +72,9 @@ pub mod user;
 pub mod workflow;
 
 // Convenience re-exports for the most commonly used types.
-pub use backup_state::{BackupCheckpoint, BackupRunEntry, BackupRunHistory, BackupState};
+pub use backup_state::{
+    BackupCheckpoint, BackupRunEntry, BackupRunHistory, BackupState, RepoWatermark, RunRecord,
+};
 pub use branch::{Branch, BranchCommit};
 pub use branch_protection::{
     AdminEnforcement, BranchProtection, RequiredPullRequestReviews, RequiredStatusChecks,

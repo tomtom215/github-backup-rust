@@ -350,4 +350,8 @@ impl BackupClient for GitHubClient {
             package_name,
         ))
     }
+
+    fn token(&self) -> Option<String> {
+        GitHubClient::token(self)
+    }
 }

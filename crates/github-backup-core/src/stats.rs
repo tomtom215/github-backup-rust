@@ -3,10 +3,29 @@
 
 //! [`BackupStats`] — counters collected during a backup run.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use serde::Serialize;
+
+/// One thing that went wrong, without stopping the run.
+///
+/// A backup that finishes with failures is *not* a successful backup: the
+/// caller turns these into the exit status, the summary, the report and the
+/// webhook, and does not advance incremental state for the affected items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Failure {
+    /// What was being backed up: `owner/repo`, or an owner-level scope such as
+    /// `gists` or `user data`.
+    pub scope: String,
+    /// The step that failed, e.g. `clone`, `wiki`, `issues`.
+    pub step: String,
+    /// What went wrong.
+    pub message: String,
+}
 
 /// Statistics gathered during a [`BackupEngine`] run.
 ///
@@ -41,6 +60,10 @@ struct StatsInner {
     workflows_fetched: AtomicU64,
     /// Total GitHub Discussions fetched across all repositories.
     discussions_fetched: AtomicU64,
+    /// Everything that failed without stopping the run.
+    failures: Mutex<Vec<Failure>>,
+    /// Repositories whose every step succeeded in this run.
+    clean_repos: Mutex<BTreeSet<String>>,
 }
 
 impl Default for StatsInner {
@@ -56,6 +79,8 @@ impl Default for StatsInner {
             prs_fetched: AtomicU64::new(0),
             workflows_fetched: AtomicU64::new(0),
             discussions_fetched: AtomicU64::new(0),
+            failures: Mutex::new(Vec::new()),
+            clean_repos: Mutex::new(BTreeSet::new()),
         }
     }
 }
@@ -145,7 +170,74 @@ impl BackupStats {
             .fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Records a failure that did not stop the run.
+    pub fn record_failure(
+        &self,
+        scope: impl Into<String>,
+        step: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.inner
+            .failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Failure {
+                scope: scope.into(),
+                step: step.into(),
+                message: message.into(),
+            });
+    }
+
+    /// Records that every step for `full_name` succeeded in this run.
+    ///
+    /// Only such repositories may have their incremental watermark advanced.
+    pub fn mark_repo_clean(&self, full_name: &str) {
+        self.inner
+            .clean_repos
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(full_name.to_string());
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────────
+
+    /// Everything that failed without stopping the run, in the order recorded.
+    #[must_use]
+    pub fn failures(&self) -> Vec<Failure> {
+        self.inner
+            .failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Number of recorded failures.
+    #[must_use]
+    pub fn failure_count(&self) -> usize {
+        self.inner
+            .failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
+
+    /// `true` if anything failed.  A run with failures is not a clean success.
+    #[must_use]
+    pub fn has_failures(&self) -> bool {
+        self.failure_count() > 0
+    }
+
+    /// Repositories whose every step succeeded in this run.
+    #[must_use]
+    pub fn clean_repos(&self) -> Vec<String> {
+        self.inner
+            .clean_repos
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
 
     /// Repositories discovered in the owner listing.
     #[must_use]
@@ -213,7 +305,7 @@ impl fmt::Display for BackupStats {
             "repos: {}/{} backed up, {} skipped, {} errored; \
              gists: {} backed up; \
              issues: {} fetched; PRs: {} fetched; \
-             workflows: {} fetched \
+             workflows: {} fetched; {} failure(s) \
              ({:.1}s elapsed)",
             self.repos_backed_up(),
             self.repos_discovered(),
@@ -223,6 +315,7 @@ impl fmt::Display for BackupStats {
             self.issues_fetched(),
             self.prs_fetched(),
             self.workflows_fetched(),
+            self.failure_count(),
             self.elapsed_secs(),
         )
     }
@@ -391,5 +484,61 @@ mod tests {
         // And it must be a real, small number — not the constant 1.0
         // a mutant might substitute.
         assert!(t1 < 1.0, "5ms cannot exceed 1s ({t1})");
+    }
+
+    #[test]
+    fn failures_are_recorded_in_order_and_shared_between_handles() {
+        let stats = BackupStats::new();
+        assert!(!stats.has_failures());
+
+        let handle = stats.handle();
+        handle.record_failure("octocat/Hello-World", "wiki", "boom");
+        stats.record_failure("gists", "list", "403");
+
+        assert!(stats.has_failures());
+        assert_eq!(stats.failure_count(), 2);
+        let failures = stats.failures();
+        assert_eq!(
+            failures[0],
+            Failure {
+                scope: "octocat/Hello-World".into(),
+                step: "wiki".into(),
+                message: "boom".into(),
+            }
+        );
+        assert_eq!(failures[1].scope, "gists");
+    }
+
+    #[test]
+    fn display_reports_the_failure_count() {
+        let stats = BackupStats::new();
+        assert!(stats.to_string().contains("0 failure(s)"));
+        stats.record_failure("a/b", "clone", "x");
+        assert!(stats.to_string().contains("1 failure(s)"));
+    }
+
+    #[test]
+    fn clean_repos_are_unique_and_sorted() {
+        let stats = BackupStats::new();
+        stats.mark_repo_clean("o/b");
+        stats.mark_repo_clean("o/a");
+        stats.handle().mark_repo_clean("o/b");
+        assert_eq!(
+            stats.clean_repos(),
+            vec!["o/a".to_string(), "o/b".to_string()]
+        );
+    }
+
+    #[test]
+    fn failure_serialises_for_the_report() {
+        let f = Failure {
+            scope: "o/r".into(),
+            step: "issues".into(),
+            message: "m".into(),
+        };
+        let v = serde_json::to_value(&f).expect("serialise");
+        assert_eq!(v["scope"], "o/r");
+        assert_eq!(v["step"], "issues");
+        assert_eq!(v["message"], "m");
     }
 }

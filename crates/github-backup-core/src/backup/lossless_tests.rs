@@ -68,9 +68,17 @@ async fn issues_json_is_what_the_api_returned() {
         ..Default::default()
     };
 
-    backup_issues(&client, "octocat", "Hello-World", &opts, &meta(), &storage)
-        .await
-        .expect("backup_issues");
+    backup_issues(
+        &client,
+        "octocat",
+        "Hello-World",
+        &opts,
+        None,
+        &meta(),
+        &storage,
+    )
+    .await
+    .expect("backup_issues");
 
     let served: Value = serde_json::from_str(ISSUES).expect("fixture");
     assert_eq!(written(&storage, "issues.json"), served);
@@ -90,9 +98,17 @@ async fn one_unparseable_issue_neither_aborts_nor_vanishes_and_the_rest_continue
         ..Default::default()
     };
 
-    let count = backup_issues(&client, "octocat", "Hello-World", &opts, &meta(), &storage)
-        .await
-        .expect("a bad element must not fail the category");
+    let count = backup_issues(
+        &client,
+        "octocat",
+        "Hello-World",
+        &opts,
+        None,
+        &meta(),
+        &storage,
+    )
+    .await
+    .expect("a bad element must not fail the category");
 
     assert_eq!(count, 2, "the two well-formed issues are counted");
     let issues = written(&storage, "issues.json");
@@ -123,9 +139,17 @@ async fn comments_are_stored_as_served() {
         ..Default::default()
     };
 
-    backup_issues(&client, "octocat", "Hello-World", &opts, &meta(), &storage)
-        .await
-        .expect("backup_issues");
+    backup_issues(
+        &client,
+        "octocat",
+        "Hello-World",
+        &opts,
+        None,
+        &meta(),
+        &storage,
+    )
+    .await
+    .expect("backup_issues");
 
     let served: Value = serde_json::from_str(ISSUE_COMMENTS).expect("fixture");
     assert_eq!(written(&storage, "issue_comments/1347.json"), served);
@@ -140,9 +164,17 @@ async fn pulls_json_is_what_the_api_returned_and_invents_nothing() {
         ..Default::default()
     };
 
-    backup_pull_requests(&client, "octocat", "Hello-World", &opts, &meta(), &storage)
-        .await
-        .expect("backup_pull_requests");
+    backup_pull_requests(
+        &client,
+        "octocat",
+        "Hello-World",
+        &opts,
+        None,
+        &meta(),
+        &storage,
+    )
+    .await
+    .expect("backup_pull_requests");
 
     let served: Value = serde_json::from_str(PULLS).expect("fixture");
     let on_disk = written(&storage, "pulls.json");
