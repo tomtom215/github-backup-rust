@@ -145,8 +145,11 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
+    /// Returns [`ClientError::InvalidApiUrl`] unless `api_base_url` is an
+    /// `https://` URL with a host, and [`ClientError::Tls`] if the native CA
+    /// bundle cannot be loaded.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
+        validate_api_url(api_base_url)?;
         // HTTPS only: the token must never travel in clear text.
         let http = ProxyClient::from_env(false)?;
 
@@ -170,8 +173,12 @@ impl GitHubClient {
     }
 
     /// Like [`for_tests`](Self::for_tests) with an explicit API base URL.
-    #[cfg(test)]
-    pub(crate) fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
+    ///
+    /// Plain HTTP, no proxy, no CA bundle: only for tests against a local
+    /// server (the `test-support` feature exposes it to other crates' tests).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
@@ -233,6 +240,20 @@ impl GitHubClient {
         }
 
         Ok(RateLimitInfo::oauth_scopes(&headers))
+    }
+
+    /// Checks that the credential is accepted, with `GET /rate_limit` (which
+    /// does not count against the rate limit), and returns the number of core
+    /// requests left in the current window if the server reports it.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::ApiError`] with status 401 for a revoked, expired or
+    /// mistyped token; transport errors when the API cannot be reached.
+    pub async fn verify_token(&self) -> Result<Option<u64>, ClientError> {
+        let url = format!("{}/rate_limit", self.api_base);
+        let (body, _) = self.get_json_with_link::<Value>(&url).await?;
+        Ok(body["resources"]["core"]["remaining"].as_u64())
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
@@ -649,6 +670,23 @@ fn jitter_ms() -> u64 {
     x % 1000
 }
 
+/// An API base URL must be `https://host[...]`: the token is sent with every
+/// request, so a typo like `http://` must fail early instead of leaking it (the
+/// transport would refuse it too, but only at the first request).
+fn validate_api_url(raw: &str) -> Result<(), ClientError> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| ClientError::InvalidApiUrl(format!("{raw:?} is not a valid URL: {e}")))?;
+    if url.scheme() != "https" {
+        return Err(ClientError::InvalidApiUrl(format!(
+            "{raw:?} must start with https:// (the token is sent with every request)"
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(ClientError::InvalidApiUrl(format!("{raw:?} has no host")));
+    }
+    Ok(())
+}
+
 /// Returns the current time as a Unix timestamp in seconds.
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
@@ -779,6 +817,27 @@ mod tests {
         let client =
             GitHubClient::with_api_url(cred, "https://github.example.com/api/v3/").expect("client");
         assert_eq!(client.api(), "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn api_urls_must_be_https_with_a_host() {
+        for ok in ["https://api.github.com", "https://ghe.example.com/api/v3/"] {
+            assert!(validate_api_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://ghe.example.com/api/v3",
+            "ghe.example.com",
+            "https://",
+            "ftp://h",
+            "",
+        ] {
+            assert!(
+                matches!(validate_api_url(bad), Err(ClientError::InvalidApiUrl(_))),
+                "{bad}"
+            );
+        }
+        let cred = Credential::Token("ghp_test".to_string());
+        assert!(GitHubClient::with_api_url(cred, "http://ghe.example.com").is_err());
     }
 
     // ── Back-off + jitter ────────────────────────────────────────────────

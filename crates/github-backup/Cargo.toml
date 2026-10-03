@@ -48,4 +48,5 @@ chrono = { workspace = true }
 fslock = { workspace = true }
 
 [dev-dependencies]
+github-backup-client = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

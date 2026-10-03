@@ -17,11 +17,10 @@
 
 use bytes::Bytes;
 use chrono::Utc;
+use github_backup_client::ProxyClient;
 use github_backup_core::Failure;
 use http_body_util::Full;
 use hyper::{Method, Request, StatusCode};
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use tracing::{debug, warn};
 
 const NOTIFY_TIMEOUT_SECS: u64 = 15;
@@ -177,7 +176,8 @@ pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
 
 /// Sends an HTTP POST request with a JSON body to `url`.
 async fn send_post(url: &str, body: Vec<u8>) -> Result<StatusCode, String> {
-    let http = build_client()?;
+    // Same proxy handling (HTTP(S)_PROXY, ALL_PROXY, NO_PROXY) as the API client.
+    let http = ProxyClient::from_env(true).map_err(|e| e.to_string())?;
 
     let req = Request::builder()
         .method(Method::POST)
@@ -205,40 +205,6 @@ async fn send_post(url: &str, body: Vec<u8>) -> Result<StatusCode, String> {
     .map_err(|e: hyper_util::client::legacy::Error| format!("HTTP error: {e}"))?;
 
     Ok(response.status())
-}
-
-/// Builds a hyper HTTPS client using the system native CA bundle.
-fn build_client() -> Result<
-    Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        Full<Bytes>,
-    >,
-    String,
-> {
-    let mut root_store = rustls::RootCertStore::empty();
-    let cert_result = rustls_native_certs::load_native_certs();
-    if cert_result.certs.is_empty() {
-        return Err(format!(
-            "no CA certificates found: {}",
-            cert_result
-                .errors
-                .first()
-                .map(|e| e.to_string())
-                .unwrap_or_default()
-        ));
-    }
-    root_store.add_parsable_certificates(cert_result.certs);
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .build();
-
-    Ok(Client::builder(TokioExecutor::new()).build(https))
 }
 
 /// Returns the current UTC time as an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
