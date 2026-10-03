@@ -229,6 +229,7 @@ pub async fn run_s3_sync_with(
 ///
 /// Returns [`PostProcessError::S3`] on any failure, including a single failed
 /// upload or deletion.
+#[cfg(test)]
 pub async fn run_s3_sync(
     config: &S3Config,
     output: &OutputConfig,

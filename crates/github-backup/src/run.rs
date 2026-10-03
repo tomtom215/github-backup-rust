@@ -37,7 +37,8 @@ use crate::cli::Args;
 use crate::metrics::write_prometheus_metrics;
 use crate::notify::{self, Notification, Status};
 use crate::post_process::{
-    build_mirror_dest, build_s3_config, run_diff, run_mirror_push_dest, run_s3_sync, MirrorDest,
+    build_mirror_dest, build_s3_config, run_diff, run_mirror_push_dest, run_s3_sync_with,
+    MirrorDest, S3RunOptions,
 };
 use crate::report::{self, unix_secs_to_iso8601, write_report};
 use crate::{errors, lock, restore, shutdown, ui};
@@ -331,16 +332,15 @@ async fn finish(
 
     // ── S3 sync ──────────────────────────────────────────────────────────────
     if let Some(s3) = &post.s3 {
-        if let Err(e) = run_s3_sync(
-            s3,
-            output,
-            owner,
-            post.s3_include_assets,
+        let options = S3RunOptions {
+            include_assets: post.s3_include_assets,
             encrypt_key,
-            post.s3_delete_stale,
-        )
-        .await
-        {
+            delete_stale: post.s3_delete_stale,
+            // An incomplete local copy must never remove a good remote one.
+            allow_delete: !stats.has_failures(),
+            dry_run: false,
+        };
+        if let Err(e) = run_s3_sync_with(s3, output, owner, &options).await {
             record(stats, "s3 sync", errors::redact_secrets(&e.to_string()));
         }
     }
