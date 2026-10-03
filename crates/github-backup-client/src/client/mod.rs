@@ -10,7 +10,6 @@
 mod endpoints;
 #[cfg(test)]
 mod http_tests;
-mod proxy;
 #[cfg(test)]
 mod retry_tests;
 
@@ -20,14 +19,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use serde_json::{Map, Value};
 use tokio::sync::OnceCell;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use proxy::ProxyConnector;
+use crate::proxy::ProxyClient;
 
 use github_backup_types::config::Credential;
 use github_backup_types::Page;
@@ -74,27 +70,6 @@ const MAX_BACKOFF_SECS: u64 = 300;
 /// Capping the body protects the process from OOM kills.
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
-/// proxy connection.  Both variants share the same `hyper_util::client::legacy`
-/// error type so call sites need no special casing.
-#[derive(Clone)]
-pub(crate) enum HyperClientKind {
-    Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
-    Proxied(Client<ProxyConnector, Full<Bytes>>),
-}
-
-impl HyperClientKind {
-    async fn request(
-        &self,
-        req: hyper::Request<Full<Bytes>>,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
-        match self {
-            HyperClientKind::Direct(c) => c.request(req).await,
-            HyperClientKind::Proxied(c) => c.request(req).await,
-        }
-    }
-}
-
 /// Async GitHub REST API v3 client.
 ///
 /// Construct via [`GitHubClient::new`] for standard GitHub.com use, or
@@ -104,14 +79,11 @@ impl HyperClientKind {
 /// The client is cheaply cloneable — the underlying hyper connection pool is
 /// `Arc`-wrapped.
 ///
-/// **Proxy support**: if `HTTPS_PROXY` (or `https_proxy`) is set in the
-/// environment the client automatically routes all connections through the
-/// proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL
-/// (`http://user:pass@host:port`) are forwarded as a `Proxy-Authorization`
-/// header.
+/// **Proxy support**: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`
+/// (lower or upper case) are honoured, see [`crate::ProxySettings`].
 #[derive(Clone)]
 pub struct GitHubClient {
-    pub(crate) http: HyperClientKind,
+    pub(crate) http: ProxyClient,
     pub(crate) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(crate) api_base: String,
@@ -169,31 +141,14 @@ impl GitHubClient {
     /// typically at `https://github.example.com/api/v3`.  The URL is stored
     /// verbatim and used as the prefix for all API requests.
     ///
-    /// If `HTTPS_PROXY` (or `https_proxy`) is set in the environment, the
-    /// client will route HTTPS requests through that proxy via HTTP `CONNECT`.
+    /// The proxy environment variables are honoured (see [`crate::ProxySettings`]).
     ///
     /// # Errors
     ///
     /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
-        let http = if let Some(proxy_config) = proxy::proxy_config_from_env() {
-            info!(
-                host = %proxy_config.host,
-                port = proxy_config.port,
-                "routing GitHub API calls through HTTPS proxy"
-            );
-            let tls_config = build_tls_config()?;
-            let connector = ProxyConnector::new(proxy_config, tls_config);
-            HyperClientKind::Proxied(Client::builder(TokioExecutor::new()).build(connector))
-        } else {
-            let tls_config = build_tls_config()?;
-            let https = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config(tls_config)
-                .https_only()
-                .enable_http1()
-                .build();
-            HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(https))
-        };
+        // HTTPS only: the token must never travel in clear text.
+        let http = ProxyClient::from_env(false)?;
 
         let api_base = api_base_url.trim_end_matches('/').to_string();
         Ok(Self {
@@ -220,13 +175,9 @@ impl GitHubClient {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls)
-            .https_or_http()
-            .enable_http1()
-            .build();
+        let http = ProxyClient::new(crate::proxy::ProxySettings::default(), tls, true);
         Self {
-            http: HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(connector)),
+            http,
             credential,
             api_base: api_base_url.trim_end_matches('/').to_string(),
             login: Arc::new(OnceCell::new()),
@@ -758,7 +709,7 @@ pub(crate) async fn collect_body_limited(
 }
 
 /// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
-fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
+pub(crate) fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
     let mut root_store = rustls::RootCertStore::empty();
     let cert_result = rustls_native_certs::load_native_certs();
     if cert_result.certs.is_empty() {
