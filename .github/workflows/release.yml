@@ -15,7 +15,12 @@
 #                                 └──────────────►└──► docker
 #
 # This project does NOT publish to crates.io. Releases ship as:
-#   * pre-built binaries for five targets, attached to the GitHub Release
+#   * pre-built binaries for five targets, attached to the GitHub Release.
+#     The two Linux binaries are STATIC musl executables built by the
+#     Dockerfile's `export` stage (no glibc version requirement); each is
+#     checked with `file`/`ldd` and run with `--version` before upload.
+#     Every binary gets a signed build-provenance attestation (GitHub
+#     artifact attestations, SLSA v1.0 Build Level 2 as GitHub documents it)
 #   * multi-arch container images on GHCR (`ghcr.io/<repo>:<tag>`)
 #   * source install via `cargo install --git`
 # Every workspace crate is marked `publish = false` in its `Cargo.toml`.
@@ -40,17 +45,36 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Pinned toolchain for the release gate and the non-Linux binaries, so a new
+  # stable release cannot break (or silently change) a release.  Linux binaries
+  # use the Dockerfile's pinned `rust:1.88-alpine` builder.  Keep in sync with
+  # ci.yml.
+  RUST_TOOLCHAIN: "1.97.0"
+  # NOTE: third-party actions are referenced by tag, not by commit SHA: SHAs
+  # must be resolved from GitHub and verified, which was not possible when this
+  # file was written.  .github/dependabot.yml keeps the refs current.
 
 jobs:
   # ── Job 1: Validate tag, version consistency, and changelog entry ───────────
   validate:
     name: Validate release tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version:       ${{ steps.meta.outputs.version }}
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # needed to prove the tagged commit is on main
+
+      - name: Tag must point at a commit on main
+        shell: bash
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on main; releases are cut from main only."
+            exit 1
+          fi
 
       - name: Extract version metadata
         id: meta
@@ -154,36 +178,36 @@ jobs:
         include:
           - name: "test · Linux"
             os: ubuntu-latest
-            toolchain: stable
-            command: cargo test --workspace --all-targets
+            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
+            command: cargo test --workspace --all-targets --locked
           - name: "test · macOS"
             os: macos-latest
-            toolchain: stable
-            command: cargo test --workspace --all-targets
+            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
+            command: cargo test --workspace --all-targets --locked
           - name: "clippy"
             os: ubuntu-latest
-            toolchain: stable
+            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
             components: clippy
-            command: cargo clippy --workspace --all-targets -- -D warnings
+            command: cargo clippy --workspace --all-targets --locked -- -D warnings
           - name: "fmt"
             os: ubuntu-latest
-            toolchain: stable
+            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
             components: rustfmt
             command: cargo fmt --all -- --check
           - name: "doc"
             os: ubuntu-latest
-            toolchain: stable
-            command: cargo doc --workspace --no-deps
+            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
+            command: cargo doc --workspace --no-deps --locked
           - name: "MSRV 1.88"
             os: ubuntu-latest
             toolchain: "1.88"
-            command: cargo build --workspace
+            command: cargo build --workspace --locked
     env:
       # Doc-warnings-as-errors only affects `cargo doc`; harmless for other steps.
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.toolchain }}
           components: ${{ matrix.components || '' }}
@@ -207,17 +231,27 @@ jobs:
     name: Binary (${{ matrix.target }})
     needs: [ci, security]
     runs-on: ${{ matrix.os }}
+    # Needed by the attestation step (id-token / attestations); contents: read
+    # must be repeated because a job-level `permissions` replaces the default.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          # Linux: static musl binaries from the Dockerfile `export` stage.
+          # Native build on each architecture (no QEMU, no `cross`).
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
             artifact: github-backup-linux-x86_64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            docker_export: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
             artifact: github-backup-linux-aarch64
-            cross: true
+            docker_export: true
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: github-backup-macos-x86_64
@@ -230,30 +264,49 @@ jobs:
             ext: .exe
     steps:
       - uses: actions/checkout@v6
+
+      # ── Linux: Dockerfile export stage ──
+      - name: Build static binary (Dockerfile export stage)
+        if: matrix.docker_export
+        run: docker build --target export --output type=local,dest=out .
+
+      - name: Verify the Linux binary is static and runs
+        if: matrix.docker_export
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/github-backup
+          # Must be a static executable: no glibc symbol-version floor at all.
+          file out/github-backup | grep -Eq 'statically linked|static-pie linked'
+          if ldd out/github-backup 2>&1 | grep -q 'not a dynamic executable\|statically linked'; then :; else
+            echo "::error::binary is dynamically linked"; ldd out/github-backup || true; exit 1
+          fi
+          ./out/github-backup --version
+
+      # ── macOS / Windows: native cargo build ──
       - uses: dtolnay/rust-toolchain@stable
+        if: "!matrix.docker_export"
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        if: "!matrix.docker_export"
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross (Linux cross-compilation)
-        if: matrix.cross
-        run: cargo install cross --locked
-
       - name: Build (native)
-        if: "!matrix.cross"
-        run: cargo build --release --package github-backup --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --package github-backup --target ${{ matrix.target }}
+        if: "!matrix.docker_export"
+        run: cargo build --release --locked --package github-backup --target ${{ matrix.target }}
 
       - name: Stage binary and checksum
         shell: bash
         run: |
           mkdir -p staging
-          src="target/${{ matrix.target }}/release/github-backup${{ matrix.ext }}"
+          if [[ "${{ matrix.docker_export }}" == "true" ]]; then
+            src="out/github-backup"
+          else
+            src="target/${{ matrix.target }}/release/github-backup${{ matrix.ext }}"
+          fi
           dst="staging/${{ matrix.artifact }}${{ matrix.ext }}"
           cp "$src" "$dst"
           # Compute the SHA-256 next to the binary so users can verify downloads.
@@ -263,6 +316,14 @@ jobs:
             (cd staging && shasum -a 256 "$(basename "$dst")" > "$(basename "$dst").sha256")
           fi
           ls -lh staging/
+
+      # Signed build-provenance attestation for the binary itself (not the
+      # .sha256).  Verify with:
+      #   gh attestation verify <file> --repo tomtom215/github-backup-rust
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: staging/${{ matrix.artifact }}${{ matrix.ext }}
 
       - uses: actions/upload-artifact@v7
         with:
