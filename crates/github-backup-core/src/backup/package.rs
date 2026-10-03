@@ -44,7 +44,7 @@ pub async fn backup_packages(
     json_dir: &Path,
     storage: &impl Storage,
 ) -> Result<u64, CoreError> {
-    if !opts.packages {
+    if !opts.packages || opts.dry_run {
         return Ok(0);
     }
 
@@ -234,5 +234,23 @@ mod tests {
             0,
             "empty package list should produce no files"
         );
+    }
+
+    /// A dry run writes nothing: the e2e harness found package metadata being
+    /// saved by `--dry-run`.
+    #[tokio::test]
+    async fn dry_run_writes_no_package_files() {
+        let client = crate::backup::mock_client::MockBackupClient::new();
+        let storage = crate::storage::test_support::MemStorage::default();
+        let opts = BackupOptions {
+            packages: true,
+            dry_run: true,
+            ..Default::default()
+        };
+        let n = backup_packages(&client, "octocat", &opts, Path::new("/json"), &storage)
+            .await
+            .expect("dry run");
+        assert_eq!(n, 0);
+        assert_eq!(storage.len(), 0);
     }
 }

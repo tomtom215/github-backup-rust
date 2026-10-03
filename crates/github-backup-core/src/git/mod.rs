@@ -354,40 +354,51 @@ struct Job {
 
 impl Job {
     fn mirror_clone(&self) -> Result<(), CoreError> {
-        let dest_str = path_to_str(&self.dest)?;
+        path_to_str(&self.dest)?;
         if self.dest.exists() {
             info!(dest = %self.dest.display(), "repository exists, updating mirror");
             self.update(self.fetch_all_args())
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare mirror");
-            self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, dest_str])
+            self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, DEST])
         }
     }
 
     fn bare_clone(&self) -> Result<(), CoreError> {
-        let dest_str = path_to_str(&self.dest)?;
+        path_to_str(&self.dest)?;
         if self.dest.exists() {
             info!(dest = %self.dest.display(), "bare repository exists, fetching");
-            self.update(self.fetch_all_args())
+            // `git clone --bare` writes no fetch refspec, so `git fetch --all`
+            // would exit 0 having fetched nothing, forever.  Name the refspecs.
+            let mut args = vec!["fetch", "--progress"];
+            if !self.opts.no_prune {
+                args.push("--prune");
+            }
+            args.extend([
+                "origin",
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ]);
+            self.update(&args)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare");
-            self.fresh_clone(&["clone", "--progress", "--bare", &self.url, dest_str])
+            self.fresh_clone(&["clone", "--progress", "--bare", &self.url, DEST])
         }
     }
 
     fn full_clone(&self) -> Result<(), CoreError> {
-        let dest_str = path_to_str(&self.dest)?;
+        path_to_str(&self.dest)?;
         if self.dest.exists() {
             info!(dest = %self.dest.display(), "full clone exists, fetching all branches");
             self.update(self.fetch_all_args())
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning full working tree");
-            self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, dest_str])
+            self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, DEST])
         }
     }
 
     fn shallow_clone(&self, depth: u32) -> Result<(), CoreError> {
-        let dest_str = path_to_str(&self.dest)?;
+        path_to_str(&self.dest)?;
         let depth_str = depth.to_string();
         if self.dest.exists() {
             info!(dest = %self.dest.display(), depth, "shallow clone exists, deepening fetch");
@@ -401,20 +412,18 @@ impl Job {
                 "--depth",
                 &depth_str,
                 &self.url,
-                dest_str,
+                DEST,
             ])
         }
     }
 
+    /// LFS mode is a mirror plus the LFS objects.  (`git lfs clone` made a
+    /// working-tree checkout whose refs `git lfs fetch --all` never advanced,
+    /// so every update after the first silently did nothing.)
     fn lfs_clone(&self) -> Result<(), CoreError> {
-        let dest_str = path_to_str(&self.dest)?;
-        if self.dest.exists() {
-            info!(dest = %self.dest.display(), "LFS repository exists, updating");
-            self.update(&["lfs", "fetch", "--all"])
-        } else {
-            info!(url = %self.url, dest = %self.dest.display(), "cloning with LFS");
-            self.fresh_clone(&["lfs", "clone", &self.url, dest_str])
-        }
+        self.mirror_clone()?;
+        info!(dest = %self.dest.display(), "fetching LFS objects");
+        self.update(&["lfs", "fetch", "--all", "origin"])
     }
 
     fn push_mirror(&self) -> Result<(), CoreError> {
@@ -456,37 +465,85 @@ impl Job {
         )
     }
 
-    /// Performs a **fresh** clone: runs git with `args`, then:
-    /// - On failure: removes the partially-written destination directory.
-    /// - On success (when `opts.run_fsck`): runs `git fsck` and logs issues.
+    /// Performs a **fresh** clone atomically.
+    ///
+    /// git clones into a hidden staging directory next to the destination, and
+    /// only a clone that finished is renamed into place.  The destination
+    /// therefore always holds either nothing or a complete repository: a
+    /// process killed mid-clone (OOM, `docker stop` timeout, power loss) leaves
+    /// only a staging directory, which the next attempt deletes — never a
+    /// half-initialised repository that later updates would treat as complete
+    /// and "fetch" nothing into forever.
+    ///
+    /// `args_for` receives the staging path and returns git's arguments.
     fn fresh_clone(&self, args: &[&str]) -> Result<(), CoreError> {
-        match run_git(
+        let parent = self.dest.parent().unwrap_or_else(|| Path::new("."));
+        let name = self
+            .dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::fs::create_dir_all(parent).map_err(|e| CoreError::io(parent.display(), e))?;
+
+        // Staging directories left by a killed predecessor (possibly still being
+        // written to by its orphaned git) are of no use to anyone.
+        remove_stale_staging(parent, &name);
+
+        let staging = parent.join(format!(".{name}{STAGING_MARKER}{}", std::process::id()));
+        let staging_str = path_to_str(&staging)?;
+        let args: Vec<&str> = args
+            .iter()
+            .map(|a| if *a == DEST { staging_str } else { *a })
+            .collect();
+
+        let result = run_git(
             &self.program,
-            args,
+            &args,
             Path::new("."),
             self.opts.token.as_deref(),
             &self.opts,
-        ) {
-            Ok(()) => {
-                if self.opts.run_fsck && self.dest.exists() {
-                    run_fsck(&self.program, &self.dest);
-                }
-                Ok(())
+        )
+        .and_then(|()| {
+            if self.opts.run_fsck {
+                run_fsck(&self.program, &staging);
             }
-            Err(e) => {
-                // Remove any partial clone directory so the next run starts fresh.
-                if self.dest.exists() {
-                    if let Err(rm_err) = std::fs::remove_dir_all(&self.dest) {
-                        warn!(
-                            dest = %self.dest.display(),
-                            error = %rm_err,
-                            "failed to remove partial clone directory after git failure"
-                        );
-                    } else {
-                        debug!(dest = %self.dest.display(), "removed partial clone directory");
-                    }
+            std::fs::rename(&staging, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
+        });
+
+        if result.is_err() && staging.exists() {
+            match std::fs::remove_dir_all(&staging) {
+                Ok(()) => debug!(dir = %staging.display(), "removed partial clone"),
+                Err(e) => warn!(
+                    dir = %staging.display(),
+                    error = %e,
+                    "failed to remove partial clone directory after git failure"
+                ),
+            }
+        }
+        result
+    }
+}
+
+/// Placeholder for the clone destination in the argument lists above; replaced
+/// by the staging directory in [`Job::fresh_clone`].
+const DEST: &str = "\0dest";
+
+/// Infix of a staging directory's name: `.<repo>.git.partial-<pid>`.
+const STAGING_MARKER: &str = ".partial-";
+
+/// Removes every `.<name>.partial-*` sibling in `parent`.
+fn remove_stale_staging(parent: &Path, name: &str) {
+    let prefix = format!(".{name}{STAGING_MARKER}");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => info!(dir = %entry.path().display(), "removed leftover partial clone"),
+                Err(e) => {
+                    warn!(dir = %entry.path().display(), error = %e, "could not remove leftover partial clone")
                 }
-                Err(e)
             }
         }
     }
@@ -616,9 +673,8 @@ mod tests {
 
     // ── Process handling (stand-in `git` scripts, Unix only) ─────────────
     //
-    // Cancellation (`CloneOptions::cancel`) is covered by the
-    // integration test `tests/git_shutdown.rs`, which runs in its own process
-    // so the one-way flag cannot leak into these tests.
+    // Cancellation (`CloneOptions::cancel`) is covered by the integration test
+    // `tests/git_cancel.rs`.
 
     /// Writes an executable shell script into `dir` and returns a runner that
     /// executes it instead of the real `git`.
@@ -626,7 +682,9 @@ mod tests {
     fn runner_with_script(dir: &Path, body: &str) -> ProcessGitRunner {
         use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-git");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        // Like real git, a `clone` creates its destination (the last argument).
+        let prelude = r#"if [ "$1" = clone ] || [ "$1" = lfs ]; then for d in "$@"; do :; done; mkdir -p "$d"; fi"#;
+        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\n{body}\n")).expect("write script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("chmod script");
         ProcessGitRunner::with_program(script)
@@ -779,6 +837,109 @@ exit 128"#,
             .await
             .expect_err("must fail");
         assert!(!dest.exists(), "partial clone directory must be removed");
+        assert_eq!(
+            staging_dirs(dir.path()),
+            Vec::<String>::new(),
+            "the staging directory must be removed too"
+        );
+    }
+
+    #[cfg(unix)]
+    fn staging_dirs(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read_dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(STAGING_MARKER))
+            .collect()
+    }
+
+    /// A finished clone appears at the destination in one rename, with nothing
+    /// left behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_successful_clone_is_renamed_into_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(dir.path(), r#"touch "$d/HEAD"; exit 0"#);
+        let dest = dir.path().join("sub").join("repo.git");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect("clone");
+        assert!(
+            dest.join("HEAD").exists(),
+            "content must be at the destination"
+        );
+        assert!(staging_dirs(dest.parent().unwrap()).is_empty());
+    }
+
+    /// Regression for the audit's critical finding: a process killed during
+    /// the clone left a half-initialised repository at the destination, which
+    /// the next run treated as complete and "updated" with `fetch` forever.
+    /// Now the destination does not exist until the clone is finished, and a
+    /// predecessor's staging directory is swept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_killed_predecessors_partial_clone_is_swept_and_never_mistaken_for_a_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("repo.git");
+        // What a SIGKILLed run leaves: a staging directory, no destination.
+        let leftover = dir.path().join(format!(".repo.git{STAGING_MARKER}4242"));
+        std::fs::create_dir_all(leftover.join("objects")).expect("leftover");
+        assert!(!dest.exists());
+
+        let runner = runner_with_script(dir.path(), r#"touch "$d/HEAD"; exit 0"#);
+        runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect("clone");
+
+        assert!(dest.join("HEAD").exists());
+        assert!(
+            !leftover.exists(),
+            "the stale staging directory must be removed"
+        );
+    }
+
+    /// `git clone --bare` writes no fetch refspec, so updating with
+    /// `fetch --all` fetched nothing, forever.  The update must name its refspecs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn updating_a_bare_clone_names_its_refspecs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("args.txt");
+        let runner =
+            runner_with_script(dir.path(), &format!(r#"echo "$@" > '{}'"#, seen.display()));
+        let dest = dir.path().join("repo.git");
+        std::fs::create_dir_all(&dest).expect("existing repo");
+        runner
+            .bare_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect("update");
+        let args = std::fs::read_to_string(&seen).expect("args");
+        assert!(args.contains("+refs/heads/*:refs/heads/*"), "{args}");
+        assert!(args.contains("+refs/tags/*:refs/tags/*"), "{args}");
+        assert!(args.contains("--prune"), "{args}");
+    }
+
+    /// LFS mode is a mirror (so refs advance on every run) plus the LFS objects.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lfs_update_fetches_refs_and_then_lfs_objects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("calls.txt");
+        let runner =
+            runner_with_script(dir.path(), &format!(r#"echo "$@" >> '{}'"#, seen.display()));
+        let dest = dir.path().join("repo.git");
+        std::fs::create_dir_all(&dest).expect("existing repo");
+        runner
+            .lfs_clone("https://example.invalid/r.git", &dest, &with_stall(10))
+            .await
+            .expect("update");
+        let calls = std::fs::read_to_string(&seen).expect("calls");
+        let lines: Vec<&str> = calls.lines().collect();
+        assert!(lines[0].starts_with("fetch --progress --all"), "{lines:?}");
+        assert_eq!(lines[1], "lfs fetch --all origin", "{lines:?}");
     }
 
     /// git must never be able to prompt (cron/Docker have no terminal) and

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use github_backup_types::{config::BackupOptions, Repository};
 
@@ -50,6 +50,7 @@ pub async fn backup_wiki(
     let dest = wikis_dir.join(format!("{}.wiki.git", repo.name));
 
     info!(repo = %repo.full_name, dest = %dest.display(), "cloning wiki");
+    let had_backup = dest.exists();
 
     match git.mirror_clone(wiki_url, &dest, clone_opts).await {
         Ok(()) => Ok(()),
@@ -58,7 +59,16 @@ pub async fn backup_wiki(
         // bare exit code 128 is also how git reports rejected credentials, DNS
         // and ownership errors, which must not be hidden as "no wiki".
         Err(e) if e.is_remote_missing() => {
-            info!(repo = %repo.full_name, "repository has no wiki content, skipping");
+            if had_backup {
+                // The wiki was backed up before and is gone (deleted, or access
+                // revoked).  The earlier copy is kept; say so loudly.
+                warn!(
+                    repo = %repo.full_name,
+                    "wiki no longer exists upstream; keeping the copy from an earlier backup"
+                );
+            } else {
+                info!(repo = %repo.full_name, "repository has no wiki content, skipping");
+            }
             Ok(())
         }
         Err(e) => Err(e),
