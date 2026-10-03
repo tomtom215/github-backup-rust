@@ -3,8 +3,11 @@
 
 //! All application state types.
 
+use std::collections::VecDeque;
+use std::fmt;
 use std::path::PathBuf;
 
+use github_backup_core::Failure;
 use github_backup_types::config::{BackupOptions, BackupTarget, CloneType};
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -21,20 +24,26 @@ pub enum Screen {
 
 // ── Configure form ────────────────────────────────────────────────────────────
 
-/// All configuration state, mirroring every CLI flag.
-#[derive(Debug, Clone)]
+/// Configuration the TUI can really apply.
+///
+/// Every field is read by [`ConfigState::to_backup_config`] or by the backup
+/// task in `lib.rs`.  Options the TUI cannot honour (mirror push, S3 sync,
+/// report, metrics, webhook, device-flow sign-in) are deliberately not
+/// representable, so the form can never promise something the run will not do.
+/// `Debug` is written by hand so a token never reaches a log or panic message.
+#[derive(Clone)]
 pub struct ConfigState {
     // ── Auth ──────────────────────────────────────────────────────────────
     pub token: String,
     pub api_url: String,
-    pub device_auth: bool,
-    pub oauth_client_id: String,
 
     // ── Target ────────────────────────────────────────────────────────────
     pub owner: String,
     pub output_dir: String,
     pub org_mode: bool,
     pub since: String,
+    /// Ignore the saved incremental state and fetch everything again.
+    pub full: bool,
 
     // ── Categories ────────────────────────────────────────────────────────
     pub repositories: bool,
@@ -85,35 +94,33 @@ pub struct ConfigState {
     pub include_repos: String, // comma-separated glob patterns
     pub exclude_repos: String,
 
-    // ── Mirror ────────────────────────────────────────────────────────────
-    pub mirror_to: String,
-    pub mirror_type: MirrorTypeForm,
-    pub mirror_token: String,
-    pub mirror_owner: String,
-    pub mirror_private: bool,
-
-    // ── S3 ────────────────────────────────────────────────────────────────
-    pub s3_bucket: String,
-    pub s3_region: String,
-    pub s3_prefix: String,
-    pub s3_endpoint: String,
-    pub s3_access_key: String,
-    pub s3_secret_key: String,
-    pub s3_include_assets: bool,
-
-    // ── Output / extras ───────────────────────────────────────────────────
+    // ── Output ────────────────────────────────────────────────────────────
+    /// Write the SHA-256 manifest after a (non-dry) run.
     pub manifest: bool,
     pub dry_run: bool,
-    pub report: String,
-    pub prometheus_metrics: String,
-    pub keep_last: String,
-    pub max_age_days: String,
 
     // ── Navigation ────────────────────────────────────────────────────────
     pub active_tab: usize,
     pub active_field: usize,
     pub editing: bool,
     pub edit_buffer: String,
+}
+
+impl fmt::Debug for ConfigState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token = if self.token.is_empty() {
+            "<empty>"
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("ConfigState")
+            .field("token", &token)
+            .field("owner", &self.owner)
+            .field("output_dir", &self.output_dir)
+            .field("org_mode", &self.org_mode)
+            .field("dry_run", &self.dry_run)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,41 +153,16 @@ impl CloneTypeForm {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MirrorTypeForm {
-    Gitea,
-    Gitlab,
-}
-
-impl MirrorTypeForm {
-    pub const OPTIONS: &'static [&'static str] = &["gitea", "gitlab"];
-
-    pub fn idx(&self) -> usize {
-        match self {
-            Self::Gitea => 0,
-            Self::Gitlab => 1,
-        }
-    }
-
-    pub fn from_idx(i: usize) -> Self {
-        match i {
-            1 => Self::Gitlab,
-            _ => Self::Gitea,
-        }
-    }
-}
-
 impl Default for ConfigState {
     fn default() -> Self {
         Self {
             token: String::new(),
             api_url: String::new(),
-            device_auth: false,
-            oauth_client_id: String::new(),
             owner: String::new(),
             output_dir: String::from("./github-backup"),
             org_mode: false,
             since: String::new(),
+            full: false,
             repositories: true,
             issues: false,
             issue_comments: false,
@@ -224,24 +206,8 @@ impl Default for ConfigState {
             concurrency: String::from("4"),
             include_repos: String::new(),
             exclude_repos: String::new(),
-            mirror_to: String::new(),
-            mirror_type: MirrorTypeForm::Gitea,
-            mirror_token: String::new(),
-            mirror_owner: String::new(),
-            mirror_private: false,
-            s3_bucket: String::new(),
-            s3_region: String::from("us-east-1"),
-            s3_prefix: String::new(),
-            s3_endpoint: String::new(),
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_include_assets: false,
             manifest: false,
             dry_run: false,
-            report: String::new(),
-            prometheus_metrics: String::new(),
-            keep_last: String::new(),
-            max_age_days: String::new(),
             active_tab: 0,
             active_field: 0,
             editing: false,
@@ -250,154 +216,293 @@ impl Default for ConfigState {
     }
 }
 
+/// Highest concurrency the form accepts.
+pub const MAX_CONCURRENCY: usize = 64;
+
+/// Normalises a `since` value to `YYYY-MM-DDTHH:MM:SSZ` (UTC).
+///
+/// Accepts a bare date (`2024-01-01`, midnight UTC) or an RFC 3339 timestamp.
+fn normalise_since(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() >= 20 && matches!(value.as_bytes()[10], b'T' | b't') {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+            return Ok(dt
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string());
+        }
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .ok_or_else(|| {
+            "Since must be a date like 2024-01-01 or a timestamp like 2024-01-01T00:00:00Z".into()
+        })
+}
+
 impl ConfigState {
     /// Returns the number of tabs in the configure screen.
-    pub const TAB_COUNT: usize = 8;
+    pub const TAB_COUNT: usize = 6;
 
-    pub const TAB_NAMES: &'static [&'static str] = &[
-        "Auth",
-        "Target",
-        "Categories",
-        "Clone",
-        "Filter",
-        "Mirror",
-        "S3",
-        "Output",
-    ];
+    pub const TAB_NAMES: &'static [&'static str] =
+        &["Auth", "Target", "Categories", "Clone", "Filter", "Output"];
+
+    /// Index of the Categories tab (it has the select-all shortcut).
+    pub const TAB_CATEGORIES: usize = 2;
 
     /// Count of fields per tab (for navigation wrapping).
     pub fn tab_field_count(&self) -> usize {
         match self.active_tab {
-            0 => 4,  // Auth: token, api_url, device_auth, oauth_client_id
-            1 => 4,  // Target: owner, output_dir, org_mode, since
+            0 => 2,  // Auth: token, api_url
+            1 => 5,  // Target: owner, output_dir, org_mode, since, full
             2 => 34, // Categories: 34 bool flags
             3 => 7,  // Clone: clone_type, forks, private, lfs, prefer_ssh, no_prune, concurrency
             4 => 2,  // Filter: include, exclude
-            5 => 5,  // Mirror: mirror_to, mirror_type, mirror_token, mirror_owner, mirror_private
-            6 => 7,  // S3: bucket, region, prefix, endpoint, access_key, secret_key, include_assets
-            7 => 6, // Output: manifest, dry_run, report, prometheus_metrics, keep_last, max_age_days
+            5 => 2,  // Output: manifest, dry_run
             _ => 1,
         }
     }
 
     /// Converts form state into the types needed by the backup engine.
     /// Returns `(owner, output_path, BackupOptions, token_opt)`.
+    ///
+    /// The destructuring below names every field and uses no `..`: adding a
+    /// field to [`ConfigState`] is a compile error until it is decided whether
+    /// the backup uses it, so the form can never silently grow an inert field.
     pub fn to_backup_config(&self) -> (String, PathBuf, BackupOptions, Option<String>) {
-        let owner = self.owner.trim().to_string();
-        let output = PathBuf::from(self.output_dir.trim());
-        let token = if self.token.trim().is_empty() {
+        let ConfigState {
+            token,
+            api_url: _, // read by the backup task, which builds the client
+            owner,
+            output_dir,
+            org_mode,
+            since,
+            full,
+            repositories,
+            issues,
+            issue_comments,
+            issue_events,
+            pulls,
+            pull_comments,
+            pull_commits,
+            pull_reviews,
+            labels,
+            milestones,
+            releases,
+            release_assets,
+            hooks,
+            security_advisories,
+            wikis,
+            starred,
+            clone_starred,
+            watched,
+            followers,
+            following,
+            gists,
+            starred_gists,
+            topics,
+            branches,
+            deploy_keys,
+            collaborators,
+            org_members,
+            org_teams,
+            actions,
+            action_runs,
+            environments,
+            discussions,
+            projects,
+            packages,
+            clone_type,
+            forks,
+            private,
+            lfs,
+            prefer_ssh,
+            no_prune,
+            concurrency,
+            include_repos,
+            exclude_repos,
+            manifest: _, // applied by the backup task after the run
+            dry_run,
+            active_tab: _,
+            active_field: _,
+            editing: _,
+            edit_buffer: _,
+        } = self;
+
+        let token = if token.trim().is_empty() {
             None
         } else {
-            Some(self.token.trim().to_string())
+            Some(token.trim().to_string())
         };
 
-        let target = if self.org_mode {
+        let target = if *org_mode {
             BackupTarget::Org
         } else {
             BackupTarget::User
         };
 
-        let clone_type = match self.clone_type {
+        let clone_type = match clone_type {
             CloneTypeForm::Mirror => CloneType::Mirror,
             CloneTypeForm::Bare => CloneType::Bare,
             CloneTypeForm::Full => CloneType::Full,
             CloneTypeForm::Shallow => CloneType::Shallow(10),
         };
 
-        let concurrency = self.concurrency.trim().parse::<usize>().unwrap_or(4);
+        // `validate` rejects anything else before a run starts; the clamp keeps
+        // this conversion total (a bad value can never reach the engine).
+        let concurrency = concurrency
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(4)
+            .clamp(1, MAX_CONCURRENCY);
 
-        let since = if self.since.trim().is_empty() {
+        let since = if since.trim().is_empty() {
             None
         } else {
-            Some(self.since.trim().to_string())
+            Some(normalise_since(since).unwrap_or_else(|_| since.trim().to_string()))
         };
 
-        let include_repos: Vec<String> = self
-            .include_repos
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let exclude_repos: Vec<String> = self
-            .exclude_repos
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let api_url = if self.api_url.trim().is_empty() {
-            None
-        } else {
-            Some(self.api_url.trim().to_string())
+        let split = |s: &str| -> Vec<String> {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
         };
-        let _ = api_url; // used by caller
 
         let opts = BackupOptions {
             target,
-            full: false,
-            repositories: self.repositories,
-            forks: self.forks,
-            private: self.private,
-            prefer_ssh: self.prefer_ssh,
+            full: *full,
+            repositories: *repositories,
+            forks: *forks,
+            private: *private,
+            prefer_ssh: *prefer_ssh,
             clone_type,
-            lfs: self.lfs,
-            no_prune: self.no_prune,
-            issues: self.issues,
-            issue_comments: self.issue_comments,
-            issue_events: self.issue_events,
-            pulls: self.pulls,
-            pull_comments: self.pull_comments,
-            pull_commits: self.pull_commits,
-            pull_reviews: self.pull_reviews,
-            labels: self.labels,
-            milestones: self.milestones,
-            releases: self.releases,
-            release_assets: self.release_assets,
-            hooks: self.hooks,
-            security_advisories: self.security_advisories,
-            wikis: self.wikis,
-            starred: self.starred,
-            clone_starred: self.clone_starred,
-            watched: self.watched,
-            followers: self.followers,
-            following: self.following,
-            gists: self.gists,
-            starred_gists: self.starred_gists,
-            topics: self.topics,
-            branches: self.branches,
-            deploy_keys: self.deploy_keys,
-            collaborators: self.collaborators,
-            org_members: self.org_members,
-            org_teams: self.org_teams,
-            actions: self.actions,
-            action_runs: self.action_runs,
-            environments: self.environments,
-            discussions: self.discussions,
-            projects: self.projects,
-            packages: self.packages,
-            include_repos,
-            exclude_repos,
+            lfs: *lfs,
+            no_prune: *no_prune,
+            issues: *issues,
+            issue_comments: *issue_comments,
+            issue_events: *issue_events,
+            pulls: *pulls,
+            pull_comments: *pull_comments,
+            pull_commits: *pull_commits,
+            pull_reviews: *pull_reviews,
+            labels: *labels,
+            milestones: *milestones,
+            releases: *releases,
+            release_assets: *release_assets,
+            hooks: *hooks,
+            security_advisories: *security_advisories,
+            wikis: *wikis,
+            starred: *starred,
+            clone_starred: *clone_starred,
+            watched: *watched,
+            followers: *followers,
+            following: *following,
+            gists: *gists,
+            starred_gists: *starred_gists,
+            topics: *topics,
+            branches: *branches,
+            deploy_keys: *deploy_keys,
+            collaborators: *collaborators,
+            org_members: *org_members,
+            org_teams: *org_teams,
+            actions: *actions,
+            action_runs: *action_runs,
+            environments: *environments,
+            discussions: *discussions,
+            projects: *projects,
+            packages: *packages,
+            include_repos: split(include_repos),
+            exclude_repos: split(exclude_repos),
             since,
             clone_host: None,
-            dry_run: self.dry_run,
+            dry_run: *dry_run,
             concurrency,
         };
 
-        (owner, output, opts, token)
+        (
+            owner.trim().to_string(),
+            PathBuf::from(output_dir.trim()),
+            opts,
+            token,
+        )
     }
 
-    /// Validates required fields; returns an error string if invalid.
+    /// Validates the form; returns what to fix, or `None` if a run may start.
     pub fn validate(&self) -> Option<String> {
-        if self.owner.trim().is_empty() {
+        let owner = self.owner.trim();
+        if owner.is_empty() {
             return Some("Owner is required (Configure > Target tab)".into());
         }
-        if self.token.trim().is_empty() && !self.device_auth {
+        if owner.contains(['/', '\\'])
+            || owner.contains("..")
+            || owner.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
             return Some(
-                "A token is required unless using device auth (Configure > Auth tab)".into(),
+                "Owner must be a plain user or organisation name (Configure > Target tab)".into(),
             );
         }
+        if self.output_dir.trim().is_empty() {
+            return Some("Output directory is required (Configure > Target tab)".into());
+        }
+        if self.token.trim().is_empty() {
+            return Some("A GitHub token is required (Configure > Auth tab)".into());
+        }
+        let api_url = self.api_url.trim();
+        if !api_url.is_empty() && !api_url.starts_with("https://") {
+            return Some("API URL must start with https:// (Configure > Auth tab)".into());
+        }
+        if !self.since.trim().is_empty() {
+            if let Err(e) = normalise_since(&self.since) {
+                return Some(format!("{e} (Configure > Target tab)"));
+            }
+        }
+        match self.concurrency.trim().parse::<usize>() {
+            Ok(n) if (1..=MAX_CONCURRENCY).contains(&n) => {}
+            _ => {
+                return Some(format!(
+                    "Concurrency must be a number from 1 to {MAX_CONCURRENCY} (Configure > Clone tab)"
+                ));
+            }
+        }
         None
+    }
+
+    /// Returns `true` if every category flag (the ones `A` toggles) is on.
+    pub fn all_categories_on(&self) -> bool {
+        self.repositories
+            && self.issues
+            && self.issue_comments
+            && self.issue_events
+            && self.pulls
+            && self.pull_comments
+            && self.pull_commits
+            && self.pull_reviews
+            && self.labels
+            && self.milestones
+            && self.releases
+            && self.release_assets
+            && self.hooks
+            && self.security_advisories
+            && self.wikis
+            && self.starred
+            && self.watched
+            && self.followers
+            && self.following
+            && self.gists
+            && self.starred_gists
+            && self.topics
+            && self.branches
+            && self.deploy_keys
+            && self.collaborators
+            && self.org_members
+            && self.org_teams
+            && self.actions
+            && self.environments
+            && self.discussions
+            && self.projects
+            && self.packages
     }
 
     /// Sets all category flags to `val`.
@@ -441,12 +546,12 @@ impl ConfigState {
 
 /// Status of a single repository in the Running screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum RepoStatus {
-    Pending,
     Running,
     Done,
+    /// The repository finished with at least one failed step.
     Error,
+    /// Nothing was attempted (filtered out or dry run).
     Skipped,
 }
 
@@ -459,18 +564,40 @@ pub struct RepoEntry {
     pub error: Option<String>,
 }
 
+/// Where the backup task is in its life cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunStatus {
+    /// No backup is requested or running.
+    #[default]
+    Idle,
+    /// A backup was requested or is running.
+    Active,
+    /// Cancel was requested; the task is stopping git and releasing its lock.
+    Cancelling,
+}
+
+/// Maximum number of log lines kept in memory.
+pub const LOG_CAPACITY: usize = 2000;
+
 /// All state for the Running screen.
 #[derive(Debug, Default)]
 pub struct RunState {
+    pub status: RunStatus,
     pub repos: Vec<RepoEntry>,
-    pub log_lines: Vec<LogLine>,
+    pub log_lines: VecDeque<LogLine>,
     pub total_repos: u64,
     pub repos_done: u64,
+    /// Repositories that finished with a failure so far.
     pub repos_errored: u64,
     pub repos_skipped: u64,
+    /// Repositories the engine has finished with (any outcome).
+    pub processed: u64,
     pub started_at: Option<std::time::Instant>,
+    /// Frozen elapsed time once the run has ended (the clock stops).
+    pub elapsed_final: Option<std::time::Duration>,
     pub repo_list_offset: usize,
-    pub log_offset: usize,
+    /// How many entries above the newest the log view is scrolled (0 = follow).
+    pub log_back: usize,
     pub phase: String,
 }
 
@@ -490,9 +617,22 @@ impl RunState {
         };
     }
 
+    /// `true` from the moment a backup is requested until it has finished.
+    pub fn is_active(&self) -> bool {
+        self.status != RunStatus::Idle
+    }
+
+    /// Number of repositories known to have failed so far.
+    pub fn incomplete_repos(&self) -> u64 {
+        self.repos_errored
+    }
+
     pub fn elapsed_str(&self) -> String {
-        if let Some(start) = self.started_at {
-            let secs = start.elapsed().as_secs();
+        let elapsed = self
+            .elapsed_final
+            .or_else(|| self.started_at.map(|s| s.elapsed()));
+        if let Some(elapsed) = elapsed {
+            let secs = elapsed.as_secs();
             format!(
                 "{:02}:{:02}:{:02}",
                 secs / 3600,
@@ -508,28 +648,49 @@ impl RunState {
         if self.total_repos == 0 {
             return 0;
         }
-        let done = self.repos_done + self.repos_errored + self.repos_skipped;
-        ((done * 100) / self.total_repos).min(100) as u16
+        let finished = self
+            .processed
+            .max(self.repos_done + self.repos_errored + self.repos_skipped);
+        ((finished * 100) / self.total_repos).min(100) as u16
     }
 
-    /// Append a log line, capping at 2000 to avoid memory growth.
+    /// Append a log line, capping the buffer to avoid memory growth.
+    ///
+    /// While the view is following the newest line it stays there; if the
+    /// user scrolled back, the view keeps showing the same lines.
     pub fn push_log(&mut self, line: LogLine) {
-        if self.log_lines.len() >= 2000 {
-            self.log_lines.remove(0);
+        if self.log_lines.len() >= LOG_CAPACITY {
+            self.log_lines.pop_front();
         }
-        self.log_lines.push(line);
-        // Auto-scroll: always show newest if user hasn't scrolled up.
-        if !self.log_lines.is_empty() {
-            self.log_offset = self.log_lines.len().saturating_sub(1);
+        self.log_lines.push_back(line);
+        if self.log_back > 0 {
+            self.log_back = (self.log_back + 1).min(self.log_lines.len().saturating_sub(1));
         }
     }
 }
 
 // ── Results state ─────────────────────────────────────────────────────────────
 
+/// How the last run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Outcome {
+    /// No backup has finished in this session.
+    #[default]
+    NotRun,
+    /// Ran to the end with no failures.
+    Complete,
+    /// Ran to the end but some items failed: the backup is not complete.
+    Incomplete,
+    /// Stopped by a fatal error before it could finish.
+    Failed,
+    /// Stopped by the user.
+    Cancelled,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ResultsState {
-    pub success: bool,
+    pub outcome: Outcome,
+    pub dry_run: bool,
     pub repos_backed_up: u64,
     pub repos_discovered: u64,
     pub repos_skipped: u64,
@@ -538,9 +699,12 @@ pub struct ResultsState {
     pub issues_fetched: u64,
     pub prs_fetched: u64,
     pub workflows_fetched: u64,
-    pub discussions_fetched: u64,
     pub elapsed_secs: f64,
     pub error_message: Option<String>,
+    /// Every failure the engine recorded, in the order recorded.
+    pub failures: Vec<Failure>,
+    /// Selected row of the failure list.
+    pub failure_selected: usize,
     pub owner: String,
     pub output_dir: String,
 }
@@ -554,6 +718,13 @@ impl ResultsState {
             (secs % 3600) / 60,
             secs % 60
         )
+    }
+
+    /// Moves the failure selection by `delta`, clamped to the list.
+    pub fn move_failure_selection(&mut self, delta: isize) {
+        let last = self.failures.len().saturating_sub(1);
+        let next = self.failure_selected as isize + delta;
+        self.failure_selected = next.clamp(0, last as isize) as usize;
     }
 }
 
@@ -571,6 +742,9 @@ pub struct VerifyState {
     pub scroll: usize,
 }
 
+/// Longest list the verify screen prints per category before "+N more".
+pub const VERIFY_LIST_CAP: usize = 50;
+
 impl VerifyState {
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -578,6 +752,30 @@ impl VerifyState {
 
     pub fn is_clean(&self) -> bool {
         self.tampered.is_empty() && self.missing.is_empty()
+    }
+
+    /// Number of result rows the screen can scroll through.
+    pub fn row_count(&self) -> usize {
+        if !self.done {
+            return 0;
+        }
+        let section = |n: usize| {
+            if n == 0 {
+                0
+            } else {
+                1 + n.min(VERIFY_LIST_CAP) + usize::from(n > VERIFY_LIST_CAP)
+            }
+        };
+        1 + section(self.tampered.len())
+            + section(self.missing.len())
+            + section(self.unexpected.len())
+    }
+
+    /// Scrolls by `delta`, never past the last row.
+    pub fn scroll_by(&mut self, delta: isize) {
+        let last = self.row_count().saturating_sub(1);
+        let next = self.scroll as isize + delta;
+        self.scroll = next.clamp(0, last as isize) as usize;
     }
 }
 
@@ -588,9 +786,10 @@ pub struct DashboardState {
     pub last_backup_time: Option<String>,
     pub last_backup_repos: Option<u64>,
     pub last_tool_version: Option<String>,
+    /// `Some(false)` if the last recorded run had failures.
+    pub last_run_ok: Option<bool>,
+    pub last_run_failures: u64,
     pub selected_action: usize,
-    pub status_message: Option<String>,
-    pub error_message: Option<String>,
 }
 
 impl DashboardState {

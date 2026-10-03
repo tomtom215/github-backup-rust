@@ -6,6 +6,7 @@
 //! Rendering lives in `lib.rs` and the `screens/` modules; this module is
 //! purely state + event dispatch.
 
+use std::path::Path;
 use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -13,10 +14,13 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use crate::{
     event::BackupEvent,
     state::{
-        CloneTypeForm, ConfigState, DashboardState, LogLine, MirrorTypeForm, RepoEntry, RepoStatus,
-        ResultsState, RunState, Screen, VerifyState,
+        CloneTypeForm, ConfigState, DashboardState, LogLine, Outcome, RepoEntry, RepoStatus,
+        ResultsState, RunState, RunStatus, Screen, VerifyState,
     },
 };
+
+/// Longest value the edit buffer accepts (a fine-grained token is ~100).
+const EDIT_MAX_CHARS: usize = 1024;
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -36,6 +40,11 @@ pub struct App {
     pub cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Error message shown in a modal overlay (cleared on any keypress).
     pub modal_error: Option<String>,
+    /// A process signal asked us to exit; the loop leaves once the backup
+    /// task has stopped (or a grace period has passed).
+    pub shutdown_requested: bool,
+    /// Exit status to return after a signal-initiated shutdown.
+    pub shutdown_code: u8,
 }
 
 /// Initial configuration pre-populated from CLI arguments.
@@ -77,25 +86,51 @@ impl App {
             start_verify_requested: false,
             cancel_tx: None,
             modal_error: None,
+            shutdown_requested: false,
+            shutdown_code: 0,
         }
     }
 
+    /// Re-reads the last-run information for the configured owner/output.
     pub fn reload_dashboard(&mut self) {
+        let selected = self.dashboard.selected_action;
         self.dashboard = load_dashboard_state(&self.config);
+        self.dashboard.selected_action = selected;
+    }
+
+    /// Switches to the Dashboard, refreshing what it shows: the owner and
+    /// output directory may have been edited since it was last drawn.
+    pub fn go_dashboard(&mut self) {
+        self.reload_dashboard();
+        self.screen = Screen::Dashboard;
     }
 }
 
 fn load_dashboard_state(config: &ConfigState) -> DashboardState {
+    use github_backup_types::backup_state::{BackupRunHistory, BackupState};
+    use github_backup_types::config::OutputConfig;
+
     let mut dash = DashboardState::default();
-    if config.owner.is_empty() || config.output_dir.is_empty() {
+    let owner = config.owner.trim();
+    let output = config.output_dir.trim();
+    if owner.is_empty() || output.is_empty() {
         return dash;
     }
-    let state_path = std::path::PathBuf::from(&config.output_dir)
-        .join(&config.owner)
-        .join("json")
-        .join("backup_state.json");
+    let out = OutputConfig::new(Path::new(output));
 
-    if let Ok(Some(s)) = github_backup_types::backup_state::BackupState::load(&state_path) {
+    // The newest history entry says how the last run ended (including how many
+    // things failed); the state file only holds the incremental watermark.
+    let history = BackupRunHistory::load(&out.backup_history_path(owner)).unwrap_or_default();
+    if let Some(last) = history.entries.first() {
+        dash.last_backup_time = Some(last.timestamp.clone());
+        dash.last_backup_repos = Some(last.repos_backed_up);
+        dash.last_tool_version = Some(last.tool_version.clone());
+        dash.last_run_ok = Some(last.success);
+        dash.last_run_failures = last.failures;
+        return dash;
+    }
+
+    if let Ok(Some(s)) = BackupState::load(&out.backup_state_path(owner)) {
         dash.last_backup_time = s.last_successful_run.clone();
         dash.last_backup_repos = Some(s.repos_backed_up);
         dash.last_tool_version = Some(s.tool_version.clone());
@@ -115,40 +150,32 @@ pub fn handle_key_dispatch(app: &mut App, code: KeyCode, modifiers: KeyModifiers
 
     // Ctrl+C.
     if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
-        if app.screen == Screen::Running {
-            if let Some(tx) = app.cancel_tx.take() {
-                let _ = tx.send(());
-            }
-        } else {
-            app.should_quit = true;
-        }
+        handle_ctrl_c(app);
         return;
     }
 
-    // Global number shortcuts when not editing text.
-    if !app.config.editing && app.screen != Screen::Running {
-        match code {
-            KeyCode::Char('1') => {
-                app.screen = Screen::Dashboard;
-                return;
+    // Other Ctrl/Alt chords never insert text and never trigger shortcuts.
+    if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return;
+    }
+
+    // Global number shortcuts when not editing text and no backup is active.
+    if !app.config.editing && !app.run.is_active() {
+        let target = match code {
+            KeyCode::Char('1') => Some(Screen::Dashboard),
+            KeyCode::Char('2') => Some(Screen::Configure),
+            KeyCode::Char('3') => Some(Screen::Running),
+            KeyCode::Char('4') => Some(Screen::Verify),
+            KeyCode::Char('5') => Some(Screen::Results),
+            _ => None,
+        };
+        if let Some(screen) = target {
+            if screen == Screen::Dashboard {
+                app.go_dashboard();
+            } else {
+                app.screen = screen;
             }
-            KeyCode::Char('2') => {
-                app.screen = Screen::Configure;
-                return;
-            }
-            KeyCode::Char('3') => {
-                app.screen = Screen::Running;
-                return;
-            }
-            KeyCode::Char('4') => {
-                app.screen = Screen::Verify;
-                return;
-            }
-            KeyCode::Char('5') => {
-                app.screen = Screen::Results;
-                return;
-            }
-            _ => {}
+            return;
         }
     }
 
@@ -158,6 +185,65 @@ pub fn handle_key_dispatch(app: &mut App, code: KeyCode, modifiers: KeyModifiers
         Screen::Running => handle_running(app, code),
         Screen::Results => handle_results(app, code),
         Screen::Verify => handle_verify(app, code),
+    }
+}
+
+/// Called by `lib.rs` for a bracketed paste.
+///
+/// Pasted text is only ever inserted into a field that is being edited; it is
+/// never interpreted as key presses (a pasted `s` must not start a backup).
+pub fn handle_paste(app: &mut App, text: &str) {
+    if app.modal_error.is_some() || !app.config.editing {
+        return;
+    }
+    for c in text.chars().filter(|c| !c.is_control()) {
+        push_edit_char(app, c);
+    }
+}
+
+/// Starts cancelling the active backup, if any.  Returns `true` if a cancel
+/// was sent or is already under way.
+fn begin_cancel(app: &mut App) -> bool {
+    if app.run.status == RunStatus::Cancelling {
+        return true;
+    }
+    if let Some(tx) = app.cancel_tx.take() {
+        let _ = tx.send(());
+        app.run.status = RunStatus::Cancelling;
+        app.run.phase = "Cancelling: stopping git and releasing the lock".into();
+        return true;
+    }
+    false
+}
+
+fn handle_ctrl_c(app: &mut App) {
+    if app.screen == Screen::Running {
+        if begin_cancel(app) {
+            return;
+        }
+        if app.start_backup_requested {
+            // Requested but not spawned yet: just withdraw the request.
+            app.start_backup_requested = false;
+            app.run.status = RunStatus::Idle;
+            app.go_dashboard();
+            return;
+        }
+    }
+    app.should_quit = true;
+}
+
+/// Asks the TUI to exit: cancels a running backup first so git is killed and
+/// the lock released before the process leaves.
+fn request_shutdown(app: &mut App, code: u8) {
+    if app.shutdown_requested {
+        // A second signal: stop waiting for the backup to wind down.
+        app.should_quit = true;
+        return;
+    }
+    app.shutdown_requested = true;
+    app.shutdown_code = code;
+    if !begin_cancel(app) && !app.run.is_active() {
+        app.should_quit = true;
     }
 }
 
@@ -214,7 +300,15 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
         }
         BackupEvent::ReposDiscovered { total } => {
             app.run.total_repos = total;
-            app.run.phase = format!("Backing up {total} repos");
+            if app.run.status != RunStatus::Cancelling {
+                app.run.phase = format!("Backing up {total} repos");
+            }
+        }
+        BackupEvent::Progress { current, total } => {
+            app.run.processed = app.run.processed.max(current);
+            if app.run.total_repos == 0 {
+                app.run.total_repos = total;
+            }
         }
         BackupEvent::BackupDone {
             repos_backed_up,
@@ -225,11 +319,20 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             issues_fetched,
             prs_fetched,
             workflows_fetched,
-            discussions_fetched,
             elapsed_secs,
+            failures,
+            dry_run,
         } => {
+            // A run that recorded any failure is incomplete, however many
+            // repositories made it.
+            let outcome = if failures.is_empty() && repos_errored == 0 {
+                Outcome::Complete
+            } else {
+                Outcome::Incomplete
+            };
             app.results = ResultsState {
-                success: true,
+                outcome,
+                dry_run,
                 repos_backed_up,
                 repos_discovered,
                 repos_skipped,
@@ -238,32 +341,38 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 issues_fetched,
                 prs_fetched,
                 workflows_fetched,
-                discussions_fetched,
                 elapsed_secs,
                 error_message: None,
-                owner: app.config.owner.clone(),
-                output_dir: app.config.output_dir.clone(),
+                failures,
+                failure_selected: 0,
+                owner: app.config.owner.trim().to_string(),
+                output_dir: app.config.output_dir.trim().to_string(),
             };
-            app.run.phase = "Complete".into();
-            app.reload_dashboard();
-            app.screen = Screen::Results;
+            // Repositories that never reported back were skipped (filtered
+            // out, or a dry run); do not leave them looking "in progress".
+            for r in &mut app.run.repos {
+                if r.status == RepoStatus::Running {
+                    r.status = RepoStatus::Skipped;
+                }
+            }
+            app.run.phase = if outcome == Outcome::Complete {
+                "Complete".into()
+            } else {
+                "Incomplete".into()
+            };
+            finish_backup(app, Screen::Results);
         }
         BackupEvent::BackupFailed { error } => {
-            app.results = ResultsState {
-                success: false,
-                error_message: Some(error),
-                owner: app.config.owner.clone(),
-                output_dir: app.config.output_dir.clone(),
-                elapsed_secs: app
-                    .run
-                    .started_at
-                    .map(|s| s.elapsed().as_secs_f64())
-                    .unwrap_or(0.0),
-                ..Default::default()
-            };
+            app.results = finished_without_stats(app, Outcome::Failed, Some(error));
             app.run.phase = "Failed".into();
-            app.screen = Screen::Results;
+            finish_backup(app, Screen::Results);
         }
+        BackupEvent::BackupCancelled => {
+            app.results = finished_without_stats(app, Outcome::Cancelled, None);
+            app.run.phase = "Cancelled".into();
+            finish_backup(app, Screen::Results);
+        }
+        BackupEvent::Shutdown { code } => request_shutdown(app, code),
         BackupEvent::VerifyDone {
             ok,
             tampered,
@@ -284,6 +393,32 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             app.start_verify_requested = false;
         }
     }
+}
+
+fn finished_without_stats(app: &App, outcome: Outcome, error: Option<String>) -> ResultsState {
+    ResultsState {
+        outcome,
+        dry_run: app.config.dry_run,
+        error_message: error,
+        owner: app.config.owner.trim().to_string(),
+        output_dir: app.config.output_dir.trim().to_string(),
+        elapsed_secs: app
+            .run
+            .started_at
+            .map(|s| s.elapsed().as_secs_f64())
+            .unwrap_or(0.0),
+        repos_errored: app.run.repos_errored,
+        ..Default::default()
+    }
+}
+
+/// Common tail of every way a backup can end.
+fn finish_backup(app: &mut App, screen: Screen) {
+    app.run.status = RunStatus::Idle;
+    app.run.elapsed_final = app.run.started_at.map(|s| s.elapsed());
+    app.cancel_tx = None;
+    app.reload_dashboard();
+    app.screen = screen;
 }
 
 // ── Per-screen key handlers ───────────────────────────────────────────────────
@@ -327,7 +462,7 @@ fn handle_configure(app: &mut App, code: KeyCode) {
     }
 
     match code {
-        KeyCode::Esc => app.screen = Screen::Dashboard,
+        KeyCode::Esc => app.go_dashboard(),
         KeyCode::Tab => {
             app.config.active_tab = (app.config.active_tab + 1) % ConfigState::TAB_COUNT;
             app.config.active_field = 0;
@@ -349,9 +484,10 @@ fn handle_configure(app: &mut App, code: KeyCode) {
         KeyCode::Enter => enter_field(app),
         KeyCode::Left => cycle_select(app, -1),
         KeyCode::Right => cycle_select(app, 1),
-        KeyCode::Char('A') if app.config.active_tab == 2 => {
-            let all = !app.config.repositories;
-            app.config.set_all_categories(all);
+        KeyCode::Char('A') if app.config.active_tab == ConfigState::TAB_CATEGORIES => {
+            // Any category off: turn them all on; all on: turn them all off.
+            let all_on = app.config.all_categories_on();
+            app.config.set_all_categories(!all_on);
         }
         KeyCode::F(5) | KeyCode::Char('s') => request_backup(app),
         _ => {}
@@ -360,12 +496,30 @@ fn handle_configure(app: &mut App, code: KeyCode) {
 
 fn handle_configure_editing(app: &mut App, code: KeyCode) {
     match code {
-        KeyCode::Enter | KeyCode::Esc => commit_edit(app),
+        KeyCode::Enter => commit_edit(app),
+        KeyCode::Esc => cancel_edit(app),
         KeyCode::Backspace => {
             app.config.edit_buffer.pop();
         }
-        KeyCode::Char(c) => app.config.edit_buffer.push(c),
+        KeyCode::Char(c) => push_edit_char(app, c),
         _ => {}
+    }
+}
+
+fn is_numeric_field(app: &App) -> bool {
+    // Clone > Concurrency
+    (app.config.active_tab, app.config.active_field) == (3, 6)
+}
+
+fn push_edit_char(app: &mut App, c: char) {
+    if c.is_control() {
+        return;
+    }
+    if is_numeric_field(app) && !c.is_ascii_digit() {
+        return;
+    }
+    if app.config.edit_buffer.chars().count() < EDIT_MAX_CHARS {
+        app.config.edit_buffer.push(c);
     }
 }
 
@@ -378,22 +532,39 @@ fn handle_running(app: &mut App, code: KeyCode) {
         KeyCode::Char('k') | KeyCode::Up => {
             app.run.repo_list_offset = app.run.repo_list_offset.saturating_sub(1);
         }
-        KeyCode::Char('g') => {
-            app.run.log_offset = app.run.log_offset.saturating_sub(5);
+        KeyCode::PageUp => scroll_log_back(app, 10),
+        KeyCode::PageDown => {
+            app.run.log_back = app.run.log_back.saturating_sub(10);
         }
-        KeyCode::Char('G') => {
-            app.run.log_offset = app.run.log_lines.len().saturating_sub(1);
+        KeyCode::Char('g') => scroll_log_back(app, usize::MAX),
+        KeyCode::Char('G') => app.run.log_back = 0,
+        // With no backup running there is nothing to watch: leave.
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') if !app.run.is_active() => {
+            app.go_dashboard();
         }
         _ => {}
     }
 }
 
+fn scroll_log_back(app: &mut App, by: usize) {
+    let max = app.run.log_lines.len().saturating_sub(1);
+    app.run.log_back = app.run.log_back.saturating_add(by).min(max);
+}
+
 fn handle_results(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('r') | KeyCode::Char('R') => request_backup(app),
-        KeyCode::Char('d') | KeyCode::Esc => app.screen = Screen::Dashboard,
+        KeyCode::Char('d') | KeyCode::Esc => app.go_dashboard(),
         KeyCode::Char('c') | KeyCode::Char('C') => app.screen = Screen::Configure,
         KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
+        KeyCode::Down | KeyCode::Char('j') => app.results.move_failure_selection(1),
+        KeyCode::Up | KeyCode::Char('k') => app.results.move_failure_selection(-1),
+        KeyCode::PageDown => app.results.move_failure_selection(10),
+        KeyCode::PageUp => app.results.move_failure_selection(-10),
+        KeyCode::Char('g') => app.results.failure_selected = 0,
+        KeyCode::Char('G') => {
+            app.results.failure_selected = app.results.failures.len().saturating_sub(1);
+        }
         _ => {}
     }
 }
@@ -401,7 +572,7 @@ fn handle_results(app: &mut App, code: KeyCode) {
 fn handle_verify(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('v') | KeyCode::Char('V') if !app.verify.running => {
-            if app.config.owner.is_empty() || app.config.output_dir.is_empty() {
+            if app.config.owner.trim().is_empty() || app.config.output_dir.trim().is_empty() {
                 app.modal_error = Some("Configure owner and output directory first.".into());
             } else {
                 app.verify.reset();
@@ -409,11 +580,11 @@ fn handle_verify(app: &mut App, code: KeyCode) {
                 app.start_verify_requested = true;
             }
         }
-        KeyCode::Char('d') | KeyCode::Esc => app.screen = Screen::Dashboard,
-        KeyCode::Char('j') | KeyCode::Down => app.verify.scroll += 1,
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.verify.scroll = app.verify.scroll.saturating_sub(1);
-        }
+        KeyCode::Char('d') | KeyCode::Esc => app.go_dashboard(),
+        KeyCode::Char('j') | KeyCode::Down => app.verify.scroll_by(1),
+        KeyCode::Char('k') | KeyCode::Up => app.verify.scroll_by(-1),
+        KeyCode::PageDown => app.verify.scroll_by(10),
+        KeyCode::PageUp => app.verify.scroll_by(-10),
         KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
         _ => {}
     }
@@ -422,6 +593,9 @@ fn handle_verify(app: &mut App, code: KeyCode) {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn request_backup(app: &mut App) {
+    if app.run.is_active() {
+        return;
+    }
     if let Some(err) = app.config.validate() {
         app.modal_error = Some(err);
         return;
@@ -429,6 +603,7 @@ fn request_backup(app: &mut App) {
     app.run.reset();
     app.run.started_at = Some(Instant::now());
     app.run.phase = "Connecting to GitHub".into();
+    app.run.status = RunStatus::Active;
     app.start_backup_requested = true;
     app.cancel_tx = None;
     app.screen = Screen::Running;
@@ -450,31 +625,23 @@ fn commit_edit(app: &mut App) {
     app.config.edit_buffer.clear();
 }
 
+/// Leaves edit mode without touching the stored value.
+fn cancel_edit(app: &mut App) {
+    app.config.editing = false;
+    app.config.edit_buffer.clear();
+}
+
 fn get_text_value(app: &App) -> Option<String> {
     let (tab, f) = (app.config.active_tab, app.config.active_field);
     match (tab, f) {
         (0, 0) => Some(app.config.token.clone()),
         (0, 1) => Some(app.config.api_url.clone()),
-        (0, 3) => Some(app.config.oauth_client_id.clone()),
         (1, 0) => Some(app.config.owner.clone()),
         (1, 1) => Some(app.config.output_dir.clone()),
         (1, 3) => Some(app.config.since.clone()),
         (3, 6) => Some(app.config.concurrency.clone()),
         (4, 0) => Some(app.config.include_repos.clone()),
         (4, 1) => Some(app.config.exclude_repos.clone()),
-        (5, 0) => Some(app.config.mirror_to.clone()),
-        (5, 2) => Some(app.config.mirror_token.clone()),
-        (5, 3) => Some(app.config.mirror_owner.clone()),
-        (6, 0) => Some(app.config.s3_bucket.clone()),
-        (6, 1) => Some(app.config.s3_region.clone()),
-        (6, 2) => Some(app.config.s3_prefix.clone()),
-        (6, 3) => Some(app.config.s3_endpoint.clone()),
-        (6, 4) => Some(app.config.s3_access_key.clone()),
-        (6, 5) => Some(app.config.s3_secret_key.clone()),
-        (7, 2) => Some(app.config.report.clone()),
-        (7, 3) => Some(app.config.prometheus_metrics.clone()),
-        (7, 4) => Some(app.config.keep_last.clone()),
-        (7, 5) => Some(app.config.max_age_days.clone()),
         _ => None,
     }
 }
@@ -484,26 +651,12 @@ fn set_text_value(app: &mut App, value: &str) {
     match (tab, f) {
         (0, 0) => app.config.token = value.to_string(),
         (0, 1) => app.config.api_url = value.to_string(),
-        (0, 3) => app.config.oauth_client_id = value.to_string(),
         (1, 0) => app.config.owner = value.to_string(),
         (1, 1) => app.config.output_dir = value.to_string(),
         (1, 3) => app.config.since = value.to_string(),
         (3, 6) => app.config.concurrency = value.to_string(),
         (4, 0) => app.config.include_repos = value.to_string(),
         (4, 1) => app.config.exclude_repos = value.to_string(),
-        (5, 0) => app.config.mirror_to = value.to_string(),
-        (5, 2) => app.config.mirror_token = value.to_string(),
-        (5, 3) => app.config.mirror_owner = value.to_string(),
-        (6, 0) => app.config.s3_bucket = value.to_string(),
-        (6, 1) => app.config.s3_region = value.to_string(),
-        (6, 2) => app.config.s3_prefix = value.to_string(),
-        (6, 3) => app.config.s3_endpoint = value.to_string(),
-        (6, 4) => app.config.s3_access_key = value.to_string(),
-        (6, 5) => app.config.s3_secret_key = value.to_string(),
-        (7, 2) => app.config.report = value.to_string(),
-        (7, 3) => app.config.prometheus_metrics = value.to_string(),
-        (7, 4) => app.config.keep_last = value.to_string(),
-        (7, 5) => app.config.max_age_days = value.to_string(),
         _ => {}
     }
 }
@@ -511,18 +664,16 @@ fn set_text_value(app: &mut App, value: &str) {
 fn toggle_field(app: &mut App) {
     let (tab, f) = (app.config.active_tab, app.config.active_field);
     match (tab, f) {
-        (0, 2) => app.config.device_auth = !app.config.device_auth,
         (1, 2) => app.config.org_mode = !app.config.org_mode,
+        (1, 4) => app.config.full = !app.config.full,
         (2, _) => toggle_category(app, f),
         (3, 1) => app.config.forks = !app.config.forks,
         (3, 2) => app.config.private = !app.config.private,
         (3, 3) => app.config.lfs = !app.config.lfs,
         (3, 4) => app.config.prefer_ssh = !app.config.prefer_ssh,
         (3, 5) => app.config.no_prune = !app.config.no_prune,
-        (5, 4) => app.config.mirror_private = !app.config.mirror_private,
-        (6, 6) => app.config.s3_include_assets = !app.config.s3_include_assets,
-        (7, 0) => app.config.manifest = !app.config.manifest,
-        (7, 1) => app.config.dry_run = !app.config.dry_run,
+        (5, 0) => app.config.manifest = !app.config.manifest,
+        (5, 1) => app.config.dry_run = !app.config.dry_run,
         _ => {}
     }
 }
@@ -569,17 +720,9 @@ fn toggle_category(app: &mut App, idx: usize) {
 
 fn cycle_select(app: &mut App, delta: i32) {
     let (tab, f) = (app.config.active_tab, app.config.active_field);
-    match (tab, f) {
-        (3, 0) => {
-            let n = CloneTypeForm::OPTIONS.len() as i32;
-            let i = ((app.config.clone_type.idx() as i32 + delta).rem_euclid(n)) as usize;
-            app.config.clone_type = CloneTypeForm::from_idx(i);
-        }
-        (5, 1) => {
-            let n = MirrorTypeForm::OPTIONS.len() as i32;
-            let i = ((app.config.mirror_type.idx() as i32 + delta).rem_euclid(n)) as usize;
-            app.config.mirror_type = MirrorTypeForm::from_idx(i);
-        }
-        _ => {}
+    if (tab, f) == (3, 0) {
+        let n = CloneTypeForm::OPTIONS.len() as i32;
+        let i = ((app.config.clone_type.idx() as i32 + delta).rem_euclid(n)) as usize;
+        app.config.clone_type = CloneTypeForm::from_idx(i);
     }
 }
