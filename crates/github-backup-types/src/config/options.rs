@@ -207,13 +207,24 @@ pub struct BackupOptions {
     /// [`include_repos`]: BackupOptions::include_repos
     pub exclude_repos: Vec<String>,
 
-    // ── Incremental filter ────────────────────────────────────────────────
-    /// Only fetch issues and pull requests updated *at or after* this ISO 8601
-    /// timestamp (e.g. `"2024-01-01T00:00:00Z"`).
+    // ── Incremental behaviour ─────────────────────────────────────────────
+    /// Treat everything last updated *before* this ISO 8601 timestamp (for
+    /// example `"2024-01-01T00:00:00Z"`) as already backed up, for every
+    /// repository.
     ///
-    /// Useful for incremental backups: run a full backup once, then pass the
-    /// previous run's start time to limit subsequent API calls.
+    /// Issue and pull request **lists are always fetched in full** and merged
+    /// into what is already stored, so this never loses data; it only skips
+    /// re-fetching the comments, events, commits and reviews of items that have
+    /// not changed since the timestamp *and* whose files already exist.  Without
+    /// it the engine uses each repository's own watermark from the previous
+    /// run (see [`BackupState`](crate::BackupState)).
     pub since: Option<String>,
+
+    /// Ignore incremental state: fetch every item's comments, events, commits
+    /// and reviews again, whatever the watermarks say.  Takes precedence over
+    /// the stored watermarks (and conflicts with `since` at the CLI).
+    #[serde(default)]
+    pub full: bool,
 
     // ── Clone URL override ────────────────────────────────────────────────
     /// Override the hostname used in git clone URLs.
@@ -238,6 +249,25 @@ pub struct BackupOptions {
 }
 
 impl BackupOptions {
+    /// Names of the enabled categories that an incremental watermark can vouch
+    /// for: the per-item files fetched for each issue and pull request.
+    ///
+    /// The names are what [`RepoWatermark::covers`](crate::RepoWatermark::covers)
+    /// stores, in a fixed order.
+    #[must_use]
+    pub fn incremental_categories(&self) -> Vec<&'static str> {
+        [
+            (self.issue_comments, "issue_comments"),
+            (self.issue_events, "issue_events"),
+            (self.pull_comments, "pull_comments"),
+            (self.pull_commits, "pull_commits"),
+            (self.pull_reviews, "pull_reviews"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, name)| enabled.then_some(name))
+        .collect()
+    }
+
     /// Returns a configuration that enables every available backup category.
     ///
     /// Equivalent to the `--all` flag in the Python reference implementation,
@@ -294,6 +324,7 @@ impl BackupOptions {
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
+            full: false,
             clone_host: None,
             dry_run: false,
             concurrency: 4,

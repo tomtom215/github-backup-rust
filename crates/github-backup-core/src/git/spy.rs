@@ -16,11 +16,28 @@ use crate::error::CoreError;
 /// A [`GitRunner`] stub that records calls but does not invoke git.
 ///
 /// All methods succeed immediately and push a [`GitCall`] entry to the
-/// shared call log so tests can assert on what was called.
+/// shared call log so tests can assert on what was called.  A failure can be
+/// injected for URLs containing a given text with
+/// [`SpyGitRunner::failing_when_url_contains`].
 #[derive(Debug, Clone, Default)]
 pub struct SpyGitRunner {
     /// All recorded git operation calls.
     pub calls: Arc<Mutex<Vec<GitCall>>>,
+    failures: Arc<Mutex<Vec<(String, SpyFailure)>>>,
+}
+
+/// The kind of failure a [`SpyGitRunner`] can be told to produce.
+#[derive(Debug, Clone)]
+pub enum SpyFailure {
+    /// git exited with `code` and printed `stderr`.
+    Git {
+        /// Exit status.
+        code: i32,
+        /// What git printed.
+        stderr: String,
+    },
+    /// The run was cancelled.
+    Interrupted,
 }
 
 /// A recorded call to a [`GitRunner`] method.
@@ -42,7 +59,7 @@ impl GitRunner for SpyGitRunner {
         _opts: &CloneOptions,
     ) -> Result<(), CoreError> {
         self.record("mirror_clone", url, dest);
-        Ok(())
+        self.outcome(url)
     }
 
     async fn bare_clone(
@@ -52,7 +69,7 @@ impl GitRunner for SpyGitRunner {
         _opts: &CloneOptions,
     ) -> Result<(), CoreError> {
         self.record("bare_clone", url, dest);
-        Ok(())
+        self.outcome(url)
     }
 
     async fn full_clone(
@@ -62,7 +79,7 @@ impl GitRunner for SpyGitRunner {
         _opts: &CloneOptions,
     ) -> Result<(), CoreError> {
         self.record("full_clone", url, dest);
-        Ok(())
+        self.outcome(url)
     }
 
     async fn shallow_clone(
@@ -73,7 +90,7 @@ impl GitRunner for SpyGitRunner {
         _depth: u32,
     ) -> Result<(), CoreError> {
         self.record("shallow_clone", url, dest);
-        Ok(())
+        self.outcome(url)
     }
 
     async fn lfs_clone(
@@ -83,7 +100,7 @@ impl GitRunner for SpyGitRunner {
         _opts: &CloneOptions,
     ) -> Result<(), CoreError> {
         self.record("lfs_clone", url, dest);
-        Ok(())
+        self.outcome(url)
     }
 
     async fn push_mirror(
@@ -93,11 +110,37 @@ impl GitRunner for SpyGitRunner {
         _opts: &CloneOptions,
     ) -> Result<(), CoreError> {
         self.record("push_mirror", remote_url, src);
-        Ok(())
+        self.outcome(remote_url)
     }
 }
 
 impl SpyGitRunner {
+    /// Makes every call whose URL contains `needle` fail with `failure`.
+    #[must_use]
+    pub fn failing_when_url_contains(self, needle: &str, failure: SpyFailure) -> Self {
+        self.failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((needle.to_string(), failure));
+        self
+    }
+
+    fn outcome(&self, url: &str) -> Result<(), CoreError> {
+        let failures = self.failures.lock().unwrap_or_else(|p| p.into_inner());
+        match failures
+            .iter()
+            .find(|(needle, _)| url.contains(needle.as_str()))
+        {
+            None => Ok(()),
+            Some((_, SpyFailure::Interrupted)) => Err(CoreError::Interrupted),
+            Some((_, SpyFailure::Git { code, stderr })) => Err(CoreError::GitFailed {
+                args: format!("clone {url}"),
+                code: *code,
+                stderr: stderr.clone(),
+            }),
+        }
+    }
+
     fn record(&self, method: &str, url: &str, dest: &Path) {
         self.calls
             .lock()
@@ -226,5 +269,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(runner.recorded_calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn injected_failures_apply_only_to_matching_urls() {
+        let runner = SpyGitRunner::default().failing_when_url_contains(
+            "/bad.git",
+            SpyFailure::Git {
+                code: 128,
+                stderr: "fatal: boom".into(),
+            },
+        );
+        let dest = PathBuf::from("/tmp/x.git");
+        runner
+            .mirror_clone("https://h/good.git", &dest, &opts())
+            .await
+            .expect("non-matching URL succeeds");
+        let err = runner
+            .mirror_clone("https://h/bad.git", &dest, &opts())
+            .await
+            .expect_err("matching URL fails");
+        assert!(
+            matches!(err, CoreError::GitFailed { code: 128, .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            runner.recorded_calls().len(),
+            2,
+            "failed calls are recorded too"
+        );
+
+        let cancelled =
+            SpyGitRunner::default().failing_when_url_contains("", SpyFailure::Interrupted);
+        assert!(matches!(
+            cancelled
+                .push_mirror(&dest, "https://h/any.git", &opts())
+                .await,
+            Err(CoreError::Interrupted)
+        ));
     }
 }

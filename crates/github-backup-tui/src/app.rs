@@ -96,7 +96,7 @@ fn load_dashboard_state(config: &ConfigState) -> DashboardState {
         .join("backup_state.json");
 
     if let Ok(Some(s)) = github_backup_types::backup_state::BackupState::load(&state_path) {
-        dash.last_backup_time = Some(s.last_successful_run.clone());
+        dash.last_backup_time = s.last_successful_run.clone();
         dash.last_backup_repos = Some(s.repos_backed_up);
         dash.last_tool_version = Some(s.tool_version.clone());
     }

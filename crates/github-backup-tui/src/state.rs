@@ -335,6 +335,7 @@ impl ConfigState {
 
         let opts = BackupOptions {
             target,
+            full: false,
             repositories: self.repositories,
             forks: self.forks,
             private: self.private,

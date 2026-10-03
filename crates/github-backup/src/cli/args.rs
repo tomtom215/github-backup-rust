@@ -520,13 +520,25 @@ pub struct Args {
     #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
     pub exclude_repos: Vec<String>,
 
-    // ── Incremental filter ─────────────────────────────────────────────────
-    /// Only fetch issues and pull requests updated at or after this timestamp.
+    // ── Incremental behaviour ──────────────────────────────────────────────
+    /// Treat everything updated before DATE as already backed up.
     ///
-    /// Accepts ISO 8601 format: `"2024-01-01T00:00:00Z"`.
-    /// Useful for incremental backups.
-    #[arg(long, value_name = "DATETIME")]
+    /// Issue and pull request lists are always fetched in full and merged into
+    /// the existing backup, so this never loses data.  It only skips
+    /// re-fetching the comments, events, commits and reviews of items that have
+    /// not changed since DATE and whose files already exist.
+    ///
+    /// Accepts `2024-01-01` or `2024-01-01T00:00:00Z`.  Without this flag each
+    /// repository's own watermark from the previous run is used.
+    #[arg(long, value_name = "DATE", conflicts_with = "full")]
     pub since: Option<String>,
+
+    /// Ignore incremental state and fetch everything again.
+    ///
+    /// Re-fetches the comments, events, commits and reviews of every issue and
+    /// pull request even if nothing changed since the previous run.
+    #[arg(long)]
+    pub full: bool,
 
     // ── GitHub Enterprise ──────────────────────────────────────────────────
     /// Override the GitHub API base URL for GitHub Enterprise Server.

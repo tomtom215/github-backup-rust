@@ -3,13 +3,13 @@
 
 //! Post-processing steps that run after the primary backup completes.
 //!
-//! This module encapsulates the four optional post-processing phases:
+//! This module encapsulates the optional post-processing phases:
 //!
-//! 1. **Prometheus metrics** — write backup counters in text exposition format.
-//! 2. **Diff** — compare the current backup to a previous snapshot directory.
-//! 3. **Mirror push** — push every cloned repository to a Gitea or GitLab instance.
-//! 4. **S3 sync** — upload backup artefacts to an S3-compatible object store.
-//! 5. **Retention** — delete old snapshot directories matching `YYYY-MM-DD*`.
+//! 1. **Diff** — compare the current backup to a previous snapshot directory.
+//! 2. **Mirror push** — push every cloned repository to a Gitea or GitLab instance.
+//! 3. **S3 sync** — upload backup artefacts to an S3-compatible object store.
+//!
+//! (Prometheus metrics live in `metrics`.)
 
 use thiserror::Error;
 use tracing::{info, warn};
@@ -35,9 +35,6 @@ pub enum PostProcessError {
     /// An S3 sync operation failed.
     #[error("S3 sync failed: {0}")]
     S3(String),
-    /// The retention policy application failed.
-    #[error("retention policy failed: {0}")]
-    Retention(String),
 }
 
 /// Mirror destination — either a Gitea-compatible host or a GitLab instance.
@@ -274,93 +271,6 @@ pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Zeroizing<[u8;
     Ok(Some(key))
 }
 
-/// Writes Prometheus-format metrics to `path`.
-///
-/// # Errors
-///
-/// Returns a string error on directory creation or file write failure.
-pub fn write_prometheus_metrics(
-    path: &std::path::Path,
-    owner: &str,
-    stats: &github_backup_core::BackupStats,
-    started_at_unix: u64,
-) -> Result<(), String> {
-    let mut out = String::new();
-    let label = format!("owner=\"{owner}\"");
-
-    out.push_str(&format!(
-        "# HELP github_backup_repos_backed_up Number of repositories backed up\n\
-         # TYPE github_backup_repos_backed_up gauge\n\
-         github_backup_repos_backed_up{{{label}}} {}\n",
-        stats.repos_backed_up()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_repos_discovered Number of repositories discovered\n\
-         # TYPE github_backup_repos_discovered gauge\n\
-         github_backup_repos_discovered{{{label}}} {}\n",
-        stats.repos_discovered()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_repos_errored Repositories with backup errors\n\
-         # TYPE github_backup_repos_errored gauge\n\
-         github_backup_repos_errored{{{label}}} {}\n",
-        stats.repos_errored()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_issues_fetched Total issues fetched\n\
-         # TYPE github_backup_issues_fetched counter\n\
-         github_backup_issues_fetched{{{label}}} {}\n",
-        stats.issues_fetched()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_prs_fetched Total pull requests fetched\n\
-         # TYPE github_backup_prs_fetched counter\n\
-         github_backup_prs_fetched{{{label}}} {}\n",
-        stats.prs_fetched()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_duration_seconds Duration of the last backup run in seconds\n\
-         # TYPE github_backup_duration_seconds gauge\n\
-         github_backup_duration_seconds{{{label}}} {:.3}\n",
-        stats.elapsed_secs()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_last_success_timestamp_seconds Unix timestamp of the last successful backup start\n\
-         # TYPE github_backup_last_success_timestamp_seconds gauge\n\
-         github_backup_last_success_timestamp_seconds{{{label}}} {started_at_unix}\n"
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_success Whether the last backup succeeded (1 = success, 0 = failure)\n\
-         # TYPE github_backup_success gauge\n\
-         github_backup_success{{{label}}} {}\n",
-        if stats.repos_errored() == 0 { 1 } else { 0 }
-    ));
-
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
-        }
-    }
-    // Atomic rename: node_exporter's textfile collector polls this path
-    // every ~15 s; we must never expose a half-written file or the scrape
-    // will fail with a "key without value" error.
-    write_textfile_atomic(path, out.as_bytes())
-}
-
-/// Writes `bytes` to `path` via a sibling `*.tmp` + rename.  See the comment
-/// in [`write_prometheus_metrics`] for rationale.
-fn write_textfile_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp")),
-        None => path.with_extension("tmp"),
-    };
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write metrics tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename metrics tmp: {e}")
-    })
-}
-
 /// Compares two backup JSON directories and returns a human-readable summary.
 ///
 /// Reads `repos.json` from both directories and reports added/removed repos.
@@ -422,86 +332,6 @@ pub fn read_repo_names(path: &std::path::Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Applies the retention policy by deleting old snapshot directories.
-///
-/// Snapshots are detected as date-stamped directories matching `YYYY-MM-DD*`
-/// directly under `output_root`.  Both `keep_last` and `max_age_days` can be
-/// combined; whichever deletes more snapshots wins.
-///
-/// # Errors
-///
-/// Returns [`PostProcessError::Retention`] if the output directory cannot be
-/// read or a snapshot directory cannot be deleted.
-pub fn apply_retention(
-    output_root: &std::path::Path,
-    keep_last: Option<usize>,
-    max_age_days: Option<u64>,
-) -> Result<(), PostProcessError> {
-    let entries = std::fs::read_dir(output_root)
-        .map_err(|e| PostProcessError::Retention(format!("read output dir: {e}")))?;
-
-    let mut snapshots: Vec<std::path::PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            // Match YYYY-MM-DD prefix
-            if name.len() >= 10 && name.as_bytes()[4] == b'-' && name.as_bytes()[7] == b'-' {
-                Some(e.path())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    snapshots.sort();
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut to_delete: std::collections::HashSet<std::path::PathBuf> = Default::default();
-
-    if let Some(keep) = keep_last {
-        if snapshots.len() > keep {
-            let delete_count = snapshots.len() - keep;
-            for path in snapshots.iter().take(delete_count) {
-                to_delete.insert(path.clone());
-            }
-        }
-    }
-
-    if let Some(max_age) = max_age_days {
-        let cutoff_secs = now_secs.saturating_sub(max_age * 86_400);
-        for path in &snapshots {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if let Ok(modified) = meta.modified() {
-                    let mod_secs = modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(u64::MAX);
-                    if mod_secs < cutoff_secs {
-                        to_delete.insert(path.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    for path in &to_delete {
-        info!(path = %path.display(), "applying retention: deleting old snapshot");
-        std::fs::remove_dir_all(path).map_err(|e| {
-            PostProcessError::Retention(format!("delete snapshot {}: {e}", path.display()))
-        })?;
-    }
-
-    if !to_delete.is_empty() {
-        info!(deleted = to_delete.len(), "retention policy applied");
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,28 +371,23 @@ mod tests {
     }
 
     #[test]
-    fn apply_retention_no_snapshots_is_ok() {
-        let dir = tempdir().unwrap();
-        // Create a non-snapshot directory — should be left untouched.
-        fs::create_dir(dir.path().join("config")).unwrap();
-        apply_retention(dir.path(), Some(5), None).unwrap();
-        assert!(dir.path().join("config").exists());
-    }
-
-    #[test]
-    fn apply_retention_deletes_oldest_when_over_limit() {
-        let dir = tempdir().unwrap();
-        for name in &["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"] {
-            fs::create_dir(dir.path().join(name)).unwrap();
-        }
-        apply_retention(dir.path(), Some(2), None).unwrap();
-        let remaining: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().into_string().unwrap())
-            .collect();
-        assert_eq!(remaining.len(), 2, "should keep only 2 snapshots");
-        assert!(remaining.contains(&"2025-03-01".to_string()));
-        assert!(remaining.contains(&"2025-04-01".to_string()));
+    fn run_diff_reports_what_the_engine_writes_to_repos_json() {
+        // The engine writes `repos.json` as an array of repository objects.
+        let prev = tempdir().unwrap();
+        let curr = tempdir().unwrap();
+        fs::write(
+            prev.path().join("repos.json"),
+            r#"[{"id":1,"name":"kept"},{"id":2,"name":"gone"}]"#,
+        )
+        .unwrap();
+        fs::write(
+            curr.path().join("repos.json"),
+            r#"[{"id":1,"name":"kept"},{"id":3,"name":"new"}]"#,
+        )
+        .unwrap();
+        let summary = run_diff(prev.path(), curr.path()).unwrap();
+        assert!(summary.contains("1 added, 1 removed"), "{summary}");
+        assert!(summary.contains("added:   new"), "{summary}");
+        assert!(summary.contains("removed: gone"), "{summary}");
     }
 }

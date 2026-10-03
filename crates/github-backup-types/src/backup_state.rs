@@ -7,10 +7,15 @@
 //!
 //! ## `backup_state.json`
 //!
-//! Written after every *successful* backup run.  Contains the ISO 8601
-//! timestamp at which the run started, which the next invocation can use as
-//! the `--since` filter automatically — enabling true incremental backups
-//! without the user having to track timestamps manually.
+//! Written at the end of every backup run.  Holds one **watermark per
+//! repository**: the instant before which everything that repository's
+//! incremental categories (issue comments and events, pull request comments,
+//! commits and reviews) contain has already been captured.  The next run skips
+//! re-fetching those per-item files for issues and pull requests that have not
+//! changed since — the lists themselves are always fetched in full.
+//!
+//! A repository's watermark only advances when *every* step for it succeeded,
+//! so a failure is retried by the next run instead of being skipped over.
 //!
 //! ## `backup_checkpoint.json`
 //!
@@ -24,31 +29,116 @@
 //! A rolling log of the last [`BackupRunHistory::MAX_ENTRIES`] backup runs.
 //! Used by the TUI dashboard to display a run history table.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-// ── Backup state (last successful run) ───────────────────────────────────────
+// ── Backup state ─────────────────────────────────────────────────────────────
 
-/// Persistent record written after every successful backup run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackupState {
-    /// ISO 8601 timestamp at which the last successful run *started*.
+/// Incremental watermark for one repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoWatermark {
+    /// RFC 3339 instant: items of this repository last updated before it have
+    /// had their per-item files captured by a run that fully succeeded.
+    pub at: String,
+    /// The incremental categories that run captured (for example
+    /// `"issue_comments"`).  A watermark vouches for these only: enabling
+    /// another category later means the first run for it fetches everything.
+    pub covers: Vec<String>,
+}
+
+/// What a finished run contributes to the persisted state.
+#[derive(Debug, Clone)]
+pub struct RunRecord<'a> {
+    /// RFC 3339 start of the run (reported as `last_successful_run`).
+    pub started_at: &'a str,
+    /// RFC 3339 instant to store as the watermark of every clean repository.
     ///
-    /// Used as the automatic `--since` value on the next run to implement
-    /// incremental backups without manual timestamp tracking.
-    pub last_successful_run: String,
+    /// Earlier than `started_at` by a safety margin that absorbs clock skew
+    /// between this machine and GitHub and replication lag in GitHub's API.
+    pub watermark: &'a str,
+    /// Incremental categories that were enabled in the run.
+    pub categories: Vec<&'static str>,
+    /// Full names of repositories for which every step succeeded.
+    pub clean_repos: &'a [String],
+    /// Repositories backed up (all steps succeeded) in the run.
+    pub repos_backed_up: u64,
+    /// `true` if nothing failed anywhere in the run.
+    pub fully_successful: bool,
+    /// Version of the tool that performed the run.
+    pub tool_version: &'a str,
+}
+
+/// Persistent record of the incremental state, written by every run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupState {
+    /// ISO 8601 start of the last run in which nothing failed, or `None` if
+    /// no run has ever finished without failures.
+    ///
+    /// Informational (shown by the TUI dashboard); incremental decisions use
+    /// the per-repository watermarks in [`BackupState::repos`].
+    #[serde(default)]
+    pub last_successful_run: Option<String>,
 
     /// Human-readable description of the tool version that wrote this file.
+    #[serde(default)]
     pub tool_version: String,
 
-    /// Number of repositories that were backed up in the last successful run.
+    /// Number of repositories that were backed up in the most recent run.
+    #[serde(default)]
     pub repos_backed_up: u64,
+
+    /// Incremental watermark per repository, keyed by `owner/repo`.
+    ///
+    /// Absent in files written by older versions, which simply means the
+    /// first run after upgrading fetches everything once.
+    #[serde(default)]
+    pub repos: BTreeMap<String, RepoWatermark>,
 }
 
 impl BackupState {
+    /// The watermark for `full_name`, if it covers every one of `categories`.
+    ///
+    /// `None` means "fetch everything": the repository has never completed a
+    /// clean run, or the run that did not capture one of the categories now in
+    /// use.
+    #[must_use]
+    pub fn watermark_for(&self, full_name: &str, categories: &[&str]) -> Option<&str> {
+        let w = self.repos.get(full_name)?;
+        categories
+            .iter()
+            .all(|c| w.covers.iter().any(|covered| covered == c))
+            .then_some(w.at.as_str())
+    }
+
+    /// Folds the outcome of a finished run into the state.
+    ///
+    /// * Every clean repository gets a fresh watermark.
+    /// * A repository that was not clean keeps its **old** watermark (or none),
+    ///   so whatever failed is fetched again next time.
+    /// * `last_successful_run` only moves when the whole run succeeded.
+    pub fn record_run(&mut self, run: &RunRecord<'_>) {
+        for name in run.clean_repos {
+            self.repos.insert(
+                name.clone(),
+                RepoWatermark {
+                    at: run.watermark.to_string(),
+                    covers: run.categories.iter().map(|c| (*c).to_string()).collect(),
+                },
+            );
+        }
+        if run.fully_successful {
+            self.last_successful_run = Some(run.started_at.to_string());
+        }
+        self.tool_version = run.tool_version.to_string();
+        self.repos_backed_up = run.repos_backed_up;
+    }
+
     /// Writes the state to `path`, creating parent directories as needed.
+    ///
+    /// The write is atomic (temporary file, then rename) so a crash cannot
+    /// leave a truncated file that would be discarded as corrupt.
     ///
     /// # Errors
     ///
@@ -60,7 +150,12 @@ impl BackupState {
         }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise state: {e}"))?;
-        std::fs::write(path, json).map_err(|e| format!("write state file: {e}"))
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json).map_err(|e| format!("write state file: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("replace state file: {e}")
+        })
     }
 
     /// Loads the state from `path`.
@@ -94,8 +189,12 @@ pub struct BackupRunEntry {
     pub repos_backed_up: u64,
     /// Elapsed wall-clock time in seconds.
     pub elapsed_secs: f64,
-    /// `true` if the run completed without a fatal error.
+    /// `true` if the run backed up everything it was asked to, with no failures.
     pub success: bool,
+    /// Number of failures recorded in the run (0 in entries written by older
+    /// versions, which did not record them).
+    #[serde(default)]
+    pub failures: u64,
     /// Tool version that produced this entry.
     pub tool_version: String,
 }
@@ -247,21 +346,156 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn record<'a>(
+        clean: &'a [String],
+        categories: Vec<&'static str>,
+        fully_successful: bool,
+    ) -> RunRecord<'a> {
+        RunRecord {
+            started_at: "2026-01-02T00:00:00Z",
+            watermark: "2026-01-01T23:45:00Z",
+            categories,
+            clean_repos: clean,
+            repos_backed_up: clean.len() as u64,
+            fully_successful,
+            tool_version: "0.4.0",
+        }
+    }
+
     #[test]
     fn backup_state_roundtrip() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("state.json");
 
-        let state = BackupState {
-            last_successful_run: "2026-01-01T00:00:00Z".to_string(),
-            tool_version: "0.3.0".to_string(),
-            repos_backed_up: 42,
-        };
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(&clean, vec!["issue_comments"], true));
 
         state.save(&path).expect("save");
         let loaded = BackupState::load(&path).expect("load").expect("present");
-        assert_eq!(loaded.last_successful_run, "2026-01-01T00:00:00Z");
-        assert_eq!(loaded.repos_backed_up, 42);
+        assert_eq!(
+            loaded.last_successful_run.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+        assert_eq!(loaded.repos_backed_up, 1);
+        assert_eq!(loaded.repos["o/a"].at, "2026-01-01T23:45:00Z");
+        assert!(
+            !dir.path().join("state.json.tmp").exists(),
+            "no temporary file may be left behind"
+        );
+    }
+
+    /// A state file written by 0.3.x has no `repos` map and a plain string
+    /// `last_successful_run`; it must still load, as "no watermarks".
+    #[test]
+    fn legacy_state_file_still_loads() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_successful_run":"2025-12-31T00:00:00Z","tool_version":"0.3.2","repos_backed_up":7}"#,
+        )
+        .expect("write");
+        let loaded = BackupState::load(&path).expect("load").expect("present");
+        assert_eq!(
+            loaded.last_successful_run.as_deref(),
+            Some("2025-12-31T00:00:00Z")
+        );
+        assert_eq!(loaded.repos_backed_up, 7);
+        assert!(loaded.repos.is_empty());
+        assert_eq!(loaded.watermark_for("o/a", &["issue_comments"]), None);
+    }
+
+    #[test]
+    fn watermark_requires_every_current_category_to_be_covered() {
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(
+            &clean,
+            vec!["issue_comments", "pull_reviews"],
+            true,
+        ));
+
+        let at = Some("2026-01-01T23:45:00Z");
+        assert_eq!(state.watermark_for("o/a", &["issue_comments"]), at);
+        assert_eq!(
+            state.watermark_for("o/a", &["issue_comments", "pull_reviews"]),
+            at
+        );
+        assert_eq!(state.watermark_for("o/a", &[]), at);
+        assert_eq!(
+            state.watermark_for("o/a", &["issue_comments", "issue_events"]),
+            None,
+            "a category the watermark never covered forces a full fetch"
+        );
+        assert_eq!(state.watermark_for("o/other", &["issue_comments"]), None);
+    }
+
+    #[test]
+    fn a_failed_repository_keeps_its_old_watermark() {
+        let mut state = BackupState::default();
+        let first = vec!["o/a".to_string(), "o/b".to_string()];
+        state.record_run(&RunRecord {
+            watermark: "2026-01-01T00:00:00Z",
+            ..record(&first, vec![], true)
+        });
+
+        // Second run: o/b failed, so only o/a is clean.
+        let second = vec!["o/a".to_string()];
+        state.record_run(&RunRecord {
+            watermark: "2026-02-01T00:00:00Z",
+            ..record(&second, vec![], false)
+        });
+
+        assert_eq!(state.repos["o/a"].at, "2026-02-01T00:00:00Z");
+        assert_eq!(
+            state.repos["o/b"].at, "2026-01-01T00:00:00Z",
+            "the failed repository must be re-examined from its old watermark"
+        );
+    }
+
+    #[test]
+    fn last_successful_run_only_moves_when_nothing_failed() {
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(&clean, vec![], false));
+        assert_eq!(state.last_successful_run, None, "never succeeded yet");
+
+        state.record_run(&record(&clean, vec![], true));
+        let first = state.last_successful_run.clone();
+        assert_eq!(first.as_deref(), Some("2026-01-02T00:00:00Z"));
+
+        state.record_run(&RunRecord {
+            started_at: "2026-03-01T00:00:00Z",
+            ..record(&clean, vec![], false)
+        });
+        assert_eq!(
+            state.last_successful_run, first,
+            "a run with failures must not advance the last-success time"
+        );
+    }
+
+    #[test]
+    fn dropping_a_category_drops_it_from_the_watermark() {
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(
+            &clean,
+            vec!["issue_comments", "issue_events"],
+            true,
+        ));
+        // A later run without issue events: the watermark advances for the
+        // comments only, so events are no longer vouched for.
+        state.record_run(&RunRecord {
+            watermark: "2026-02-01T00:00:00Z",
+            ..record(&clean, vec!["issue_comments"], true)
+        });
+        assert!(state.watermark_for("o/a", &["issue_comments"]).is_some());
+        assert_eq!(
+            state.watermark_for("o/a", &["issue_events"]),
+            None,
+            "events were not captured by the newer watermark"
+        );
     }
 
     #[test]
@@ -310,6 +544,7 @@ mod tests {
             repos_backed_up: 1,
             elapsed_secs: 1.0,
             success: true,
+            failures: 0,
             tool_version: "0.1.0".to_string(),
         }
     }
