@@ -14,7 +14,7 @@ Saves a JSON array of every repository the owner has starred:
 json/starred.json
 ```
 
-Each entry contains the full repository metadata: name, description, owner, visibility, star count, fork count, topics, and clone URLs.
+Each entry is the repository object exactly as GitHub returns it: name, description, owner, visibility, star count, fork count, topics, license, and clone URLs.
 
 ---
 
@@ -139,7 +139,7 @@ Saves the public member list of the organisation:
 json/org_members.json
 ```
 
-Each entry includes the member's login, ID, avatar URL, and profile URL.
+Each entry is the user object exactly as GitHub returns it (login, ID, avatar URL, profile URL, ...).
 
 ## Organisation Teams
 

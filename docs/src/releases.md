@@ -7,11 +7,11 @@ github-backup octocat --token $GITHUB_TOKEN --output /backup \
   --releases
 ```
 
-This saves a JSON array for each repository containing:
-- Tag name and target commit
+This saves a JSON array for each repository, each release exactly as GitHub returns it:
+- Tag name and `target_commitish`
 - Release title and body (markdown)
 - Author and timestamps
-- List of assets (filename, size, download count, URL)
+- List of assets (filename, size, `digest`, download count, URL, uploader)
 - Whether the release is a draft or prerelease
 
 ### Output
@@ -65,12 +65,34 @@ Assets are downloaded and stored alongside the JSON metadata:
 ```
 json/repos/<repo>/
 ├── releases.json
-└── releases/
+└── release_assets/
     └── v1.0.0/
         ├── app-linux-x86_64.tar.gz
+        ├── app-linux-x86_64.tar.gz.sha256
         ├── app-darwin-arm64.tar.gz
-        └── checksums.txt
+        ├── app-darwin-arm64.tar.gz.sha256
+        ├── checksums.txt
+        └── checksums.txt.sha256
 ```
+
+### How downloads are made safe
+
+- **Streamed, not buffered.** Each asset is written to disk as it arrives
+  (to `.<file>.part` in the same directory) and renamed into place when
+  complete, so memory use does not depend on the asset size and a crash,
+  kill or full disk never leaves a truncated file under the real name.
+- **Verified.** The byte count must equal the `size` GitHub reports, and the
+  SHA-256 must equal GitHub's `digest` when the release provides one.  A
+  download that fails either check is discarded and reported; the remaining
+  assets are still attempted.
+- **Resumable by re-running.** An asset already on disk is skipped only if its
+  size equals GitHub's `size` and its content matches the API digest (or, if
+  GitHub has none, the checksum in its `.sha256` sidecar).  A truncated or
+  altered file is downloaded again.
+- **Token stays with GitHub.** GitHub redirects asset downloads to its storage
+  host.  The `Authorization` header is sent to GitHub only; a redirect to
+  another host, port or scheme is followed without the token, and a redirect
+  from HTTPS to plain HTTP is refused.
 
 ### Combining with S3
 

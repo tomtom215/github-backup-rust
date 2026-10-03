@@ -17,12 +17,20 @@ git/gists/<gist-id>.git/
 json/gists/<gist-id>.json
 ```
 
-The JSON file contains the gist metadata:
+The JSON file contains the gist object exactly as GitHub returns it:
 - Gist ID, description, visibility (public/secret)
 - List of files (filename, language, size)
 - Owner, created/updated timestamps
-- Fork and star counts
+- Comment count
 - Git URLs (HTTPS and SSH)
+
+`json/gists/index.json` lists all owned gists.
+
+**Secret gists.**  GitHub's public gist listing for a user never contains
+secret gists.  When the token belongs to the account being backed up (the login
+is compared case-insensitively), `GET /gists` is used and secret gists are
+included.  For any other user, without a token, or with a token that cannot
+call `GET /user` (GitHub App tokens), only public gists are backed up.
 
 ### Backup Starred Gists
 
@@ -30,7 +38,11 @@ The JSON file contains the gist metadata:
 github-backup octocat --token $GITHUB_TOKEN --output /backup --starred-gists
 ```
 
-Backs up all gists starred by the **authenticated user** (not necessarily `octocat`).  This requires the `gist` OAuth scope.
+Records the gists starred by the **authenticated user** (not necessarily `octocat`).  This requires the `gist` OAuth scope.
+
+Only the gist **metadata** is saved (`json/gists/<gist-id>.starred.json` and
+`json/gists/starred_index.json`); starred gists are **not cloned**, so their file
+contents are not part of the backup.
 
 ### Combined
 
