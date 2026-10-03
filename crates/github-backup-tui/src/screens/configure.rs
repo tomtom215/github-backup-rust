@@ -1,35 +1,49 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Configure screen — tabbed form covering every backup option.
+//! Configure screen — tabbed form for the options a TUI run really applies.
+//!
+//! Layout adapts to the terminal: below 56 columns the tab bar collapses to
+//! one line ("Target 2/6"), the categories list becomes a single column when
+//! it would not fit in two, and labels shrink so the value being edited is
+//! always visible.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    style::Style,
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
 
-use crate::state::{CloneTypeForm, ConfigState, MirrorTypeForm};
+use super::util::{fit, fit_tail, hint_lines};
+use crate::state::{CloneTypeForm, ConfigState};
 use crate::theme;
 
-pub fn render(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
+/// Narrowest width at which the full bordered tab bar is used.
+const WIDE: u16 = 56;
+
+pub fn render(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let wide = area.width >= WIDE && area.height >= 12;
+    let hint_rows: u16 = if area.height >= 18 { 2 } else { 1 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // tab bar
-            Constraint::Min(0),    // tab content
-            Constraint::Length(2), // keybinding hints
+            Constraint::Length(if wide { 3 } else { 1 }), // tab bar
+            Constraint::Min(0),                           // tab content
+            Constraint::Length(hint_rows.min(area.height.saturating_sub(2))), // key hints
         ])
         .split(area);
 
-    render_tab_bar(frame, cfg, outer[0]);
-    render_tab_content(frame, cfg, outer[1]);
+    if wide {
+        render_tab_bar(frame, cfg, outer[0]);
+    } else {
+        render_tab_bar_compact(frame, cfg, outer[0]);
+    }
+    render_tab_content(frame, cfg, outer[1], wide);
     render_hints(frame, cfg, outer[2]);
 }
 
-fn render_tab_bar(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
+fn render_tab_bar(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
     let titles: Vec<Line> = ConfigState::TAB_NAMES
         .iter()
         .map(|t| Line::from(*t))
@@ -49,12 +63,33 @@ fn render_tab_bar(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::R
     frame.render_widget(tabs, area);
 }
 
-fn render_tab_content(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_style(theme::DIM);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn render_tab_bar_compact(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let name = ConfigState::TAB_NAMES
+        .get(cfg.active_tab)
+        .copied()
+        .unwrap_or("?");
+    let line = Line::from(vec![
+        Span::styled("Configure: ", theme::TITLE),
+        Span::styled(name, theme::TAB_ACTIVE),
+        Span::styled(
+            format!("  {}/{}", cfg.active_tab + 1, ConfigState::TAB_COUNT),
+            theme::DIM,
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_tab_content(frame: &mut Frame, cfg: &ConfigState, area: Rect, bordered: bool) {
+    let inner = if bordered {
+        let block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(theme::DIM);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
 
     match cfg.active_tab {
         0 => render_auth_tab(frame, cfg, inner),
@@ -62,68 +97,66 @@ fn render_tab_content(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layou
         2 => render_categories_tab(frame, cfg, inner),
         3 => render_clone_tab(frame, cfg, inner),
         4 => render_filter_tab(frame, cfg, inner),
-        5 => render_mirror_tab(frame, cfg, inner),
-        6 => render_s3_tab(frame, cfg, inner),
-        7 => render_output_tab(frame, cfg, inner),
+        5 => render_output_tab(frame, cfg, inner),
         _ => {}
     }
 }
 
-fn render_hints(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let hint = if cfg.editing {
-        Line::from(vec![
-            Span::styled("Enter/Esc", theme::KEY_HINT),
-            Span::styled(" confirm  ", theme::KEY_DESC),
-            Span::styled("Backspace", theme::KEY_HINT),
-            Span::styled(" delete char", theme::KEY_DESC),
-        ])
+fn render_hints(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let items: Vec<(&str, &str)> = if cfg.editing {
+        vec![
+            ("Enter", "save"),
+            ("Esc", "cancel"),
+            ("Backspace", "delete"),
+        ]
     } else {
-        Line::from(vec![
-            Span::styled("Tab/Shift-Tab", theme::KEY_HINT),
-            Span::styled(" switch tab  ", theme::KEY_DESC),
-            Span::styled("j/k", theme::KEY_HINT),
-            Span::styled(" field  ", theme::KEY_DESC),
-            Span::styled("Space", theme::KEY_HINT),
-            Span::styled(" toggle  ", theme::KEY_DESC),
-            Span::styled("Enter", theme::KEY_HINT),
-            Span::styled(" edit  ", theme::KEY_DESC),
-            Span::styled("F5/s", theme::KEY_HINT),
-            Span::styled(" start  ", theme::KEY_DESC),
-            Span::styled("A", theme::KEY_HINT),
-            Span::styled(" select all cats  ", theme::KEY_DESC),
-            Span::styled("Esc", theme::KEY_HINT),
-            Span::styled(" back", theme::KEY_DESC),
-        ])
+        let mut v = vec![("s/F5", "start"), ("Esc", "back"), ("Tab", "next tab")];
+        v.push(("j/k", "move"));
+        v.push(("Space", "toggle"));
+        v.push(("Enter", "edit"));
+        if cfg.active_tab == ConfigState::TAB_CATEGORIES {
+            v.push(("A", "all/none"));
+        }
+        if cfg.active_tab == 3 && cfg.active_field == 0 {
+            v.push(("←/→", "change"));
+        }
+        v.push(("S-Tab", "prev tab"));
+        v
     };
-
-    let para = Paragraph::new(hint).wrap(Wrap { trim: true });
-    frame.render_widget(para, area);
+    let lines = hint_lines(&items, area.width as usize, area.height as usize);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 // ── Tab renderers ─────────────────────────────────────────────────────────────
 
-fn render_auth_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
+fn render_auth_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
     let fields: Vec<FieldDef> = vec![
-        FieldDef::text(0, "GitHub Token", &cfg.token, true, cfg),
-        FieldDef::text(1, "API URL (GHE)", &cfg.api_url, false, cfg),
-        FieldDef::toggle(2, "Device Auth", cfg.device_auth, cfg),
-        FieldDef::text(3, "OAuth Client ID", &cfg.oauth_client_id, false, cfg),
+        FieldDef::text(0, "GitHub Token", &cfg.token, true, cfg)
+            .help("Required. Always shown masked."),
+        FieldDef::text(1, "API URL (GHE)", &cfg.api_url, false, cfg)
+            .help("GitHub Enterprise API base, https:// only. Empty = github.com."),
     ];
     render_field_list(frame, cfg, &fields, area);
 }
 
-fn render_target_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
+fn render_target_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
     let fields: Vec<FieldDef> = vec![
-        FieldDef::text(0, "Owner", &cfg.owner, false, cfg),
-        FieldDef::text(1, "Output Directory", &cfg.output_dir, false, cfg),
-        FieldDef::toggle(2, "Organisation Mode (--org)", cfg.org_mode, cfg),
-        FieldDef::text(3, "Since (ISO 8601, incremental)", &cfg.since, false, cfg),
+        FieldDef::text(0, "Owner", &cfg.owner, false, cfg).help("User or organisation to back up."),
+        FieldDef::text(1, "Output Directory", &cfg.output_dir, false, cfg)
+            .help("Backups go to <dir>/<owner>/."),
+        FieldDef::toggle(2, "Organisation Mode (--org)", cfg.org_mode, cfg)
+            .help("Treat the owner as an organisation."),
+        FieldDef::text(3, "Since (date or ISO 8601)", &cfg.since, false, cfg)
+            .help("e.g. 2024-01-01. Only fetch items updated after this. Empty = automatic."),
+        FieldDef::toggle(4, "Full backup (ignore state)", cfg.full, cfg).help(
+            "Ignore the saved incremental state and re-fetch everything, not just what changed.",
+        ),
     ];
     render_field_list(frame, cfg, &fields, area);
 }
 
-fn render_categories_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let cats: Vec<(&str, bool)> = vec![
+fn category_labels(cfg: &ConfigState) -> Vec<(&'static str, bool)> {
+    vec![
         ("Repositories (git clone)", cfg.repositories),
         ("Issues", cfg.issues),
         ("Issue Comments", cfg.issue_comments),
@@ -158,86 +191,71 @@ fn render_categories_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::la
         ("Discussions", cfg.discussions),
         ("Projects", cfg.projects),
         ("Packages", cfg.packages),
-    ];
+    ]
+}
 
-    let items: Vec<ListItem> = cats
-        .iter()
-        .enumerate()
-        .map(|(i, (label, enabled))| {
-            let is_sel = i == cfg.active_field;
-            let check = if *enabled { "[x]" } else { "[ ]" };
-            let prefix = if is_sel { "> " } else { "  " };
-            let line = Line::from(vec![
-                Span::styled(prefix, theme::ACCENT_STYLE),
-                Span::styled(
-                    check,
-                    if *enabled {
-                        theme::OK_STYLE
-                    } else {
-                        theme::DIM
-                    },
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    *label,
-                    if is_sel {
-                        theme::ACCENT_BOLD
-                    } else {
-                        theme::NORMAL
-                    },
-                ),
-            ]);
-            let item = ListItem::new(line);
-            if is_sel {
-                item.style(Style::default().bg(ratatui::style::Color::DarkGray))
-            } else {
-                item
-            }
-        })
-        .collect();
+fn render_categories_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let cats = category_labels(cfg);
+    let item = |i: usize, label: &str, enabled: bool, width: usize| -> ListItem<'static> {
+        let is_sel = i == cfg.active_field;
+        let prefix = if is_sel { "> " } else { "  " };
+        let label_w = width.saturating_sub(2 + 3 + 1);
+        ListItem::new(Line::from(vec![
+            Span::styled(prefix, theme::ACCENT_STYLE),
+            Span::styled(
+                if enabled { "[x]" } else { "[ ]" },
+                if enabled { theme::OK_STYLE } else { theme::DIM },
+            ),
+            Span::raw(" "),
+            Span::styled(
+                fit(label, label_w),
+                if is_sel {
+                    theme::ACCENT_BOLD
+                } else {
+                    theme::NORMAL
+                },
+            ),
+        ]))
+    };
 
-    let mut state = ListState::default();
-    state.select(Some(cfg.active_field));
+    // Two columns need 17 rows and 56 columns; otherwise one scrolling column.
+    let two_cols = area.height >= 17 && area.width >= WIDE;
+    if !two_cols {
+        let items: Vec<ListItem> = cats
+            .iter()
+            .enumerate()
+            .map(|(i, (l, e))| item(i, l, *e, area.width as usize))
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(cfg.active_field));
+        let list = List::new(items).highlight_style(theme::SELECTED);
+        frame.render_stateful_widget(list, area, &mut state);
+        return;
+    }
 
-    // Split into two columns
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
+    let half = cats.len() / 2 + cats.len() % 2;
 
-    let half = items.len() / 2 + items.len() % 2;
-    let left_items: Vec<ListItem> = items[..half.min(items.len())].to_vec();
-    let right_items: Vec<ListItem> = if items.len() > half {
-        items[half..].to_vec()
-    } else {
-        vec![]
-    };
-
-    // Determine which column is active
-    let left_sel = if cfg.active_field < half {
-        Some(cfg.active_field)
-    } else {
-        None
-    };
-    let right_sel = if cfg.active_field >= half {
-        Some(cfg.active_field - half)
-    } else {
-        None
-    };
-
-    let mut left_state = ListState::default();
-    left_state.select(left_sel);
-    let mut right_state = ListState::default();
-    right_state.select(right_sel);
-
-    let left_list = List::new(left_items).highlight_style(theme::SELECTED);
-    let right_list = List::new(right_items).highlight_style(theme::SELECTED);
-
-    frame.render_stateful_widget(left_list, cols[0], &mut left_state);
-    frame.render_stateful_widget(right_list, cols[1], &mut right_state);
+    for (col, range) in [(0usize, 0..half), (1usize, half..cats.len())] {
+        let width = cols[col].width as usize;
+        let items: Vec<ListItem> = range
+            .clone()
+            .map(|i| item(i, cats[i].0, cats[i].1, width))
+            .collect();
+        let sel = range
+            .contains(&cfg.active_field)
+            .then(|| cfg.active_field - range.start);
+        let mut state = ListState::default();
+        state.select(sel);
+        let list = List::new(items).highlight_style(theme::SELECTED);
+        frame.render_stateful_widget(list, cols[col], &mut state);
+    }
 }
 
-fn render_clone_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
+fn render_clone_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
     let fields: Vec<FieldDef> = vec![
         FieldDef::select(
             0,
@@ -245,83 +263,67 @@ fn render_clone_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout:
             CloneTypeForm::OPTIONS,
             cfg.clone_type.idx(),
             cfg,
-        ),
+        )
+        .help("mirror = full bare mirror (default); shallow = last 10 commits."),
         FieldDef::toggle(1, "Include Forks", cfg.forks, cfg),
         FieldDef::toggle(2, "Include Private", cfg.private, cfg),
         FieldDef::toggle(3, "Git LFS", cfg.lfs, cfg),
         FieldDef::toggle(4, "Prefer SSH", cfg.prefer_ssh, cfg),
-        FieldDef::toggle(5, "No Prune", cfg.no_prune, cfg),
-        FieldDef::text(6, "Concurrency", &cfg.concurrency, false, cfg),
+        FieldDef::toggle(5, "No Prune", cfg.no_prune, cfg)
+            .help("Keep refs that were deleted upstream."),
+        FieldDef::text(6, "Concurrency (1-64)", &cfg.concurrency, false, cfg)
+            .help("Repositories processed in parallel."),
     ];
     render_field_list(frame, cfg, &fields, area);
 }
 
-fn render_filter_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let note_area = Layout::default()
+fn render_filter_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let note_h = if area.height >= 7 { 2 } else { 0 };
+    let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([Constraint::Length(note_h), Constraint::Min(0)])
         .split(area);
 
-    let note = Paragraph::new(Line::from(vec![
-        Span::styled("Comma-separated glob patterns, e.g. ", theme::DIM),
-        Span::styled("rust-*, *-backup", theme::ACCENT_STYLE),
-    ]))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(note, note_area[0]);
+    if note_h > 0 {
+        let note = Paragraph::new(Line::from(vec![
+            Span::styled("Comma-separated glob patterns, e.g. ", theme::DIM),
+            Span::styled("rust-*, *-backup", theme::ACCENT_STYLE),
+        ]))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(note, parts[0]);
+    }
 
     let fields: Vec<FieldDef> = vec![
         FieldDef::text(0, "Include Repos (globs)", &cfg.include_repos, false, cfg),
         FieldDef::text(1, "Exclude Repos (globs)", &cfg.exclude_repos, false, cfg),
     ];
-    render_field_list(frame, cfg, &fields, note_area[1]);
+    render_field_list(frame, cfg, &fields, parts[1]);
 }
 
-fn render_mirror_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let fields: Vec<FieldDef> = vec![
-        FieldDef::text(0, "Mirror To (URL)", &cfg.mirror_to, false, cfg),
-        FieldDef::select(
-            1,
-            "Mirror Type",
-            MirrorTypeForm::OPTIONS,
-            cfg.mirror_type.idx(),
-            cfg,
-        ),
-        FieldDef::text(2, "Mirror Token", &cfg.mirror_token, true, cfg),
-        FieldDef::text(3, "Mirror Owner", &cfg.mirror_owner, false, cfg),
-        FieldDef::toggle(4, "Create Private", cfg.mirror_private, cfg),
-    ];
-    render_field_list(frame, cfg, &fields, area);
-}
+fn render_output_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
+    let note_h = if area.height >= 9 { 3 } else { 0 };
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(note_h)])
+        .split(area);
 
-fn render_s3_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
     let fields: Vec<FieldDef> = vec![
-        FieldDef::text(0, "Bucket", &cfg.s3_bucket, false, cfg),
-        FieldDef::text(1, "Region", &cfg.s3_region, false, cfg),
-        FieldDef::text(2, "Key Prefix", &cfg.s3_prefix, false, cfg),
-        FieldDef::text(3, "Endpoint URL (custom)", &cfg.s3_endpoint, false, cfg),
-        FieldDef::text(4, "Access Key ID", &cfg.s3_access_key, false, cfg),
-        FieldDef::text(5, "Secret Access Key", &cfg.s3_secret_key, true, cfg),
-        FieldDef::toggle(6, "Include Release Assets", cfg.s3_include_assets, cfg),
+        FieldDef::toggle(0, "Write SHA-256 Manifest", cfg.manifest, cfg)
+            .help("After the run, write backup_manifest.json (used by Verify)."),
+        FieldDef::toggle(1, "Dry Run (no writes)", cfg.dry_run, cfg)
+            .help("List what would be backed up; nothing is written."),
     ];
-    render_field_list(frame, cfg, &fields, area);
-}
+    render_field_list(frame, cfg, &fields, parts[0]);
 
-fn render_output_tab(frame: &mut Frame, cfg: &ConfigState, area: ratatui::layout::Rect) {
-    let fields: Vec<FieldDef> = vec![
-        FieldDef::toggle(0, "Write SHA-256 Manifest", cfg.manifest, cfg),
-        FieldDef::toggle(1, "Dry Run (no writes)", cfg.dry_run, cfg),
-        FieldDef::text(2, "JSON Report File", &cfg.report, false, cfg),
-        FieldDef::text(
-            3,
-            "Prometheus Metrics File",
-            &cfg.prometheus_metrics,
-            false,
-            cfg,
-        ),
-        FieldDef::text(4, "Keep Last N Snapshots", &cfg.keep_last, false, cfg),
-        FieldDef::text(5, "Max Age (days)", &cfg.max_age_days, false, cfg),
-    ];
-    render_field_list(frame, cfg, &fields, area);
+    if note_h > 0 {
+        let note = Paragraph::new(vec![Line::from(Span::styled(
+            "Command line only: mirror push, S3 sync, JSON report, Prometheus \
+             metrics, webhook notification and device-flow sign-in.",
+            theme::WARN_STYLE,
+        ))])
+        .wrap(Wrap { trim: true });
+        frame.render_widget(note, parts[1]);
+    }
 }
 
 // ── Generic field list renderer ───────────────────────────────────────────────
@@ -344,6 +346,7 @@ struct FieldDef {
     index: usize,
     label: &'static str,
     kind: FieldKind,
+    help: &'static str,
 }
 
 impl FieldDef {
@@ -366,6 +369,7 @@ impl FieldDef {
                 value: display,
                 masked,
             },
+            help: "",
         }
     }
 
@@ -374,6 +378,7 @@ impl FieldDef {
             index,
             label,
             kind: FieldKind::Toggle { value },
+            help: "",
         }
     }
 
@@ -391,16 +396,40 @@ impl FieldDef {
                 options: options.to_vec(),
                 selected,
             },
+            help: "",
         }
+    }
+
+    fn help(mut self, help: &'static str) -> Self {
+        self.help = help;
+        self
     }
 }
 
-fn render_field_list(
-    frame: &mut Frame,
-    cfg: &ConfigState,
-    fields: &[FieldDef],
-    area: ratatui::layout::Rect,
-) {
+fn render_field_list(frame: &mut Frame, cfg: &ConfigState, fields: &[FieldDef], area: Rect) {
+    // Reserve one row for the help text of the focused field when there is room.
+    let help_row = area.height as usize > fields.len() + 1;
+    let (list_area, help_area) = if help_row {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    };
+
+    let width = list_area.width as usize;
+    // Label column: as wide as the longest label, but never so wide that the
+    // value (at least 16 columns) is squeezed out.
+    let longest = fields
+        .iter()
+        .map(|f| f.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let label_w = longest.min(width.saturating_sub(2 + 2 + 16)).max(8);
+    let value_w = width.saturating_sub(2 + label_w + 2);
+
     let items: Vec<ListItem> = fields
         .iter()
         .map(|f| {
@@ -411,14 +440,25 @@ fn render_field_list(
 
             let value_span = match &f.kind {
                 FieldKind::Text { value, masked } => {
-                    let display = if *masked && !is_editing {
-                        "*".repeat(value.len().min(16))
+                    let shown = if *masked {
+                        // Never echo a secret, not even while it is typed.
+                        "*".repeat(value.chars().count())
                     } else {
                         value.clone()
                     };
                     let cursor = if is_editing { "_" } else { "" };
+                    let inner_w = value_w.saturating_sub(2);
+                    let text = if shown.is_empty() && !is_editing {
+                        fit("(empty)", inner_w)
+                    } else {
+                        fit_tail(&format!("{shown}{cursor}"), inner_w)
+                    };
                     Span::styled(
-                        format!("[{display}{cursor}]"),
+                        if shown.is_empty() && !is_editing {
+                            text
+                        } else {
+                            format!("[{text}]")
+                        },
                         if is_editing {
                             theme::INPUT_FOCUSED
                         } else if is_active {
@@ -452,7 +492,7 @@ fn render_field_list(
             let line = Line::from(vec![
                 Span::styled(prefix, theme::ACCENT_STYLE),
                 Span::styled(
-                    format!("{:<28}", f.label),
+                    format!("{:<label_w$}", fit(f.label, label_w)),
                     if is_active {
                         theme::ACCENT_BOLD
                     } else {
@@ -463,12 +503,7 @@ fn render_field_list(
                 value_span,
             ]);
 
-            let item = ListItem::new(line);
-            if is_active {
-                item.style(Style::default().bg(ratatui::style::Color::DarkGray))
-            } else {
-                item
-            }
+            ListItem::new(line)
         })
         .collect();
 
@@ -476,5 +511,16 @@ fn render_field_list(
     state.select(Some(cfg.active_field));
 
     let list = List::new(items).highlight_style(theme::SELECTED);
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
+
+    if let Some(help_area) = help_area {
+        if let Some(f) = fields.iter().find(|f| f.index == cfg.active_field) {
+            if !f.help.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(f.help, theme::DIM)).wrap(Wrap { trim: true }),
+                    help_area,
+                );
+            }
+        }
+    }
 }

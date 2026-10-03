@@ -44,30 +44,14 @@ impl<S: Subscriber> Layer<S> for TuiTracingLayer {
 
         let message = visitor.format();
 
-        // Parse well-known structured events for richer TUI updates.
-        // "repository processed" events carry repo=full_name and progress=N/M.
-        if level == tracing::Level::INFO {
-            if message.contains("repository processed") || message.contains("repository backup") {
-                // Extract repo name for repo-level progress tracking.
-                if let Some(repo_name) = visitor.field_value("repo") {
-                    let success = !message.contains("failed");
-                    let _ = self.tx.send(BackupEvent::RepoCompleted {
-                        name: repo_name,
-                        success,
-                        error: if success { None } else { Some(message.clone()) },
-                    });
-                }
-            } else if message.contains("fetched repository list") {
-                if let Some(count_str) = visitor.field_value("count") {
-                    if let Ok(total) = count_str.parse::<u64>() {
-                        let _ = self.tx.send(BackupEvent::ReposDiscovered { total });
-                    }
-                }
-            } else if message.contains("backing up") || message.contains("dry-run: would back up") {
-                if let Some(repo_name) = visitor.field_value("repo") {
-                    let _ = self.tx.send(BackupEvent::RepoStarted { name: repo_name });
-                }
-            }
+        // The engine logs "repository processed" with `progress=N/M` once per
+        // repository whatever the outcome (clean, failed, skipped, dry run).
+        // That is the only thing parsed from the log: it is what makes the
+        // progress bar reach 100 % when repositories are skipped.  Success or
+        // failure is NOT inferred from log text; that comes from the engine's
+        // event channel and from `BackupStats::failures()`.
+        if let Some((current, total)) = processed_progress(&visitor) {
+            let _ = self.tx.send(BackupEvent::Progress { current, total });
         }
 
         // Always emit the log line itself.
@@ -77,6 +61,16 @@ impl<S: Subscriber> Layer<S> for TuiTracingLayer {
             message,
         });
     }
+}
+
+/// Extracts `(current, total)` from a "repository processed" event.
+fn processed_progress(visitor: &FieldVisitor) -> Option<(u64, u64)> {
+    if !visitor.message.contains("repository processed") {
+        return None;
+    }
+    let value = visitor.field_value("progress")?;
+    let (cur, total) = value.split_once('/')?;
+    Some((cur.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
 // ── Field visitor ─────────────────────────────────────────────────────────────

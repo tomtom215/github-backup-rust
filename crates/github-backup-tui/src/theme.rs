@@ -8,12 +8,15 @@ use ratatui::style::{Color, Modifier, Style};
 // ── Palette ──────────────────────────────────────────────────────────────────
 
 pub const FG: Color = Color::White;
-pub const MUTED: Color = Color::DarkGray;
+// Fixed 256-colour greys rather than ANSI "bright black" (palette index 8):
+// several popular terminal themes draw index 8 almost the same as the
+// background, which made every label and hint unreadable.
+pub const MUTED: Color = Color::Indexed(247);
 pub const ACCENT: Color = Color::Cyan;
 pub const SUCCESS: Color = Color::Green;
 pub const WARNING: Color = Color::Yellow;
 pub const ERROR: Color = Color::Red;
-pub const HIGHLIGHT_BG: Color = Color::DarkGray;
+pub const HIGHLIGHT_BG: Color = Color::Indexed(238);
 
 // ── Base styles ───────────────────────────────────────────────────────────────
 
