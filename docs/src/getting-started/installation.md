@@ -13,13 +13,15 @@
 
 ## 1. Pre-built binary
 
-Every release publishes statically-linkable binaries for five targets.
-Each binary is uploaded alongside a `.sha256` checksum and signed with
-[SLSA Level 2 build provenance](https://slsa.dev/).
+Every release publishes binaries for five targets; the Linux ones are static
+(musl) executables with no glibc requirement.  Each binary is uploaded
+alongside a `.sha256` checksum.  From v0.3.3 each binary also has a signed
+GitHub build-provenance attestation (SLSA v1.0 Build Level 2 as GitHub
+documents it; earlier releases have none).
 
 | Target | Artefact |
 |---|---|
-| Linux, x86_64 (glibc) | `github-backup-linux-x86_64` |
+| Linux, x86_64 (static musl) | `github-backup-linux-x86_64` |
 | Linux, aarch64 (glibc) | `github-backup-linux-aarch64` |
 | macOS, Intel | `github-backup-macos-x86_64` |
 | macOS, Apple Silicon | `github-backup-macos-aarch64` |
@@ -42,7 +44,7 @@ install -m 0755 "github-backup-${TARGET}" /usr/local/bin/github-backup
 
 For macOS, replace `sha256sum` with `shasum -a 256 -c`.
 
-### Verify SLSA provenance (optional)
+### Verify build provenance (optional, v0.3.3 and later)
 
 If you have the [GitHub CLI](https://cli.github.com/), you can verify
 that the binary was built by this repository's release workflow:

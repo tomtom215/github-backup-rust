@@ -8,14 +8,25 @@ without touching the terminal.
 ```
 unraid/
 ├── github-backup.xml     ← the template (this is what you submit to CA)
-├── ca_profile.xml        ← developer profile picked up by CA
 ├── icon.png              ← 256×256 PNG referenced by <Icon> in the template
+├── make_icon.py          ← regenerates icon.png (stdlib only)
 └── README.md             ← this file
+
+ca_profile.xml            ← CA developer profile; CA requires it in the repo ROOT
 ```
 
-The template targets **Unraid v7.0.0 and newer** (`<MinVer>7.0.0</MinVer>`)
-and has been authored against the v7.2.x DockerMan / CA conventions
+The template has been authored against the v7.2.x DockerMan / CA conventions
 documented at <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/>.
+It sets no `<MinVer>`; it has not been tested on Unraid 6.x.
+
+**Permissions.** The template passes `--user 99:100` (`nobody:users`, the owner of
+Unraid shares), so files the backup writes belong to the same user SMB clients
+act as.  If you ran an earlier version of this template (the container ran as
+uid 1000), fix ownership of the existing output once:
+`chown -R 99:100 /mnt/user/backups/github`.  The `umask` field (default `022`)
+sets the mode of new files; use `000` only if other users must write into the share.
+The template no longer passes `--rm`: the container must survive its own exit
+so that the User Scripts pattern below (`docker start github-backup`) works.
 
 ## What the template gives the user
 
@@ -24,13 +35,14 @@ documented at <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-cont
 | Output Directory                  | `/backup` (Path)         | `/mnt/user/backups/github/`      | Required. Point at an Unraid share. |
 | GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Required. User / org to back up. |
 | GitHub Token                      | `GITHUB_TOKEN`           | _(empty)_                        | Required, **masked**. |
-| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--tui`, `--print-config-template` also available. |
-| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos 'rust-*'`. Shell metacharacters refused. |
+| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available.  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:latest --tui` from the Unraid terminal. |
+| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted). Shell metacharacters refused. |
 | GitHub API URL (GHES)             | `GITHUB_API_URL`         | _(empty)_                        | Advanced. |
 | GitHub Clone Host (split GHES)    | `GITHUB_CLONE_HOST`      | _(empty)_                        | Advanced. |
 | OAuth App Client ID               | `GITHUB_OAUTH_CLIENT_ID` | _(empty)_                        | Advanced. Pair with `--device-auth` in Extra CLI Flags. |
 | At-Rest Encryption Key            | `BACKUP_ENCRYPT_KEY`     | _(empty)_                        | Advanced, **masked**. 32-byte hex; generate with `openssl rand -hex 32`. |
 | Notification Webhook              | `BACKUP_NOTIFY_WEBHOOK`  | _(empty)_                        | Advanced. JSON POST on completion. |
+| umask                             | `UMASK`                  | `022`                            | Advanced. Octal file-creation mask. |
 | Log Level                         | `RUST_LOG`               | `info`                           | Advanced. `info`/`debug`/`trace`/`warn`/`error`. |
 | HTTPS Proxy                       | `HTTPS_PROXY`            | _(empty)_                        | Advanced. Honoured by both the API client and git. |
 
@@ -38,7 +50,7 @@ documented at <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-cont
 
 CLI / Compose / Kubernetes users invoke the binary directly:
 
-    docker run --rm -e GITHUB_TOKEN=… ghcr.io/tomtom215/github-backup-rust:latest octocat --all
+    docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:latest octocat --all
 
 That continues to work unchanged.
 
@@ -70,8 +82,10 @@ rebuild); shell metacharacters are rejected up-front.
 4. **Change `Run Mode` to `--all`** and start the container again.
    The backup runs to completion and exits.
 
-The container is one-shot: it exits when the backup finishes. The
-status in the Docker tab will show "exited (0)" on success.
+The container is one-shot: it exits when the backup finishes.  The exit code
+is visible with `docker ps -a` (0 on success); the Docker tab only shows
+started/stopped.  Blank form fields are passed to the container as empty
+variables; the entrypoint treats an empty optional variable as unset.
 
 ## Scheduling recurring backups
 
@@ -92,7 +106,7 @@ containers. The community-standard pattern is:
 The script returns immediately; the container runs in the background
 and writes structured progress to its Docker log. A *successful* run
 exits with code 0; *failure* exits with the error category's code
-(usually 1) and is visible in the Docker tab.
+(usually 1); read the log or `docker ps -a` to see which.
 
 ## Restore
 
@@ -115,30 +129,22 @@ or unexpected.
 
 ## Submission to Community Applications
 
-The current (May 2026) CA submission flow:
+CA submission goes through the portal at <https://ca.unraid.net/submit>
+(validate and scan steps; the CA docs under `ca.unraid.net/submit/help/`
+describe the fields).  Checklist for this repository:
 
-1. **Open a support thread** at <https://forums.unraid.net/forum/53-docker-containers/>
-   and copy its URL into the `<Support>` element of
-   `github-backup.xml` (replace the `REPLACE_WITH_SUPPORT_THREAD_ID`
-   placeholder). Templates without a working `<Support>` URL get
-   blacklisted.
-2. **Host this folder publicly** on GitHub — it already is, under
-   `tomtom215/github-backup-rust/unraid/`.
-3. **Submit** via the CA submission form linked from
-   <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/community-applications/>
-   (an Asana form as of 2026; the old Google Form is retired).
-   Moderation typically responds within ~48 h.
+1. `ca_profile.xml` is in the repository root with a non-empty `<Profile>`
+   (CA blocks submission otherwise).
+2. `<Support>` points at the GitHub issue tracker (CA only asks for a support
+   URL; a forum thread is optional).
+3. `<Category>` uses CA's `Main:` / `Main:Sub` syntax separated by spaces
+   (currently `Backup: Tools:Utilities`); confirm it in the portal's Validate step.
+4. `<Repository>` pulls from GHCR (`release.yml` publishes multi-arch images on
+   each tagged release).
+5. Open source (MIT, per `LICENSE`).
 
-What the CA moderators check:
-
-- `<Repository>` actually pulls from GHCR (the `release.yml` workflow
-  publishes multi-arch images on every tagged release, so this is
-  satisfied automatically).
-- `<Project>` and `<Support>` URLs both resolve.
-- No exotic XML formatting — the template is laid out in DockerMan's
-  emitted style (single-line `<Config>` rows, the conventional
-  element order).
-- Application is open source (MIT, per `LICENSE`).
+Not verified from this repository: that the portal accepts the template as-is.
+Run its Validate step before submitting.
 
 ## Local testing without submitting
 
@@ -153,16 +159,15 @@ touching the registry:
    start.
 
 Any subsequent edit you make in the WebUI is written back to the same
-file, so a round-trip through DockerMan is a free linter — diff
-against this version to ensure your manual edits do not deviate from
-DockerMan's emit style (which is one of the things the CA parser
-checks).
+file, so you can diff it against this version to see how DockerMan
+re-emits the template.
 
 ## Icon
 
-`icon.png` should be a square PNG, **256×256**, with transparency.
-The image is hot-linked from the template via its raw GitHub URL.
-Replace the placeholder with a real icon before submitting to CA.
+`icon.png` is a square 256×256 PNG (opaque two-colour "GB" monogram),
+regenerated with `python3 unraid/make_icon.py`.  The image is hot-linked from
+the template via its raw GitHub URL.  Replace the placeholder with a designed
+icon before submitting to CA.
 
 ## References
 

@@ -27,8 +27,33 @@
 
 set -eu
 
-# Strict: drop accidental setuid/setgid bits in /backup.
-umask 022
+# File-creation mask for everything the backup writes.  Default 022 (dirs
+# 0755, files 0644).  Unraid users who want shares writable by `nobody`
+# over SMB can set `UMASK=000` (the community convention) - see unraid/README.md.
+case "${UMASK:-022}" in
+    [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) umask "${UMASK:-022}" ;;
+    *)
+        echo "github-backup entrypoint: UMASK must be an octal mask like 022 (got '$UMASK')" >&2
+        exit 64
+        ;;
+esac
+
+# Drop set-but-empty optional variables.  Compose (`VAR=` in .env, or `${VAR-}`)
+# and Unraid's DockerMan hand the container `NAME=` for every blank field.
+# clap's `env = "..."` treats a *set but empty* variable as a value, so a blank
+# BACKUP_ENCRYPT_KEY aborts the run ("must be exactly 64 hex characters") and a
+# blank GITHUB_API_URL makes every API call fail.  Treat empty as unset.
+# Variables with real values, and variables not listed here, are untouched.
+for v in GITHUB_TOKEN GITHUB_API_URL GITHUB_CLONE_HOST GITHUB_OAUTH_CLIENT_ID \
+         MIRROR_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+         BACKUP_ENCRYPT_KEY BACKUP_NOTIFY_WEBHOOK GITHUB_BACKUP_RESTORE_YES \
+         HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy \
+         NO_PROXY no_proxy; do
+    eval "val=\${$v-__unset__}"
+    if [ -z "$val" ]; then
+        unset "$v"
+    fi
+done
 
 BIN=/usr/local/bin/github-backup
 
@@ -96,5 +121,10 @@ if [ -z "$ARGS" ]; then
 fi
 
 # Intentional word-splitting on $ARGS so multi-token BACKUP_FLAGS works.
+# Pathname expansion is switched off so a pattern such as `rust-*` reaches the
+# binary literally instead of being expanded against the working directory.
+# Note there is no quote processing: write `--include-repos rust-*`, not
+# `--include-repos 'rust-*'`.
+set -f
 # shellcheck disable=SC2086
 exec "$BIN" $ARGS

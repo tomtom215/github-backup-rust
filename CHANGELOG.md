@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Packaging, Docker, CI and release
+
+- **Docker / Compose:** empty optional variables (`BACKUP_ENCRYPT_KEY=`,
+  `GITHUB_API_URL=`, ...) are now dropped by the entrypoint and no longer
+  injected by Compose, so the documented quick start works; every Compose
+  profile service inherits the full base environment (the B2/MinIO profiles
+  previously uploaded unencrypted even with `BACKUP_ENCRYPT_KEY` set) and
+  fixed flags moved to `entrypoint:` so `run SERVICE OWNER --all` keeps them.
+  The non-existent bundled `minio/minio` service was removed (point
+  `MINIO_ENDPOINT` at your own server).  `init: true` removed (tini warning).
+- **Image:** numeric `USER 1000:1000`; uid 99 (Unraid `nobody`) has a passwd
+  entry; adds `git-lfs` and `openssh-client`; `safe.directory` trusts
+  `/backup` only; `alpine:3.23` base; dependency layer now compiles the
+  third-party crates; allow-list `.dockerignore`; `UMASK` support.
+- **Release:** Linux binaries are static musl builds (no glibc 2.39
+  requirement), checked with `file`/`ldd` and `--version`; aarch64 builds
+  natively instead of via `cross`; `--locked` everywhere; pinned toolchain;
+  tag must be on `main`; a real build-provenance attestation step now backs
+  the README claim (the SLSA claim in the 0.3.2 notes was not true for 0.3.2
+  assets).  CI builds and smoke-tests the Docker image; Dependabot and a
+  daily advisory audit were added.
+- **Unraid:** runs as 99:100, no `--rm`, `Category`/`Support` fixed,
+  `ca_profile.xml` moved to the repo root with CA's schema, legible icon.
+
 ### Added (Unraid)
 
 - **Community Applications template** at `unraid/github-backup.xml`

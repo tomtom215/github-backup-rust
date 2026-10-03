@@ -39,8 +39,10 @@ install -m 0755 "github-backup-${TARGET}" /usr/local/bin/github-backup
 ```
 
 Supported targets: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
-`macos-aarch64`, `windows-x86_64.exe`. Every release is signed with
-[SLSA Level 2 build provenance](https://slsa.dev/); verify with:
+`macos-aarch64`, `windows-x86_64.exe`. The Linux binaries are static (musl)
+and run on any distribution.  From v0.3.3 each binary carries a signed
+GitHub build-provenance attestation ([SLSA v1.0 Build Level 2](https://slsa.dev/)
+as GitHub documents it; earlier releases have none); verify with:
 
 ```bash
 gh attestation verify "github-backup-${TARGET}" \
@@ -71,8 +73,8 @@ docker compose run --rm backup octocat --all
 ```
 
 The Compose file ships profiles for S3 (`--profile s3`), Backblaze B2
-(`--profile b2`), self-hosted MinIO (`--profile minio`, bundles a
-side service), Codeberg / Forgejo / Gitea mirroring (`--profile
+(`--profile b2`), a self-hosted MinIO / S3-compatible server (`--profile minio`, you run the
+server), Codeberg / Forgejo / Gitea mirroring (`--profile
 codeberg`), GitLab mirroring (`--profile gitlab`), pre-flight checks
 (`--profile doctor`), the interactive TUI (`--profile tui`), and
 integrity verification (`--profile verify`).  See `docker-compose.yml`

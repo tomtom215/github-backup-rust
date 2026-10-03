@@ -66,7 +66,7 @@ $EDITOR .env            # at minimum: GITHUB_TOKEN
 | `verify`     | `verify`         | Verify an existing backup's SHA-256 manifest |
 | `s3`         | `backup-s3`      | Backup + sync to AWS S3 |
 | `b2`         | `backup-b2`      | Backup + sync to Backblaze B2 |
-| `minio`      | `backup-minio`   | Backup + sync to bundled MinIO side-service |
+| `minio`      | `backup-minio`   | Backup + sync to a MinIO / S3-compatible server you run (`MINIO_ENDPOINT`) |
 | `codeberg`   | `backup-codeberg`| Backup + mirror push to Codeberg / Forgejo / Gitea |
 | `gitlab`     | `backup-gitlab`  | Backup + mirror push to GitLab.com or self-hosted GitLab |
 
@@ -131,15 +131,15 @@ docker compose --profile b2 run --rm backup-b2 octocat --all
 
 ### Self-hosted MinIO
 
-The `minio` profile starts a sidecar MinIO container automatically.
+The compose file no longer bundles a MinIO server (the `minio/minio` image is
+no longer published on Docker Hub).  Run an S3-compatible server yourself,
+create the bucket (the tool does not create buckets), then set
+`MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` and `MINIO_BUCKET`
+in `.env`:
 
 ```sh
-docker compose --profile minio up -d minio
 docker compose --profile minio run --rm backup-minio octocat --all
 ```
-
-MinIO console: <http://localhost:9001> (default `minioadmin` / `minioadmin`,
-override in `.env`).
 
 ### Mirror to Codeberg / Forgejo / Gitea
 

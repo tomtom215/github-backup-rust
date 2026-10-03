@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!--
+  Community Applications developer profile.  CA requires this file in the
+  repository ROOT, with a <CommunityApplications> root element and a
+  non-empty <Profile> description.
+-->
+<CommunityApplications>
+  <Profile>Command-line tooling to back up everything GitHub keeps on a user or organisation (repositories, issues, pull requests, releases, gists, wikis and metadata), packaged as a one-shot container. Support: GitHub issues.</Profile>
+  <WebPage>https://github.com/tomtom215/github-backup-rust</WebPage>
+  <Icon>https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/unraid/icon.png</Icon>
+</CommunityApplications>

@@ -1,56 +1,27 @@
-# Anything that does not need to be sent to the Docker daemon as part of
-# the build context.  Without this file the entire `target/` directory
-# (often several GiB after `cargo build`) is uploaded on every `docker
-# build`, slowing the build by minutes.
+# Allow-list build context: only what the Dockerfile actually COPYs is sent to
+# the daemon.  Everything else (docs, CI config, local .env / key / config
+# files at any depth, editor clutter, build output) stays out of the build
+# context, the builder layer cache and the provenance record.
 #
-# Order is intentionally permissive: list big, well-known build outputs
-# first, then VCS / editor / OS metadata, then anything we explicitly
-# do not want shipped inside the image even if it sneaks into the
-# checkout.
+# If the Dockerfile starts COPYing another path, add a `!` line for it here.
 
-# ── Build artefacts ──────────────────────────────────────────────────
-target/
-**/target/
-*.rs.bk
-**/*.profraw
-mutants.out/
+*
 
-# ── Docker / CI ──────────────────────────────────────────────────────
-docker-compose.override.yml
-docker-compose.*.yml
-.dockerignore
+# Cargo workspace manifests + lockfile.
+!Cargo.toml
+!Cargo.lock
 
-# ── Local config & secrets ───────────────────────────────────────────
-.env
-*.env
-!compose.example.env
-*.pem
-*.key
-*.crt
-config.toml
-backups/
-data/
+# All crate sources, but never a nested build directory or local secrets.
+!crates
+**/target
+**/*.env
+**/*.pem
+**/*.key
+**/*.crt
+**/config.toml
+!crates/**/Cargo.toml
 
-# ── Documentation build output ───────────────────────────────────────
-docs/book/
-docs/.book-cache/
-
-# ── VCS metadata ─────────────────────────────────────────────────────
-.git/
-.gitignore
-.gitattributes
-.github/
-
-# ── Editor / IDE ─────────────────────────────────────────────────────
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-*~
-
-# ── Per-user OS clutter ──────────────────────────────────────────────
-.cache/
-.tmp/
-.coverage/
+# Entrypoint wrapper.
+!docker
+docker/*
+!docker/entrypoint.sh
