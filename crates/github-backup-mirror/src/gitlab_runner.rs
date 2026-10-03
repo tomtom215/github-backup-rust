@@ -4,7 +4,7 @@
 //! Push-mirror runner for GitLab destinations.
 //!
 //! Discovers local bare git repositories and mirrors them to a GitLab instance
-//! by pushing branches and tags (see [`crate::push`]); the token is never
+//! by pushing branches and tags (see `push.rs`); the token is never
 //! exposed in process listings or written to disk.
 
 use std::collections::HashSet;

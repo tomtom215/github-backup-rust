@@ -71,7 +71,7 @@ impl Args {
     /// when its feature is not in use; one the user *typed* without the
     /// matching flag is still an error.
     ///
-    /// Call after [`Args::merge_config`] so a companion value supplied by the
+    /// Call after `merge_config_with` so a companion value supplied by the
     /// config file counts.
     ///
     /// # Errors
@@ -114,7 +114,7 @@ impl Args {
         self.merge_config_inner(cfg, explicit);
     }
 
-    /// Like [`merge_config`](Self::merge_config), but uses the parse matches to
+    /// Like `merge_config`, but uses the parse matches to
     /// tell an explicit `--clone-type mirror` from the default, so the command
     /// line always beats the config file — including when it asks for the default.
     pub fn merge_config_with(
