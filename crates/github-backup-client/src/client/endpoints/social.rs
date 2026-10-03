@@ -20,7 +20,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_followers(&self, username: &str) -> Result<Vec<User>, ClientError> {
+    pub async fn list_followers(&self, username: &str) -> Result<Page<User>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/followers?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -31,7 +31,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_following(&self, username: &str) -> Result<Vec<User>, ClientError> {
+    pub async fn list_following(&self, username: &str) -> Result<Page<User>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/following?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -42,7 +42,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_starred(&self, username: &str) -> Result<Vec<Repository>, ClientError> {
+    pub async fn list_starred(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/starred?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -53,7 +53,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_watched(&self, username: &str) -> Result<Vec<Repository>, ClientError> {
+    pub async fn list_watched(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/subscriptions?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -66,7 +66,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_gists(&self, username: &str) -> Result<Vec<Gist>, ClientError> {
+    pub async fn list_gists(&self, username: &str) -> Result<Page<Gist>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/gists?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -77,7 +77,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_starred_gists(&self) -> Result<Vec<Gist>, ClientError> {
+    pub async fn list_starred_gists(&self) -> Result<Page<Gist>, ClientError> {
         let api = self.api();
         let url = format!("{api}/gists/starred?per_page={PER_PAGE}");
         self.get_all_pages(&url).await

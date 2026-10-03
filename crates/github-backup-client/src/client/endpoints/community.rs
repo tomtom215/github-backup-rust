@@ -38,7 +38,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Discussion>, ClientError> {
+    ) -> Result<Page<Discussion>, ClientError> {
         let api = self.api();
         let mut url = format!("{api}/repos/{owner}/{repo}/discussions?per_page={PER_PAGE}");
         let mut all: Vec<Discussion> = Vec::new();
@@ -66,7 +66,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         discussion_number: u64,
-    ) -> Result<Vec<DiscussionComment>, ClientError> {
+    ) -> Result<Page<DiscussionComment>, ClientError> {
         let api = self.api();
         let mut url = format!(
             "{api}/repos/{owner}/{repo}/discussions/{discussion_number}/comments?per_page={PER_PAGE}"
@@ -108,7 +108,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<ClassicProject>, ClientError> {
+    ) -> Result<Page<ClassicProject>, ClientError> {
         let api = self.api();
         let mut url = format!("{api}/repos/{owner}/{repo}/projects?per_page={PER_PAGE}&state=all");
         let mut all: Vec<ClassicProject> = Vec::new();
@@ -134,7 +134,7 @@ impl GitHubClient {
     pub async fn list_project_columns(
         &self,
         project_id: u64,
-    ) -> Result<Vec<ProjectColumn>, ClientError> {
+    ) -> Result<Page<ProjectColumn>, ClientError> {
         let api = self.api();
         let mut url = format!("{api}/projects/{project_id}/columns?per_page={PER_PAGE}");
         let mut all: Vec<ProjectColumn> = Vec::new();
@@ -166,7 +166,7 @@ impl GitHubClient {
         &self,
         username: &str,
         package_type: &str,
-    ) -> Result<Vec<Package>, ClientError> {
+    ) -> Result<Page<Package>, ClientError> {
         let api = self.api();
         let mut url = format!(
             "{api}/users/{username}/packages?package_type={package_type}&per_page={PER_PAGE}"
@@ -201,7 +201,7 @@ impl GitHubClient {
         username: &str,
         package_type: &str,
         package_name: &str,
-    ) -> Result<Vec<PackageVersion>, ClientError> {
+    ) -> Result<Page<PackageVersion>, ClientError> {
         let api = self.api();
         let mut url = format!(
             "{api}/users/{username}/packages/{package_type}/{package_name}/versions?per_page={PER_PAGE}"

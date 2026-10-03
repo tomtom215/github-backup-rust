@@ -32,7 +32,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Workflow>, ClientError> {
+    ) -> Result<Page<Workflow>, ClientError> {
         // The API wraps the array under {"total_count": N, "workflows": [...]}
         #[derive(serde::Deserialize)]
         struct WorkflowsResponse {
@@ -64,7 +64,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         workflow_id: u64,
-    ) -> Result<Vec<WorkflowRun>, ClientError> {
+    ) -> Result<Page<WorkflowRun>, ClientError> {
         // The API wraps runs under {"total_count": N, "workflow_runs": [...]}
         #[derive(serde::Deserialize)]
         struct RunsResponse {
@@ -103,7 +103,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Environment>, ClientError> {
+    ) -> Result<Page<Environment>, ClientError> {
         // The API wraps environments under {"total_count": N, "environments": [...]}
         #[derive(serde::Deserialize)]
         struct EnvsResponse {

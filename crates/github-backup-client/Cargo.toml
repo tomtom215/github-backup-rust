@@ -37,3 +37,6 @@ url = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-test = { workspace = true }
+# Captures `tracing` output in tests (warnings about elements that do not fit
+# their model must name the endpoint, index and id).
+tracing-subscriber = { workspace = true }

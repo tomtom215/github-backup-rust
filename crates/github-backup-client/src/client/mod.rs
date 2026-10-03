@@ -10,6 +10,7 @@
 mod endpoints;
 mod proxy;
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -18,12 +19,16 @@ use hyper::{Method, Request, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use serde_json::{Map, Value};
+use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
 
 use proxy::ProxyConnector;
 
 use github_backup_types::config::Credential;
+use github_backup_types::Page;
 
+use crate::decode::extend_page;
 use crate::error::ClientError;
 use crate::pagination::parse_next_link;
 use crate::rate_limit::RateLimitInfo;
@@ -94,6 +99,10 @@ pub struct GitHubClient {
     pub(crate) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(crate) api_base: String,
+    /// Login of the user the credential belongs to, looked up once with
+    /// `GET /user` and shared by every clone of the client.  `None` inside
+    /// means the lookup is not possible with this credential.
+    login: Arc<OnceCell<Option<String>>>,
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -153,6 +162,7 @@ impl GitHubClient {
             http,
             credential,
             api_base,
+            login: Arc::new(OnceCell::new()),
         })
     }
 
@@ -220,23 +230,120 @@ impl GitHubClient {
 
     // ── Internal HTTP machinery ───────────────────────────────────────────
 
-    /// Fetches all pages of a paginated endpoint, collecting results into
-    /// a single `Vec<T>`.
-    pub(crate) async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Vec<T>, ClientError>
+    /// Fetches all pages of a paginated endpoint whose body is a JSON array,
+    /// collecting the elements into a single [`Page`].
+    ///
+    /// Elements are decoded one by one: one that does not fit `T` is kept
+    /// verbatim in [`Page::unparsed`] and logged, it does not fail the list
+    /// (see [`extend_page`]).
+    pub(crate) async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Page<T>, ClientError>
     where
         T: serde::de::DeserializeOwned,
     {
-        let mut results = Vec::new();
+        let mut results = Page::new();
         let mut next_url: Option<String> = Some(initial_url.to_string());
 
         while let Some(url) = next_url.take() {
             debug!(url = %url, "GET");
-            let (page, link_header) = self.get_json_with_link::<Vec<T>>(&url).await?;
-            results.extend(page);
+            let (values, link_header) = self.get_json_with_link::<Vec<Value>>(&url).await?;
+            extend_page(&mut results, &url, values);
             next_url = link_header.as_deref().and_then(parse_next_link);
         }
 
         Ok(results)
+    }
+
+    /// Like [`get_all_pages`](Self::get_all_pages) for the endpoints that wrap
+    /// the list in an object, `{"total_count": n, "<key>": [...]}`
+    /// (workflows, workflow runs, environments): follows every `Link:
+    /// rel="next"` page and merges the arrays found under `key`.
+    pub(crate) async fn get_all_wrapped_pages<T>(
+        &self,
+        initial_url: &str,
+        key: &str,
+    ) -> Result<Page<T>, ClientError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let mut results = Page::new();
+        let mut next_url: Option<String> = Some(initial_url.to_string());
+
+        while let Some(url) = next_url.take() {
+            debug!(url = %url, "GET");
+            let (mut body, link_header) = self.get_json_with_link::<Map<String, Value>>(&url).await?;
+            let Some(Value::Array(values)) = body.remove(key) else {
+                return Err(ClientError::Json(serde::de::Error::custom(format!(
+                    "response from {url} has no `{key}` array"
+                ))));
+            };
+            extend_page(&mut results, &url, values);
+            next_url = link_header.as_deref().and_then(parse_next_link);
+        }
+
+        Ok(results)
+    }
+
+    /// Returns the login of the user the credential belongs to, or `None`
+    /// when it cannot be determined.
+    ///
+    /// `GET /user` is requested at most once per client (the answer is shared
+    /// by all clones).  `None` is returned without any request for an
+    /// anonymous client, and - with a warning - when the token is refused
+    /// there (`401`/`403`: GitHub App installation tokens cannot call it), so
+    /// callers fall back to the public listings.  Any other failure is
+    /// returned as an error and not cached.
+    ///
+    /// # Errors
+    ///
+    /// Propagates network, TLS and non-401/403 API errors.
+    pub(crate) async fn authenticated_login(&self) -> Result<Option<&str>, ClientError> {
+        if self.credential.token().is_none() {
+            return Ok(None);
+        }
+        let login = self
+            .login
+            .get_or_try_init(|| self.fetch_authenticated_login())
+            .await?;
+        Ok(login.as_deref())
+    }
+
+    async fn fetch_authenticated_login(&self) -> Result<Option<String>, ClientError> {
+        let url = format!("{}/user", self.api_base);
+        match self.get_json_with_link::<Value>(&url).await {
+            Ok((user, _)) => {
+                let login = user.get("login").and_then(Value::as_str).map(str::to_string);
+                if login.is_none() {
+                    warn!("GET /user returned no `login`; listing public data only");
+                }
+                Ok(login)
+            }
+            Err(ClientError::ApiError {
+                status: status @ (401 | 403),
+                ..
+            }) => {
+                warn!(
+                    status,
+                    "this token cannot read GET /user (a GitHub App token?); private \
+                     repositories and secret gists of the account cannot be listed, \
+                     only public data will be backed up"
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether the credential belongs to the account `username` (compared
+    /// case-insensitively, as GitHub logins are).
+    ///
+    /// # Errors
+    ///
+    /// See [`authenticated_login`](Self::authenticated_login).
+    pub(crate) async fn is_authenticated_user(&self, username: &str) -> Result<bool, ClientError> {
+        Ok(self
+            .authenticated_login()
+            .await?
+            .is_some_and(|login| login.eq_ignore_ascii_case(username)))
     }
 
     /// Performs a single GET request and returns the deserialised body along
@@ -274,13 +381,29 @@ impl GitHubClient {
         method: Method,
         url: &str,
     ) -> Result<hyper::http::request::Builder, ClientError> {
+        self.build_request_with_auth(method, url, true)
+    }
+
+    /// Like [`build_request`](Self::build_request), but the credential is
+    /// attached only when `send_auth` is true.
+    ///
+    /// Used for the follow-up hops of a redirect chain, which must not carry
+    /// the `Authorization` header to another origin.
+    pub(crate) fn build_request_with_auth(
+        &self,
+        method: Method,
+        url: &str,
+        send_auth: bool,
+    ) -> Result<hyper::http::request::Builder, ClientError> {
         let mut builder = Request::builder()
             .method(method)
             .uri(url)
             .header("User-Agent", USER_AGENT);
 
-        if let Some(auth) = self.credential.authorization_header() {
-            builder = builder.header("Authorization", auth);
+        if send_auth {
+            if let Some(auth) = self.credential.authorization_header() {
+                builder = builder.header("Authorization", auth);
+            }
         }
 
         Ok(builder)

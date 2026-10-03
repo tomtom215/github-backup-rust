@@ -6,7 +6,9 @@
 //! Covers pull request lists, review comments, commit lists, and submitted
 //! reviews for a given repository.
 
-use github_backup_types::{PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview};
+use github_backup_types::{
+    Page, PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview,
+};
 
 use crate::error::ClientError;
 
@@ -17,15 +19,13 @@ impl GitHubClient {
 
     /// Lists all pull requests for a repository.
     ///
-    /// `since` — when `Some`, only returns PRs whose `updated_at` timestamp
-    /// is at or after the given ISO 8601 value.
+    /// # Note on `since`
     ///
-    /// # Note
-    ///
-    /// The GitHub Pulls API does not support a native `since` filter. When
-    /// `since` is provided this method sorts by `updated` ascending to make
-    /// incremental detection practical, but callers must still filter the
-    /// results by `updated_at` themselves if a strict cutoff is required.
+    /// The GitHub Pulls API does not support a native `since` filter, so the
+    /// list is always complete.  When `since` is provided this method only
+    /// sorts by `updated` ascending to make incremental detection practical;
+    /// callers must filter the results by `updated_at` themselves if a strict
+    /// cutoff is required.
     ///
     /// # Errors
     ///
@@ -35,7 +35,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         since: Option<&str>,
-    ) -> Result<Vec<PullRequest>, ClientError> {
+    ) -> Result<Page<PullRequest>, ClientError> {
         let api = self.api();
         let mut url = format!("{api}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
         if since.is_some() {
@@ -54,7 +54,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         pr_number: u64,
-    ) -> Result<Vec<PullRequestComment>, ClientError> {
+    ) -> Result<Page<PullRequestComment>, ClientError> {
         let api = self.api();
         let url =
             format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page={PER_PAGE}");
@@ -71,7 +71,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         pr_number: u64,
-    ) -> Result<Vec<PullRequestCommit>, ClientError> {
+    ) -> Result<Page<PullRequestCommit>, ClientError> {
         let api = self.api();
         let url =
             format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/commits?per_page={PER_PAGE}");
@@ -88,7 +88,7 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         pr_number: u64,
-    ) -> Result<Vec<PullRequestReview>, ClientError> {
+    ) -> Result<Page<PullRequestReview>, ClientError> {
         let api = self.api();
         let url =
             format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PER_PAGE}");

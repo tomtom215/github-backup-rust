@@ -27,7 +27,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_labels(&self, owner: &str, repo: &str) -> Result<Vec<Label>, ClientError> {
+    pub async fn list_labels(&self, owner: &str, repo: &str) -> Result<Page<Label>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/labels?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -42,7 +42,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Milestone>, ClientError> {
+    ) -> Result<Page<Milestone>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/milestones?state=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -57,7 +57,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<Release>, ClientError> {
+    ) -> Result<Page<Release>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/releases?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -70,7 +70,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_hooks(&self, owner: &str, repo: &str) -> Result<Vec<Hook>, ClientError> {
+    pub async fn list_hooks(&self, owner: &str, repo: &str) -> Result<Page<Hook>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/hooks?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -85,7 +85,7 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<SecurityAdvisory>, ClientError> {
+    ) -> Result<Page<SecurityAdvisory>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/security-advisories?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -144,7 +144,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Vec<Branch>, ClientError> {
+    pub async fn list_branches(&self, owner: &str, repo: &str) -> Result<Page<Branch>, ClientError> {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/branches?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
