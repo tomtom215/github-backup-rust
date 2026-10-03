@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use tracing::debug;
 
-use super::askpass::AskpassScript;
+use super::credential;
 use super::CloneOptions;
 use crate::error::CoreError;
 
@@ -145,6 +145,18 @@ fn is_progress_line(line: &str) -> bool {
 }
 
 /// Kills `child` and, on Unix, its whole process group, then reaps it.
+/// Appends an actionable hint to git errors whose cause is not obvious.
+fn with_hints(mut stderr: String) -> String {
+    if stderr.contains("dubious ownership") {
+        stderr.push_str(
+            "\nhint: the repository is owned by a different user than the one running \
+             github-backup. Run it as the owning user (for example docker run --user), or \
+             fix ownership (chown -R) of the backup directory.",
+        );
+    }
+    stderr
+}
+
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -164,13 +176,15 @@ fn kill_tree(child: &mut Child) {
 /// Runs `program` with `args` in `cwd` and waits for it, applying the
 /// supervision rules described in the [module documentation](self).
 ///
-/// If `token` is `Some`, it is supplied through a temporary `GIT_ASKPASS`
-/// script (removed when this function returns) so the credential never appears
-/// on the command line or in the process list.
+/// If `token` is `Some` and `url` is an HTTP(S) URL, the token is supplied to
+/// git in an environment variable together with a credential helper scoped to
+/// that URL's origin (see [`credential`]): no file is created and the token is
+/// never part of an argument list.  `url` is the remote the command talks to.
 pub(super) fn run_git(
     program: &Path,
     args: &[&str],
     cwd: &Path,
+    url: &str,
     token: Option<&str>,
     opts: &CloneOptions,
 ) -> Result<(), CoreError> {
@@ -179,8 +193,24 @@ pub(super) fn run_git(
     }
     debug!(args = ?args, cwd = %cwd.display(), "running git");
 
+    // Global options go before the subcommand.
+    let mut global: Vec<String> = Vec::new();
+    // We manage this repository, whoever owns it on disk (Unraid "New
+    // Permissions", a restore as another uid): exactly this path is trusted,
+    // never `*`.  Command-line config counts as protected configuration.
+    if cwd != Path::new(".") {
+        if let Ok(real) = cwd.canonicalize() {
+            global.push("-c".into());
+            global.push(format!("safe.directory={}", real.display()));
+        }
+    }
+    if token.is_some() {
+        global.extend(credential::config_args(url));
+    }
+
     let mut cmd = Command::new(program);
-    cmd.args(args)
+    cmd.args(&global)
+        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -190,24 +220,17 @@ pub(super) fn run_git(
         // Stable, English messages: error classification matches on them.
         .env("LC_ALL", "C")
         .env("LANGUAGE", "C");
+    if let Some(tok) = token {
+        if credential::origin(url).is_some() {
+            cmd.env(credential::TOKEN_ENV, tok);
+        }
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // New process group so a stall/shutdown kill reaches git's helpers.
         cmd.process_group(0);
-    }
-
-    // Keep the guard alive until the process has exited.
-    let _askpass_guard;
-    if let Some(tok) = token {
-        _askpass_guard = AskpassScript::create(tok);
-        if let Some(ref script) = _askpass_guard {
-            cmd.env("GIT_ASKPASS", script.path());
-            cmd.env("GIT_USERNAME", "x-access-token");
-        }
-    } else {
-        _askpass_guard = None;
     }
 
     let mut child = cmd.spawn().map_err(CoreError::GitSpawn)?;
@@ -224,7 +247,7 @@ pub(super) fn run_git(
                 return Err(CoreError::GitFailed {
                     args: args.join(" "),
                     code: status.code().unwrap_or(-1),
-                    stderr: tail,
+                    stderr: with_hints(tail),
                 });
             }
             None => {

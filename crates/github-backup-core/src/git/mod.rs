@@ -39,7 +39,7 @@
 //! - `process` — spawns and supervises one git subprocess
 //! - `spy` — test-only `SpyGitRunner` stub (available under `test_support` in tests)
 
-mod askpass;
+mod credential;
 mod process;
 pub mod spy;
 
@@ -436,6 +436,7 @@ impl Job {
             &self.program,
             &["push", "--progress", "--mirror", &self.url],
             &self.dest,
+            &self.url,
             self.opts.token.as_deref(),
             &self.opts,
         )
@@ -460,6 +461,7 @@ impl Job {
             &self.program,
             args,
             &self.dest,
+            &self.url,
             self.opts.token.as_deref(),
             &self.opts,
         )
@@ -500,6 +502,7 @@ impl Job {
             &self.program,
             &args,
             Path::new("."),
+            &self.url,
             self.opts.token.as_deref(),
             &self.opts,
         )
@@ -688,6 +691,17 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("chmod script");
         ProcessGitRunner::with_program(script)
+    }
+
+    /// Drops the global `-c key=value` options git is run with, leaving the
+    /// subcommand and its arguments.
+    #[cfg(unix)]
+    fn subcommand(line: &str) -> String {
+        let mut rest = line;
+        while let Some(r) = rest.strip_prefix("-c ") {
+            rest = r.split_once(' ').map_or("", |(_, tail)| tail);
+        }
+        rest.to_owned()
     }
 
     #[cfg(unix)]
@@ -937,7 +951,7 @@ exit 128"#,
             .await
             .expect("update");
         let calls = std::fs::read_to_string(&seen).expect("calls");
-        let lines: Vec<&str> = calls.lines().collect();
+        let lines: Vec<String> = calls.lines().map(subcommand).collect();
         assert!(lines[0].starts_with("fetch --progress --all"), "{lines:?}");
         assert_eq!(lines[1], "lfs fetch --all origin", "{lines:?}");
     }
@@ -989,9 +1003,281 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
             .await
             .expect("update");
         let argv = std::fs::read_to_string(&log).expect("argv log");
-        let lines: Vec<&str> = argv.lines().collect();
+        let lines: Vec<String> = argv.lines().map(subcommand).collect();
         assert_eq!(lines.len(), 2, "{argv}");
         assert!(lines[0].starts_with("clone --progress --mirror "), "{argv}");
         assert_eq!(lines[1], "fetch --progress --all --prune", "{argv}");
+    }
+}
+
+// ── Credential tests ──────────────────────────────────────────────────────────
+
+#[cfg(all(test, unix))]
+mod credential_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    const TOKEN: &str = "ghp_DUMMYTOKENforTESTSonly0000000000000";
+
+    /// A one-purpose HTTP server: answers every request without credentials
+    /// with `401 Basic` (or a redirect), and records each `Authorization`
+    /// header it receives.
+    struct Server {
+        port: u16,
+        auth: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Server {
+        fn start(ip: &str, redirect_to: Option<String>) -> Self {
+            let listener = TcpListener::bind((ip, 0)).expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let auth = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&auth);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                    let mut has_auth = false;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if line.to_ascii_lowercase().starts_with("authorization:") {
+                            seen.lock().unwrap().push(line.trim().to_owned());
+                            has_auth = true;
+                        }
+                    }
+                    let reply = match (&redirect_to, has_auth) {
+                        (Some(to), false) => format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        ),
+                        (_, false) => "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                        (_, true) => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                    };
+                    let _ = stream.write_all(reply.as_bytes());
+                    let mut sink = Vec::new();
+                    let _ = reader.read_to_end(&mut sink);
+                }
+            });
+            Self { port, auth }
+        }
+
+        fn auth_headers(&self) -> Vec<String> {
+            self.auth.lock().unwrap().clone()
+        }
+    }
+
+    fn basic(user: &str, pw: &str) -> String {
+        // Minimal base64 for the expected header.
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let data = format!("{user}:{pw}").into_bytes();
+        let mut out = String::new();
+        for c in data.chunks(3) {
+            let n = (u32::from(c[0]) << 16)
+                | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*c.get(2).unwrap_or(&0));
+            for i in 0..4 {
+                if i <= c.len() {
+                    out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        format!("Authorization: Basic {out}")
+    }
+
+    fn authed() -> CloneOptions {
+        CloneOptions {
+            token: Some(TOKEN.to_owned()),
+            stall_timeout_secs: 20,
+            ..CloneOptions::unauthenticated()
+        }
+    }
+
+    /// Neither argv nor the temp dir ever holds the token; it travels only in
+    /// the child's environment, and the helper list is reset first.
+    #[tokio::test]
+    async fn token_is_never_in_argv_and_no_file_is_created() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("seen.txt");
+        let script = dir.path().join("fake-git");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{{ tr '\\0' ' ' < /proc/$$/cmdline; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
+                seen.display()
+            ),
+        )
+        .expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let runner = ProcessGitRunner::with_program(&script);
+        runner
+            .mirror_clone(
+                "https://ghes.example.com/o/r.git",
+                &dir.path().join("r.git"),
+                &authed(),
+            )
+            .await
+            .expect("clone");
+        let text = std::fs::read_to_string(&seen).expect("seen");
+        let (cmdline, env) = text.split_once('\n').expect("two parts");
+        assert!(!cmdline.contains(TOKEN), "token in cmdline: {cmdline}");
+        assert!(cmdline.contains("-c credential.helper= "), "{cmdline}");
+        assert!(
+            cmdline.contains("credential.https://ghes.example.com.helper="),
+            "{cmdline}"
+        );
+        assert!(env.contains(&format!("env={TOKEN}")), "{env}");
+        assert!(env.contains("askpass=\n"), "no askpass is set: {env}");
+        let leftover = std::env::temp_dir().join(format!("gh-backup-{}", std::process::id()));
+        assert!(!leftover.exists(), "no askpass directory may be created");
+    }
+
+    /// Real git: a fresh clone offers the token (as `x-access-token`) to the
+    /// clone host.
+    #[tokio::test]
+    async fn clone_offers_the_token_to_the_clone_host() {
+        let server = Server::start("127.0.0.1", None);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("http://127.0.0.1:{}/o/r.git", server.port);
+        let result = ProcessGitRunner::new()
+            .mirror_clone(&url, &dir.path().join("r.git"), &authed())
+            .await;
+        assert!(result.is_err(), "the fake server has no repository");
+        assert!(
+            server
+                .auth_headers()
+                .contains(&basic("x-access-token", TOKEN)),
+            "{:?}",
+            server.auth_headers()
+        );
+    }
+
+    /// Real git, update path: an existing repository is fetched with the
+    /// token too.
+    #[tokio::test]
+    async fn update_offers_the_token_to_the_clone_host() {
+        let server = Server::start("127.0.0.1", None);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("r.git");
+        let url = format!("http://127.0.0.1:{}/o/r.git", server.port);
+        let d = dest.to_str().unwrap();
+        for args in [
+            vec!["init", "--bare", "-q", d],
+            vec!["-C", d, "remote", "add", "origin", &url],
+        ] {
+            assert!(Command::new("git")
+                .args(&args)
+                .status()
+                .expect("git")
+                .success());
+        }
+        let result = ProcessGitRunner::new()
+            .mirror_clone(&url, &dest, &authed())
+            .await;
+        assert!(result.is_err());
+        assert!(
+            server
+                .auth_headers()
+                .contains(&basic("x-access-token", TOKEN)),
+            "{:?}",
+            server.auth_headers()
+        );
+    }
+
+    /// A redirect to another host (as a hostile server or `.lfsconfig` would
+    /// cause) is never offered the token.
+    #[tokio::test]
+    async fn token_is_not_offered_to_a_different_host() {
+        let other = Server::start("127.0.0.2", None);
+        let origin = Server::start(
+            "127.0.0.1",
+            Some(format!(
+                "http://127.0.0.2:{}/o/r.git/info/refs?service=git-upload-pack",
+                other.port
+            )),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("http://127.0.0.1:{}/o/r.git", origin.port);
+        let result = ProcessGitRunner::new()
+            .mirror_clone(&url, &dir.path().join("r.git"), &authed())
+            .await;
+        assert!(result.is_err());
+        assert!(
+            other.auth_headers().is_empty(),
+            "token leaked to another host: {:?}",
+            other.auth_headers()
+        );
+    }
+
+    /// Without a token (public repos) no credential configuration is added.
+    #[tokio::test]
+    async fn unauthenticated_clone_sends_no_credentials() {
+        let server = Server::start("127.0.0.1", None);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("http://127.0.0.1:{}/o/r.git", server.port);
+        let opts = CloneOptions {
+            stall_timeout_secs: 20,
+            ..CloneOptions::unauthenticated()
+        };
+        let _ = ProcessGitRunner::new()
+            .mirror_clone(&url, &dir.path().join("r.git"), &opts)
+            .await;
+        assert!(server.auth_headers().is_empty());
+    }
+
+    fn fake_git(dir: &Path, body: &str) -> ProcessGitRunner {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-git-2");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        ProcessGitRunner::with_program(script)
+    }
+
+    /// Updating a repository we manage trusts exactly that path (never `*`),
+    /// so a repository owned by another uid does not fail with "dubious
+    /// ownership" forever.
+    #[tokio::test]
+    async fn updates_trust_exactly_the_managed_repository() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("argv.txt");
+        let runner = fake_git(dir.path(), &format!("echo \"$@\" > '{}'", seen.display()));
+        let dest = dir.path().join("r.git");
+        std::fs::create_dir(&dest).expect("mkdir");
+        runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &authed())
+            .await
+            .expect("update");
+        let argv = std::fs::read_to_string(&seen).expect("argv");
+        let real = dest.canonicalize().expect("canonical");
+        assert!(
+            argv.contains(&format!("-c safe.directory={} ", real.display())),
+            "{argv}"
+        );
+        assert!(!argv.contains("safe.directory=*"), "{argv}");
+    }
+
+    /// The "dubious ownership" failure carries an actionable hint.
+    #[tokio::test]
+    async fn dubious_ownership_error_gets_a_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = fake_git(
+            dir.path(),
+            "echo \"fatal: detected dubious ownership in repository at '/x'\" >&2; exit 128",
+        );
+        let dest = dir.path().join("r.git");
+        std::fs::create_dir(&dest).expect("mkdir");
+        let err = runner
+            .mirror_clone("https://example.invalid/r.git", &dest, &authed())
+            .await
+            .expect_err("fails");
+        let text = err.to_string();
+        assert!(text.contains("dubious ownership"), "{text}");
+        assert!(text.contains("--user") && text.contains("chown"), "{text}");
     }
 }
