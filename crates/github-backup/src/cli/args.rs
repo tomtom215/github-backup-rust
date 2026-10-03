@@ -199,13 +199,14 @@ pub struct Args {
     /// GitHub OAuth App client ID (required when using `--device-auth`).
     ///
     /// Create an OAuth App at <https://github.com/settings/developers>.
-    /// Can also be set via the `GITHUB_OAUTH_CLIENT_ID` environment variable.
-    #[arg(
-        long,
-        value_name = "CLIENT_ID",
-        env = "GITHUB_OAUTH_CLIENT_ID",
-        requires = "device_auth"
-    )]
+    /// Can also be set via the `GITHUB_OAUTH_CLIENT_ID` environment variable,
+    /// which is ignored unless `--device-auth` is given.
+    //
+    // No clap `requires = "device_auth"` here: clap would also apply it to the
+    // environment variable, so merely having `GITHUB_OAUTH_CLIENT_ID` set (or
+    // forwarded as an empty string by Compose/Unraid) would reject every run.
+    // `Args::check_dependencies` enforces it for the command-line flag only.
+    #[arg(long, value_name = "CLIENT_ID", env = "GITHUB_OAUTH_CLIENT_ID")]
     pub oauth_client_id: Option<String>,
 
     /// OAuth scopes to request (space-separated).
@@ -589,13 +590,15 @@ pub struct Args {
 
     /// API token for the mirror destination.
     ///
-    /// Can also be set via the `MIRROR_TOKEN` environment variable.
+    /// Can also be set via the `MIRROR_TOKEN` environment variable, which is
+    /// ignored unless `--mirror-to` is given.
+    //
+    // No clap `requires = "mirror_to"`: see `oauth_client_id`.
     #[arg(
         long,
         value_name = "TOKEN",
         env = "MIRROR_TOKEN",
-        hide_env_values = true,
-        requires = "mirror_to"
+        hide_env_values = true
     )]
     pub mirror_token: Option<String>,
 
@@ -633,25 +636,30 @@ pub struct Args {
 
     /// AWS access key ID.
     ///
-    /// Can also be set via the `AWS_ACCESS_KEY_ID` environment variable.
+    /// Can also be set via the `AWS_ACCESS_KEY_ID` environment variable, which
+    /// is ignored unless `--s3-bucket` is given — so having AWS credentials
+    /// exported for other tools never affects a backup that does not use S3.
+    //
+    // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
     #[arg(
         long,
         value_name = "KEY",
         env = "AWS_ACCESS_KEY_ID",
-        hide_env_values = true,
-        requires = "s3_bucket"
+        hide_env_values = true
     )]
     pub s3_access_key: Option<String>,
 
     /// AWS secret access key.
     ///
-    /// Can also be set via the `AWS_SECRET_ACCESS_KEY` environment variable.
+    /// Can also be set via the `AWS_SECRET_ACCESS_KEY` environment variable,
+    /// which is ignored unless `--s3-bucket` is given.
+    //
+    // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
     #[arg(
         long,
         value_name = "SECRET",
         env = "AWS_SECRET_ACCESS_KEY",
-        hide_env_values = true,
-        requires = "s3_bucket"
+        hide_env_values = true
     )]
     pub s3_secret_key: Option<String>,
 

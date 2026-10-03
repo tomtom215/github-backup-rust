@@ -6,7 +6,7 @@
 use std::io;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use clap_complete::{generate, Shell};
 use tracing::{error, info, warn};
 
@@ -56,10 +56,13 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let mut args = Args::parse();
+    let (mut args, matches) = Args::parse_cli();
 
     // ── TUI mode ──────────────────────────────────────────────────────────────
     if args.tui {
+        if let Err(e) = args.check_dependencies(&matches) {
+            e.exit();
+        }
         let initial = InitialConfig {
             token: args.token.clone(),
             owner: args.owner.clone(),
@@ -85,6 +88,13 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+
+    // Flag-dependency rules that clap cannot express without also applying
+    // them to environment variables (see `Args::check_dependencies`).  Checked
+    // after the config merge so a config-file value satisfies them.
+    if let Err(e) = args.check_dependencies(&matches) {
+        e.exit();
     }
 
     // ── List recommended OAuth scopes and exit (after config merge so the
@@ -1558,15 +1568,13 @@ mod tests {
 
     #[test]
     fn invoked_without_arguments_true_for_bare_run() {
-        use clap::Parser;
-        let a = Args::parse_from(["github-backup"]);
+        let a = crate::cli::test_support::parse(&["github-backup"]);
         assert!(invoked_without_arguments(&a));
     }
 
     #[test]
     fn invoked_without_arguments_false_for_owner() {
-        use clap::Parser;
-        let a = Args::parse_from(["github-backup", "octocat"]);
+        let a = crate::cli::test_support::parse(&["github-backup", "octocat"]);
         assert!(!invoked_without_arguments(&a));
     }
 

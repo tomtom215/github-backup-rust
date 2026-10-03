@@ -139,13 +139,13 @@ pub fn render_recommendation(args: &Args) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::test_support::parse;
     use crate::cli::Args;
-    use clap::Parser;
 
     fn args(extra: &[&str]) -> Args {
         let mut argv = vec!["github-backup", "octocat", "--token", "ghp_x"];
         argv.extend(extra);
-        Args::parse_from(argv)
+        parse(&argv)
     }
 
     #[test]

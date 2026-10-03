@@ -1,11 +1,106 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! `impl Args` — config-file merge and conversion to `BackupOptions`.
+//! `impl Args` — process-level parsing, config-file merge and conversion to
+//! `BackupOptions`.
+
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 
 use super::args::Args;
 
+/// Treats a blank string option as unset and trims surrounding whitespace.
+fn normalize(value: &mut Option<String>) {
+    if let Some(text) = value.as_mut() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            *value = None;
+        } else if trimmed.len() != text.len() {
+            *text = trimmed.to_string();
+        }
+    }
+}
+
 impl Args {
+    /// Parses the process arguments and environment.
+    ///
+    /// Behaves like [`clap::Parser::parse`] (a clap-formatted message and exit
+    /// status 2 on invalid input) but additionally returns the [`ArgMatches`],
+    /// which [`Args::check_dependencies`] needs to tell command-line flags
+    /// from environment variables, and normalises blank option values.
+    pub fn parse_cli() -> (Self, ArgMatches) {
+        let matches = Self::command().get_matches();
+        let mut args = Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        args.normalize_env_values();
+        (args, matches)
+    }
+
+    /// Treats blank string options as unset and trims surrounding whitespace.
+    ///
+    /// Container launchers (Docker Compose, Kubernetes manifests, Unraid) pass
+    /// every optional variable to the process as an *empty string*, and clap
+    /// counts a set-but-empty variable as a supplied value: an empty
+    /// `GITHUB_API_URL` would otherwise be used as an (invalid) API URL and an
+    /// empty `GITHUB_TOKEN` as an (invalid) credential.  Whitespace — usually
+    /// a trailing newline pasted along with a token — is trimmed because it
+    /// would make the value an invalid HTTP header.
+    pub(crate) fn normalize_env_values(&mut self) {
+        for value in [
+            &mut self.token,
+            &mut self.oauth_client_id,
+            &mut self.api_url,
+            &mut self.clone_host,
+            &mut self.mirror_token,
+            &mut self.s3_access_key,
+            &mut self.s3_secret_key,
+            &mut self.encrypt_key,
+            &mut self.notify_webhook,
+        ] {
+            normalize(value);
+        }
+    }
+
+    /// Rejects command-line flags whose companion flag is missing.
+    ///
+    /// These pairs used to be declared with clap's `requires`, but clap
+    /// applies `requires` to environment variables as well, so an ambient
+    /// `AWS_ACCESS_KEY_ID` (or an empty `MIRROR_TOKEN` forwarded by Compose)
+    /// made every run fail with "required arguments were not provided".  A
+    /// credential that merely arrives through the environment is now ignored
+    /// when its feature is not in use; one the user *typed* without the
+    /// matching flag is still an error.
+    ///
+    /// Call after [`Args::merge_config`] so a companion value supplied by the
+    /// config file counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a clap error (print it with [`clap::Error::exit`]).
+    pub fn check_dependencies(&self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        let typed = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+        let missing = |flag: &str, needs: &str| {
+            Err(Self::command().error(
+                ErrorKind::MissingRequiredArgument,
+                format!("the argument '{flag}' requires '{needs}' to be given as well"),
+            ))
+        };
+
+        if typed("s3_access_key") && self.s3_access_key.is_some() && self.s3_bucket.is_none() {
+            return missing("--s3-access-key", "--s3-bucket <BUCKET>");
+        }
+        if typed("s3_secret_key") && self.s3_secret_key.is_some() && self.s3_bucket.is_none() {
+            return missing("--s3-secret-key", "--s3-bucket <BUCKET>");
+        }
+        if typed("mirror_token") && self.mirror_token.is_some() && self.mirror_to.is_none() {
+            return missing("--mirror-token", "--mirror-to <URL>");
+        }
+        if typed("oauth_client_id") && self.oauth_client_id.is_some() && !self.device_auth {
+            return missing("--oauth-client-id", "--device-auth");
+        }
+        Ok(())
+    }
+
     /// Merges a loaded `ConfigFile` into this [`Args`], with CLI values taking
     /// precedence over config file values.
     ///
