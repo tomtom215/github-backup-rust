@@ -11,7 +11,7 @@
 //! # Terminal safety
 //!
 //! Raw mode, the alternate screen and bracketed paste are owned by a
-//! [`TerminalGuard`] whose `Drop` restores them, so every way out of
+//! `TerminalGuard` whose `Drop` restores them, so every way out of
 //! [`run_tui`] (normal quit, error, unwinding panic) leaves the shell usable.
 //! A panic hook restores the terminal *before* the panic message is printed so
 //! the message is readable, and SIGINT/SIGTERM/SIGHUP are turned into an

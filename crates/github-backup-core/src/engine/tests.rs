@@ -682,3 +682,29 @@ async fn a_repository_named_like_a_path_is_refused_not_cloned() {
     assert_eq!(urls.len(), 1, "{urls:?}");
     assert!(urls[0].ends_with("/fine.git"));
 }
+
+/// Regression: cancelling while the repository listing is in flight (a server
+/// that never answers) must end the run at once, not after the client timeout.
+#[tokio::test]
+async fn cancelling_interrupts_the_repository_listing_request() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let client = MockBackupClient::new().with_repo_listing_that_never_answers();
+    let engine = engine_with(
+        client,
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        opts(),
+    );
+    let cancel = engine.cancel_handle();
+
+    let run = tokio::spawn(async move { engine.run(OWNER).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancel.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("cancel must end the run promptly")
+        .expect("no panic");
+    assert!(matches!(result, Err(CoreError::Interrupted)), "{result:?}");
+}

@@ -258,7 +258,12 @@ where
         }
 
         // ── Repositories ───────────────────────────────────────────────────
-        let repos = self.fetch_repos(owner).await?;
+        // Not a step (the run cannot continue without the list), but it must
+        // still give way at once to a cancellation.
+        let repos = tokio::select! {
+            repos = self.fetch_repos(owner) => repos?,
+            () = control.cancelled() => return Err(CoreError::Interrupted),
+        };
         let repo_count = repos.len();
         info!(owner, count = repo_count, "fetched repository list");
         stats.add_discovered(repo_count as u64);

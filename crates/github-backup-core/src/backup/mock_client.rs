@@ -27,6 +27,8 @@ pub struct MockBackupClient {
 
 #[derive(Default)]
 struct MockData {
+    /// `list_user_repos` never completes (simulates a server that never answers).
+    hang_repo_listing: bool,
     user_repos: Vec<Repository>,
     gists: Vec<Gist>,
     starred_gists: Vec<Gist>,
@@ -98,6 +100,12 @@ impl MockBackupClient {
             Some(values) => Page::from_values(values.clone()),
             None => Page::from_typed(typed(&data)),
         }
+    }
+
+    /// Makes the repository listing hang forever, like an unresponsive server.
+    pub fn with_repo_listing_that_never_answers(self) -> Self {
+        self.inner.lock().unwrap().hang_repo_listing = true;
+        self
     }
 
     /// Pre-loads the issues list.
@@ -308,6 +316,9 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _username: &'a str,
     ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>> {
+        if self.inner.lock().unwrap().hang_repo_listing {
+            return Box::pin(std::future::pending());
+        }
         let d = self.page("user_repos", |m| m.user_repos.clone());
         Box::pin(async move { Ok(d) })
     }
