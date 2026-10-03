@@ -79,7 +79,7 @@ async fn main() -> ExitCode {
             Ok(cfg) => {
                 info!(path = %config_path.display(), "loaded config file");
                 setup::check_config_permissions(config_path);
-                args.merge_config(&cfg);
+                args.merge_config_with(&cfg, &matches);
             }
             Err(e) => {
                 error!("{e}");
@@ -122,6 +122,43 @@ async fn main() -> ExitCode {
         }
     }
 
+    // Decode encryption key early so we fail fast before any network calls.
+    let encrypt_key = match decode_encrypt_key(args.encrypt_key.as_deref()) {
+        Ok(k) => k,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // ── Decrypt mode ──────────────────────────────────────────────────────
+    // Needs no OWNER: it only reads a file, so it is handled before the owner
+    // checks below.
+    if args.decrypt {
+        let input_path = match args.decrypt_input.as_ref() {
+            Some(p) => p,
+            None => {
+                error!("--decrypt requires --decrypt-input <FILE>");
+                return ExitCode::FAILURE;
+            }
+        };
+        let output_path = match args.decrypt_output.as_ref() {
+            Some(p) => p,
+            None => {
+                error!("--decrypt requires --decrypt-output <FILE>");
+                return ExitCode::FAILURE;
+            }
+        };
+        let key = match encrypt_key.as_deref() {
+            Some(k) => k,
+            None => {
+                error!("--decrypt requires --encrypt-key or BACKUP_ENCRYPT_KEY");
+                return ExitCode::FAILURE;
+            }
+        };
+        return modes::run_decrypt(input_path, output_path, key);
+    }
+
     // Validate that an owner was supplied (via CLI or config file).
     if args.owner.is_none() {
         // If the user invoked us with no useful arguments at all (no owner,
@@ -155,41 +192,6 @@ async fn main() -> ExitCode {
         let output = OutputConfig::new(&output_path);
         let json_dir = output.owner_json_dir(owner);
         return modes::run_verify(&json_dir);
-    }
-
-    // Decode encryption key early so we fail fast before any network calls.
-    let encrypt_key = match decode_encrypt_key(args.encrypt_key.as_deref()) {
-        Ok(k) => k,
-        Err(e) => {
-            error!("{e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // ── Decrypt mode ──────────────────────────────────────────────────────
-    if args.decrypt {
-        let input_path = match args.decrypt_input.as_ref() {
-            Some(p) => p,
-            None => {
-                error!("--decrypt requires --decrypt-input <FILE>");
-                return ExitCode::FAILURE;
-            }
-        };
-        let output_path = match args.decrypt_output.as_ref() {
-            Some(p) => p,
-            None => {
-                error!("--decrypt requires --decrypt-output <FILE>");
-                return ExitCode::FAILURE;
-            }
-        };
-        let key = match encrypt_key.as_deref() {
-            Some(k) => k,
-            None => {
-                error!("--decrypt requires --encrypt-key or BACKUP_ENCRYPT_KEY");
-                return ExitCode::FAILURE;
-            }
-        };
-        return modes::run_decrypt(input_path, output_path, key);
     }
 
     // Warn when --encrypt-key was supplied on the command line (visible in ps aux).

@@ -106,7 +106,35 @@ impl Args {
     ///
     /// Call this after parsing CLI args but before calling
     /// [`into_backup_options`][Args::into_backup_options].
+    #[cfg(test)]
     pub fn merge_config(&mut self, cfg: &github_backup_types::config::ConfigFile) {
+        // Without the parse matches the best available guess is "anything but
+        // the default was typed".
+        let explicit = self.clone_type != crate::cli::clone_type::CliCloneType::Mirror;
+        self.merge_config_inner(cfg, explicit);
+    }
+
+    /// Like [`merge_config`](Self::merge_config), but uses the parse matches to
+    /// tell an explicit `--clone-type mirror` from the default, so the command
+    /// line always beats the config file — including when it asks for the default.
+    pub fn merge_config_with(
+        &mut self,
+        cfg: &github_backup_types::config::ConfigFile,
+        matches: &clap::ArgMatches,
+    ) {
+        use clap::parser::ValueSource;
+        let explicit = matches!(
+            matches.value_source("clone_type"),
+            Some(ValueSource::CommandLine | ValueSource::EnvVariable)
+        );
+        self.merge_config_inner(cfg, explicit);
+    }
+
+    fn merge_config_inner(
+        &mut self,
+        cfg: &github_backup_types::config::ConfigFile,
+        clone_type_explicit: bool,
+    ) {
         // Owner: config file wins only if CLI did not provide it.
         if self.owner.is_none() {
             if let Some(ref o) = cfg.owner {
@@ -150,8 +178,8 @@ impl Args {
         self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
         self.lfs |= cfg.lfs.unwrap_or(false);
         self.no_prune |= cfg.no_prune.unwrap_or(false);
-        // Clone type: config supplies default only when CLI left it at Mirror.
-        if self.clone_type == crate::cli::clone_type::CliCloneType::Mirror {
+        // Clone type: the config supplies it only when the command line did not.
+        if !clone_type_explicit {
             if let Some(ref ct) = cfg.clone_type {
                 use github_backup_types::config::CloneType;
                 self.clone_type = match ct {
@@ -318,6 +346,10 @@ impl Args {
                     since: self.since,
                     full: self.full,
                     clone_host: self.clone_host,
+                    // `--all` leaves these opt-in categories off; an explicit
+                    // flag must still turn them on.
+                    clone_starred: self.clone_starred,
+                    action_runs: self.action_runs,
                     ..BackupOptions::all()
                 },
             );

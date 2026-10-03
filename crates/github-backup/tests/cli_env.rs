@@ -170,3 +170,32 @@ fn explicit_flags_with_their_dependency_are_accepted() {
     );
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 }
+
+/// Regression (docs audit DA-05): the documented `--decrypt` command needed a
+/// dummy OWNER even though it only reads a file.
+#[test]
+fn decrypt_needs_no_owner() {
+    let dir = std::env::temp_dir().join(format!("gbk-decrypt-{}", std::process::id()));
+    let out = run(
+        &[
+            "--decrypt",
+            "--decrypt-input",
+            dir.join("missing.enc").to_str().unwrap(),
+            "--decrypt-output",
+            dir.join("out.json").to_str().unwrap(),
+            "--encrypt-key",
+            &"ab".repeat(32),
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no owner specified") && !stderr.contains("quickstart"),
+        "decrypt must not ask for an OWNER: {stderr}"
+    );
+    assert!(!out.status.success(), "the input file does not exist");
+    assert!(
+        stderr.to_lowercase().contains("missing.enc") || stderr.to_lowercase().contains("read"),
+        "the error should be about the missing input: {stderr}"
+    );
+}

@@ -481,3 +481,61 @@ fn typed_credential_is_satisfied_by_a_companion_from_the_config_file() {
     args.merge_config(&cfg);
     assert!(args.check_dependencies(&matches).is_ok());
 }
+
+/// Regression (docs audit DA-13): `--all` silently dropped `--clone-starred`
+/// and `--action-runs`, the two opt-in categories it leaves off.
+#[test]
+fn all_still_honours_the_opt_in_categories_asked_for_explicitly() {
+    let args = parse(&[
+        "github-backup",
+        "octocat",
+        "--all",
+        "--clone-starred",
+        "--action-runs",
+    ]);
+    let (_, _, opts) = args.into_backup_options();
+    assert!(
+        opts.clone_starred,
+        "--all --clone-starred must clone starred repos"
+    );
+    assert!(
+        opts.action_runs,
+        "--all --action-runs must fetch workflow runs"
+    );
+    assert!(opts.issues, "--all still enables the rest");
+
+    let plain = parse(&["github-backup", "octocat", "--all"]);
+    let (_, _, opts) = plain.into_backup_options();
+    assert!(
+        !opts.clone_starred && !opts.action_runs,
+        "still opt-in without the flags"
+    );
+}
+
+/// Regression (DA-17): "CLI always overrides config" was false for
+/// `--clone-type mirror`, because mirror is the default and so looked absent.
+#[test]
+fn an_explicit_clone_type_mirror_beats_the_config_file() {
+    use github_backup_types::config::{CloneType, ConfigFile};
+    let cfg = ConfigFile {
+        clone_type: Some(CloneType::Bare),
+        ..Default::default()
+    };
+
+    let (mut explicit, matches) =
+        try_parse_with_matches(&["github-backup", "octocat", "--clone-type", "mirror"])
+            .expect("parse");
+    explicit.merge_config_with(&cfg, &matches);
+    let (_, _, opts) = explicit.into_backup_options();
+    assert_eq!(opts.clone_type, CloneType::Mirror);
+
+    let (mut absent, matches) =
+        try_parse_with_matches(&["github-backup", "octocat"]).expect("parse");
+    absent.merge_config_with(&cfg, &matches);
+    let (_, _, opts) = absent.into_backup_options();
+    assert_eq!(
+        opts.clone_type,
+        CloneType::Bare,
+        "the config applies when the CLI is silent"
+    );
+}
