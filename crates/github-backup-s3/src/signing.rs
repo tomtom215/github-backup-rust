@@ -3,42 +3,103 @@
 
 //! AWS Signature Version 4 (SigV4) request signing for S3.
 //!
-//! Implements the signing algorithm documented at:
-//! <https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html>
+//! Implements the signing algorithm documented at
+//! <https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html>.
+//!
+//! The signer signs **exactly the headers it is given** (plus the three
+//! `x-amz-*` headers it adds itself).  The HTTP client sets every header from
+//! that same list, so the set of signed headers can never differ from the set
+//! of headers actually sent — the defect that made compliant servers reject
+//! every `HEAD`, `DELETE`, `LIST` and multipart request in earlier releases.
 //!
 //! This module is intentionally self-contained and dependency-light: it only
 //! uses `sha2` and `hmac` from the RustCrypto project, plus the standard
-//! library for everything else.
+//! library for everything else.  It is validated against the four worked
+//! examples AWS publishes for S3 (see the tests below).
 
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
+
+use crate::encoding::{canonical_query, encode_path};
 
 type HmacSha256 = Hmac<Sha256>;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// AWS SigV4 signer for a specific service and region.
-#[derive(Debug, Clone)]
+///
+/// Holds the credentials; the secret access key and the session token are
+/// wiped from memory when the signer is dropped and never appear in `Debug`
+/// output.
+#[derive(Clone)]
 pub struct Signer {
     access_key_id: String,
-    secret_access_key: String,
+    secret_access_key: Zeroizing<String>,
+    session_token: Option<Zeroizing<String>>,
     region: String,
     service: String,
 }
 
-/// A set of additional headers to add to the request for SigV4 signing.
+impl fmt::Debug for Signer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Signer")
+            .field("region", &self.region)
+            .field("service", &self.service)
+            .field("credentials", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Everything the signer needs to know about one request.
 ///
-/// The caller should add these headers to the HTTP request before sending.
+/// `path` and `query` are the **raw, unencoded** values; the signer encodes
+/// them with [`encode_path`] / [`canonical_query`], and the client uses the
+/// same functions for the request line.
+#[derive(Debug, Clone, Copy)]
+pub struct SigningInput<'a> {
+    /// HTTP method in upper case (`"GET"`, `"PUT"`, …).
+    pub method: &'a str,
+    /// Absolute request path before percent-encoding, e.g. `/bucket/my key`.
+    pub path: &'a str,
+    /// Query parameters before percent-encoding.
+    pub query: &'a [(&'a str, &'a str)],
+    /// Headers that **will be sent** and must be signed.  Names are matched
+    /// case-insensitively.  Must contain `host`; must not contain the
+    /// `x-amz-date`, `x-amz-content-sha256` or `x-amz-security-token` headers
+    /// the signer adds itself.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// Lower-case hex SHA-256 of the request body.
+    pub payload_sha256: &'a str,
+}
+
+/// The result of signing a request.
+///
+/// The caller must send the request with every header it passed in
+/// [`SigningInput::headers`] plus `x-amz-date`, `x-amz-content-sha256`,
+/// `x-amz-security-token` (when present) and `Authorization` from this value.
 #[derive(Debug, Clone)]
-pub struct SignedHeaders {
+pub struct SignedRequest {
     /// The `x-amz-date` header value (`YYYYMMDDTHHMMSSZ`).
     pub amz_date: String,
     /// The `x-amz-content-sha256` header value.
     pub content_sha256: String,
+    /// The `x-amz-security-token` header value, if temporary credentials are
+    /// in use.
+    pub security_token: Option<String>,
     /// The `Authorization` header value.
     pub authorization: String,
+    /// The semicolon-separated `SignedHeaders` list.
+    pub signed_headers: String,
+    /// The canonical URI that was signed (use it as the request path).
+    pub canonical_uri: String,
+    /// The canonical query string that was signed (use it as the query).
+    pub canonical_query: String,
+    /// The canonical request that was hashed (diagnostics and tests only).
+    pub canonical_request: String,
 }
 
 impl Signer {
@@ -47,176 +108,142 @@ impl Signer {
     pub fn new_s3(access_key_id: String, secret_access_key: String, region: String) -> Self {
         Self {
             access_key_id,
-            secret_access_key,
+            secret_access_key: Zeroizing::new(secret_access_key),
+            session_token: None,
             region,
             service: "s3".to_string(),
         }
     }
 
-    /// Computes SigV4 signing headers for an S3 `PutObject` request.
-    ///
-    /// `host` should be the S3 hostname (e.g., `bucket.s3.amazonaws.com`).
-    /// `path` should be the URL path (e.g., `/key/to/object`).
-    /// `body` is the full request body.
-    ///
-    /// Returns a [`SignedHeaders`] that the caller must add to the HTTP request.
+    /// Adds an `AWS_SESSION_TOKEN`-style temporary-credential token.  It is
+    /// sent (and signed) as `x-amz-security-token`.
     #[must_use]
-    pub fn sign_put(
-        &self,
-        host: &str,
-        path: &str,
-        content_type: &str,
-        body: &[u8],
-    ) -> SignedHeaders {
-        let (datetime, date) = utc_datetime_pair();
-        self.sign("PUT", host, path, "", content_type, body, &datetime, &date)
+    pub fn with_session_token(mut self, token: Option<String>) -> Self {
+        self.session_token = token.map(Zeroizing::new);
+        self
     }
 
-    /// Computes SigV4 signing headers for an arbitrary request.
-    ///
-    /// - `method`       — HTTP method (`"POST"`, `"DELETE"`, etc.)
-    /// - `host`         — Host header value
-    /// - `path`         — URL path (e.g. `/key/to/object`)
-    /// - `query`        — Pre-encoded query string without `?` (e.g.
-    ///   `"partNumber=1&uploadId=abc"`)
-    /// - `content_type` — `Content-Type` header value
-    /// - `body`         — Request body bytes
+    /// Signs `input` with the current time.
     #[must_use]
-    pub fn sign_request(
-        &self,
-        method: &str,
-        host: &str,
-        path: &str,
-        query: &str,
-        content_type: &str,
-        body: &[u8],
-    ) -> SignedHeaders {
-        let (datetime, date) = utc_datetime_pair();
-        self.sign(
-            method,
-            host,
-            path,
-            query,
-            content_type,
-            body,
-            &datetime,
-            &date,
-        )
+    pub fn sign(&self, input: &SigningInput<'_>) -> SignedRequest {
+        let (datetime, _) = utc_datetime_pair();
+        self.sign_at(input, &datetime)
     }
 
-    /// Computes SigV4 signing headers for an S3 `HeadObject` or `GetObject`
-    /// request (empty body).
-    #[must_use]
-    pub fn sign_get(&self, host: &str, path: &str) -> SignedHeaders {
-        let (datetime, date) = utc_datetime_pair();
-        self.sign(
-            "HEAD",
-            host,
-            path,
-            "",
-            "application/octet-stream",
-            b"",
-            &datetime,
-            &date,
-        )
-    }
-
-    /// Internal signing implementation.
+    /// Signs `input` as if it were sent at `datetime` (`YYYYMMDDTHHMMSSZ`).
     ///
-    /// `method` is the HTTP method (e.g., `"PUT"`, `"HEAD"`).
-    /// `query` is the pre-encoded query string (empty for simple PutObject).
-    #[allow(clippy::too_many_arguments)]
-    fn sign(
-        &self,
-        method: &str,
-        host: &str,
-        path: &str,
-        query: &str,
-        content_type: &str,
-        body: &[u8],
-        datetime: &str,
-        date: &str,
-    ) -> SignedHeaders {
-        let payload_hash = sha256_hex(body);
+    /// Exposed so that tests can reproduce published known-answer vectors.
+    #[must_use]
+    pub fn sign_at(&self, input: &SigningInput<'_>, datetime: &str) -> SignedRequest {
+        let date = &datetime[..8];
 
-        // Canonical headers — must be sorted by lowercase header name.
-        let canonical_headers = format!(
-            "content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{datetime}\n"
-        );
-        let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+        // Canonical headers: caller's headers + the ones the signer owns,
+        // lower-cased, sorted by name, values trimmed and whitespace-collapsed.
+        let mut headers: Vec<(String, String)> = input
+            .headers
+            .iter()
+            .map(|(n, v)| (n.to_ascii_lowercase(), normalize_header_value(v)))
+            .collect();
+        headers.push((
+            "x-amz-content-sha256".to_string(),
+            input.payload_sha256.to_string(),
+        ));
+        headers.push(("x-amz-date".to_string(), datetime.to_string()));
+        if let Some(token) = &self.session_token {
+            headers.push((
+                "x-amz-security-token".to_string(),
+                normalize_header_value(token),
+            ));
+        }
+        headers.sort();
 
-        // Step 1: Canonical Request.
-        let canonical_uri = uri_encode_path(path);
+        let mut canonical_headers = String::new();
+        for (name, value) in &headers {
+            canonical_headers.push_str(name);
+            canonical_headers.push(':');
+            canonical_headers.push_str(value);
+            canonical_headers.push('\n');
+        }
+        let signed_headers = headers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(";");
+
+        // Step 1: canonical request.
+        let canonical_uri = encode_path(input.path);
+        let canonical_query = canonical_query(input.query);
         let canonical_request = format!(
-            "{method}\n{canonical_uri}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+            "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{}",
+            input.method, input.payload_sha256
         );
 
-        // Step 2: String to Sign.
+        // Step 2: string to sign.
         let credential_scope = format!("{date}/{}/{}/aws4_request", self.region, self.service);
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{datetime}\n{credential_scope}\n{}",
             sha256_hex(canonical_request.as_bytes())
         );
 
-        // Step 3: Signing Key (HMAC chain).
-        let k_secret = format!("AWS4{}", self.secret_access_key);
+        // Step 3: signing key (HMAC chain).
+        let k_secret = Zeroizing::new(format!("AWS4{}", self.secret_access_key.as_str()));
         let k_date = hmac_sha256(k_secret.as_bytes(), date.as_bytes());
         let k_region = hmac_sha256(&k_date, self.region.as_bytes());
         let k_service = hmac_sha256(&k_region, self.service.as_bytes());
         let k_signing = hmac_sha256(&k_service, b"aws4_request");
 
-        // Step 4: Signature.
+        // Step 4: signature.
         let signature = hex_encode(&hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
-        // Step 5: Authorization Header.
+        // Step 5: Authorization header.
         let authorization = format!(
             "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
             self.access_key_id
         );
 
-        SignedHeaders {
+        SignedRequest {
             amz_date: datetime.to_string(),
-            content_sha256: payload_hash,
+            content_sha256: input.payload_sha256.to_string(),
+            security_token: self.session_token.as_ref().map(|t| t.to_string()),
             authorization,
+            signed_headers,
+            canonical_uri,
+            canonical_query,
+            canonical_request,
         }
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Trims and collapses runs of whitespace, as the canonical-header rule asks.
+fn normalize_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Computes HMAC-SHA256 of `data` using `key`.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take a key of any length");
     mac.update(data);
-    mac.finalize().into_bytes().to_vec()
+    Zeroizing::new(mac.finalize().into_bytes().to_vec())
 }
 
 /// Computes SHA-256 of `data` and returns the result as a lowercase hex string.
-fn sha256_hex(data: &[u8]) -> String {
+#[must_use]
+pub fn sha256_hex(data: &[u8]) -> String {
     hex_encode(&Sha256::digest(data))
 }
 
 /// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// URI-encodes a path, encoding all characters except `/` and unreserved
-/// ASCII (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`).
-fn uri_encode_path(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len() * 2);
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                encoded.push(byte as char)
-            }
-            other => {
-                encoded.push('%');
-                encoded.push_str(&format!("{other:02X}"));
-            }
-        }
+#[must_use]
+pub fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // Writing to a `String` cannot fail.
+        let _ = write!(out, "{b:02x}");
     }
-    encoded
+    out
 }
 
 /// Returns the current UTC time as `(datetime, date)` where `datetime` is
@@ -271,14 +298,13 @@ fn unix_days_to_ymd(days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
 
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     #[test]
     fn sha256_hex_of_empty_is_known_value() {
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let h = sha256_hex(b"");
-        assert_eq!(
-            h,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+        assert_eq!(h, EMPTY_SHA256);
     }
 
     #[test]
@@ -306,19 +332,21 @@ mod tests {
         assert_eq!(result.len(), 32, "HMAC-SHA256 must produce 32 bytes");
         let hex = hex_encode(&result);
         assert_eq!(hex.len(), 64, "hex encoding of 32 bytes must be 64 chars");
-    }
-
-    #[test]
-    fn uri_encode_path_leaves_unreserved_chars_unchanged() {
+        // RFC 4231-style known answer for key "key" (widely published).
         assert_eq!(
-            uri_encode_path("/foo/bar-baz_qux.txt"),
-            "/foo/bar-baz_qux.txt"
+            hex,
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
     }
 
     #[test]
+    fn uri_encode_path_leaves_unreserved_chars_unchanged() {
+        assert_eq!(encode_path("/foo/bar-baz_qux.txt"), "/foo/bar-baz_qux.txt");
+    }
+
+    #[test]
     fn uri_encode_path_encodes_spaces_and_special_chars() {
-        let encoded = uri_encode_path("/path/with spaces/and+plus");
+        let encoded = encode_path("/path/with spaces/and+plus");
         assert!(encoded.contains("%20"), "space should be %20");
         assert!(encoded.contains("%2B"), "plus should be %2B");
     }
@@ -360,12 +388,16 @@ mod tests {
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             "us-east-1".to_string(),
         );
-        let headers = signer.sign_put(
-            "my-bucket.s3.amazonaws.com",
-            "/test/key.json",
-            "application/json",
-            b"{}",
-        );
+        let headers = signer.sign(&SigningInput {
+            method: "PUT",
+            path: "/test/key.json",
+            query: &[],
+            headers: &[
+                ("host", "my-bucket.s3.amazonaws.com"),
+                ("content-type", "application/json"),
+            ],
+            payload_sha256: &sha256_hex(b"{}"),
+        });
         assert!(
             headers.authorization.starts_with("AWS4-HMAC-SHA256"),
             "Authorization header must start with AWS4-HMAC-SHA256"
@@ -383,5 +415,250 @@ mod tests {
             headers.amz_date.ends_with('Z'),
             "datetime should end with Z"
         );
+    }
+
+    // ── Known-answer tests: the worked examples AWS publishes for S3 ────────
+    //
+    // Source: "Signature Calculations for the Authorization Header: Transferring
+    // Payload in a Single Chunk (AWS Signature Version 4)" in the Amazon S3 API
+    // reference.  Credentials, date and bucket are the ones used there.
+
+    const AWS_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
+    const AWS_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const AWS_DATE: &str = "20130524T000000Z";
+    const AWS_HOST: &str = "examplebucket.s3.amazonaws.com";
+
+    fn aws_signer() -> Signer {
+        Signer::new_s3(
+            AWS_ACCESS_KEY.to_string(),
+            AWS_SECRET_KEY.to_string(),
+            "us-east-1".to_string(),
+        )
+    }
+
+    fn signature_of(signed: &SignedRequest) -> &str {
+        signed
+            .authorization
+            .rsplit_once("Signature=")
+            .map(|(_, sig)| sig)
+            .expect("authorization carries a signature")
+    }
+
+    #[test]
+    fn aws_example_get_object_with_range_header() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/test.txt",
+                query: &[],
+                headers: &[("host", AWS_HOST), ("Range", "bytes=0-9")],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert_eq!(
+            signed.canonical_request,
+            "GET\n/test.txt\n\nhost:examplebucket.s3.amazonaws.com\nrange:bytes=0-9\n\
+             x-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\
+             x-amz-date:20130524T000000Z\n\nhost;range;x-amz-content-sha256;x-amz-date\n\
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(signed.signed_headers, "host;range;x-amz-content-sha256;x-amz-date");
+        assert_eq!(
+            signature_of(&signed),
+            "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
+        );
+    }
+
+    #[test]
+    fn aws_example_put_object_with_dollar_in_key() {
+        let body = b"Welcome to Amazon S3.";
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "PUT",
+                path: "/test$file.text",
+                query: &[],
+                headers: &[
+                    ("host", AWS_HOST),
+                    ("date", "Fri, 24 May 2013 00:00:00 GMT"),
+                    ("x-amz-storage-class", "REDUCED_REDUNDANCY"),
+                ],
+                payload_sha256: &sha256_hex(body),
+            },
+            AWS_DATE,
+        );
+        assert_eq!(signed.canonical_uri, "/test%24file.text");
+        assert_eq!(
+            signed.signed_headers,
+            "date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class"
+        );
+        assert_eq!(
+            signature_of(&signed),
+            "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"
+        );
+    }
+
+    #[test]
+    fn aws_example_get_bucket_lifecycle_uses_name_equals_form() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/",
+                query: &[("lifecycle", "")],
+                headers: &[("host", AWS_HOST)],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert_eq!(signed.canonical_query, "lifecycle=");
+        assert_eq!(
+            signature_of(&signed),
+            "fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543"
+        );
+    }
+
+    #[test]
+    fn aws_example_get_bucket_list_objects() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/",
+                // Deliberately out of order: the signer sorts.
+                query: &[("prefix", "J"), ("max-keys", "2")],
+                headers: &[("host", AWS_HOST)],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert_eq!(signed.canonical_query, "max-keys=2&prefix=J");
+        assert_eq!(
+            signature_of(&signed),
+            "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
+        );
+    }
+
+    #[test]
+    fn signing_a_bare_sub_resource_gives_a_different_signature() {
+        // Documents why `?uploads` must be canonicalised as `uploads=`: the
+        // bare form that earlier releases signed does not reproduce AWS's value.
+        let signer = aws_signer();
+        let canonical = signer.sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/",
+                query: &[("lifecycle", "")],
+                headers: &[("host", AWS_HOST)],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        let bare = canonical
+            .canonical_request
+            .replace("\nlifecycle=\n", "\nlifecycle\n");
+        assert_ne!(bare, canonical.canonical_request);
+    }
+
+    // ── What is signed is what is sent ──────────────────────────────────────
+
+    #[test]
+    fn signed_headers_are_exactly_the_given_headers_plus_the_amz_ones() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "HEAD",
+                path: "/b/k",
+                query: &[],
+                headers: &[("host", "h")],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        // No content-type: none was passed, so none is signed.
+        assert_eq!(signed.signed_headers, "host;x-amz-content-sha256;x-amz-date");
+    }
+
+    #[test]
+    fn header_names_are_lowercased_sorted_and_values_normalised() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "PUT",
+                path: "/b/k",
+                query: &[],
+                headers: &[
+                    ("X-Amz-Meta-Zeta", "  a   b  "),
+                    ("Host", "h"),
+                    ("Content-Type", "text/plain; charset=utf-8"),
+                ],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert_eq!(
+            signed.signed_headers,
+            "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-meta-zeta"
+        );
+        assert!(signed.canonical_request.contains("x-amz-meta-zeta:a b\n"));
+    }
+
+    #[test]
+    fn session_token_is_signed_and_returned() {
+        let signer = aws_signer().with_session_token(Some("TOKEN/abc==".to_string()));
+        let signed = signer.sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/b/k",
+                query: &[],
+                headers: &[("host", "h")],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert_eq!(signed.security_token.as_deref(), Some("TOKEN/abc=="));
+        assert_eq!(
+            signed.signed_headers,
+            "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+        );
+        assert!(signed
+            .canonical_request
+            .contains("x-amz-security-token:TOKEN/abc==\n"));
+    }
+
+    #[test]
+    fn signing_without_a_token_adds_no_token_header() {
+        let signed = aws_signer().sign_at(
+            &SigningInput {
+                method: "GET",
+                path: "/b/k",
+                query: &[],
+                headers: &[("host", "h")],
+                payload_sha256: EMPTY_SHA256,
+            },
+            AWS_DATE,
+        );
+        assert!(signed.security_token.is_none());
+        assert!(!signed.signed_headers.contains("x-amz-security-token"));
+    }
+
+    #[test]
+    fn signer_debug_never_shows_secrets() {
+        let signer = aws_signer().with_session_token(Some("SESSIONTOKENVALUE".to_string()));
+        let debug = format!("{signer:?}");
+        assert!(!debug.contains(AWS_SECRET_KEY), "{debug}");
+        assert!(!debug.contains(AWS_ACCESS_KEY), "{debug}");
+        assert!(!debug.contains("SESSIONTOKENVALUE"), "{debug}");
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn signature_is_deterministic_for_a_fixed_time() {
+        let input = SigningInput {
+            method: "GET",
+            path: "/b/a b",
+            query: &[],
+            headers: &[("host", "h")],
+            payload_sha256: EMPTY_SHA256,
+        };
+        let a = aws_signer().sign_at(&input, AWS_DATE);
+        let b = aws_signer().sign_at(&input, AWS_DATE);
+        assert_eq!(a.authorization, b.authorization);
     }
 }

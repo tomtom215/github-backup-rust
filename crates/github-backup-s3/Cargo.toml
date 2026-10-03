@@ -32,9 +32,18 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { workspace = true }
+# `aes-gcm`'s own `zeroize` feature only wipes the GHASH key.  The expanded AES
+# round keys are wiped on drop only when the `aes` crate's `zeroize` feature is
+# enabled, so it is requested explicitly (see `docs/src/storage/encryption.md`).
+aes = { version = "0.8", features = ["zeroize"] }
+# Constant-time comparison of the stored and the recomputed plaintext digest.
+subtle = "2"
 
 [dev-dependencies]
 tokio = { workspace = true }
+# The integration tests under `tests/` run a SigV4-verifying fake S3 server
+# in-process, which needs hyper's server half.
+hyper = { workspace = true, features = ["server"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }

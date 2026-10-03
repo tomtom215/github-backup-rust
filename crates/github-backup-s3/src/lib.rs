@@ -23,12 +23,12 @@
 //! - **No AWS SDK**: avoids large transitive dependencies.
 //! - **No reqwest / OpenSSL**: uses `hyper` + `rustls` from the workspace.
 //! - **SigV4 from scratch**: implemented in [`signing`] using `sha2` + `hmac`.
-//! - **Incremental**: already-existing objects are skipped via `HeadObject`.
+//! - **Incremental**: an object is skipped only when its stored content digest matches.
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use github_backup_s3::{S3Client, config::S3Config, sync::sync_to_s3};
+//! use github_backup_s3::{config::S3Config, sync::{sync_to_s3, SyncOptions}, S3Client};
 //! use std::path::Path;
 //!
 //! # async fn example() -> Result<(), github_backup_s3::S3Error> {
@@ -39,19 +39,14 @@
 //!     endpoint: None,
 //!     access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap(),
 //!     secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap(),
+//!     session_token: None,
 //! };
 //!
 //! let client = S3Client::new(config.clone())?;
-//! let stats = sync_to_s3(
-//!     &client,
-//!     &config,
-//!     Path::new("/backup/octocat"),
-//!     false,  // skip binary release assets
-//!     None,   // no at-rest encryption
-//!     false,  // keep stale S3 objects
-//! ).await?;
-//!
-//! println!("Uploaded {} files", stats.uploaded);
+//! let options = SyncOptions::new(Path::new("/backup/octocat/json"), "octocat/json");
+//! let report = sync_to_s3(&client, &config, &options).await?;
+//! assert!(report.is_success(), "{:?}", report.failures);
+//! println!("Uploaded {} files", report.stats.uploaded);
 //! # Ok(())
 //! # }
 //! ```
@@ -64,6 +59,8 @@
 
 pub mod client;
 pub mod config;
+pub mod digest;
+pub mod encoding;
 pub mod encrypt;
 pub mod error;
 pub mod signing;
@@ -71,4 +68,4 @@ pub mod sync;
 
 pub use client::S3Client;
 pub use error::S3Error;
-pub use sync::SyncStats;
+pub use sync::{SyncOptions, SyncReport, SyncStats};
