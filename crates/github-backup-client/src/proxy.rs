@@ -268,7 +268,7 @@ fn in_cidr(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
 
 // ── Connections ───────────────────────────────────────────────────────────────
 
-/// A connection made by [`ProxyConnector`]: plain TCP, or TLS (direct or
+/// A connection made by `ProxyConnector`: plain TCP, or TLS (direct or
 /// inside a `CONNECT` tunnel).
 pub struct ProxyStream {
     inner: Inner,
