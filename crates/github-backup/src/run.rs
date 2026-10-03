@@ -63,9 +63,6 @@ struct Post {
     manifest: bool,
     metrics: Option<PathBuf>,
     diff_with: Option<PathBuf>,
-    restore: bool,
-    restore_target_org: Option<String>,
-    restore_yes: bool,
     webhook: Option<String>,
     history_size: usize,
     quiet: bool,
@@ -84,9 +81,6 @@ impl Post {
             manifest: args.manifest,
             metrics: args.prometheus_metrics.clone(),
             diff_with: args.diff_with.clone(),
-            restore: args.restore,
-            restore_target_org: args.restore_target_org.clone(),
-            restore_yes: args.restore_yes,
             webhook: args.notify_webhook.clone(),
             history_size: args.history_size,
             quiet: args.quiet,
@@ -222,7 +216,6 @@ pub(crate) async fn execute(
 
     finish(
         &post,
-        &client,
         &output,
         &owner,
         &stats,
@@ -230,6 +223,55 @@ pub(crate) async fn execute(
         encrypt_key.as_deref(),
     )
     .await
+}
+
+/// `--restore`: re-creates labels, milestones and issues from the **local
+/// backup** in the target organisation.
+///
+/// It is a mode of its own — no backup is made first and the source account is
+/// not contacted — so it works when the source repository or account is gone.
+/// Confirmation is asked before anything else happens.
+pub(crate) async fn execute_restore(args: Args, credential: Credential) -> ExitCode {
+    let yes = args.restore_yes;
+    let dry_run = args.dry_run;
+    let target_org_arg = args.restore_target_org.clone();
+    let api_url = args.api_url.clone();
+    let (owner, output_path, _opts) = args.into_backup_options();
+    let target_org = target_org_arg.unwrap_or_else(|| owner.clone());
+    let output = OutputConfig::new(&output_path);
+
+    if !dry_run && !restore::confirm_restore(&target_org, yes) {
+        error!("restore aborted — pass --restore-yes to confirm non-interactively");
+        return ExitCode::from(EXIT_FAILURE);
+    }
+
+    let client = match api_url.as_deref() {
+        Some(url) => GitHubClient::with_api_url(credential, url),
+        None => GitHubClient::new(credential),
+    };
+    let client = match client {
+        Ok(c) => c,
+        Err(e) => {
+            error!("failed to initialise GitHub client: {e}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+
+    match restore::run_restore(&client, &output, &owner, &target_org, dry_run).await {
+        Ok(stats) if stats.errored() > 0 => {
+            error!(
+                errored = stats.errored(),
+                "restore finished with errors: {} item(s) could not be restored (exit status {EXIT_INCOMPLETE})",
+                stats.errored()
+            );
+            ExitCode::from(EXIT_INCOMPLETE)
+        }
+        Ok(_) => ExitCode::from(EXIT_OK),
+        Err(e) => {
+            error!("restore failed: {e}");
+            ExitCode::from(EXIT_FAILURE)
+        }
+    }
 }
 
 /// Reports a run that could not be completed.
@@ -295,7 +337,6 @@ fn write_outputs(post: &Post, owner: &str, stats: &BackupStats, started_at_unix:
 /// that must include its outcome, then the exit status.
 async fn finish(
     post: &Post,
-    client: &GitHubClient,
     output: &OutputConfig,
     owner: &str,
     stats: &BackupStats,
@@ -340,19 +381,6 @@ async fn finish(
         match run_diff(prev_dir, &output.owner_json_dir(owner)) {
             Ok(summary) => info!(diff = %summary, "backup diff"),
             Err(e) => warn!(error = %e, "diff failed (non-fatal)"),
-        }
-    }
-
-    // ── Restore ──────────────────────────────────────────────────────────────
-    if post.restore {
-        let target_org = post.restore_target_org.as_deref().unwrap_or(owner);
-        if !restore::confirm_restore(target_org, post.restore_yes) {
-            error!("restore aborted — pass --restore-yes to confirm non-interactively");
-            return ExitCode::from(EXIT_FAILURE);
-        }
-        if let Err(e) = restore::run_restore(client, output, owner, target_org, false).await {
-            error!("restore failed: {e}");
-            return ExitCode::from(EXIT_FAILURE);
         }
     }
 

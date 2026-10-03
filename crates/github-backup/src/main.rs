@@ -248,5 +248,8 @@ async fn main() -> ExitCode {
         );
     }
 
+    if args.restore {
+        return run::execute_restore(args, credential).await;
+    }
     run::execute(args, credential, encrypt_key).await
 }
