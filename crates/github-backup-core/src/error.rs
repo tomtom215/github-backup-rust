@@ -119,7 +119,9 @@ impl CoreError {
         match self {
             Self::GitFailed { stderr, .. } => {
                 let stderr = stderr.to_ascii_lowercase();
-                stderr.contains("repository not found") || stderr.contains("not found")
+                stderr.contains("not found")
+                    || stderr.contains("does not appear to be a git repository")
+                    || stderr.contains("returned error: 404")
             }
             _ => false,
         }
@@ -192,6 +194,12 @@ mod tests {
             "remote: Repository not found.\nfatal: repository 'https://github.com/o/r.wiki.git/' not found"
         )
         .is_remote_missing());
+        assert!(git(
+            128,
+            "fatal: '/srv/o/r.wiki.git' does not appear to be a git repository"
+        )
+        .is_remote_missing());
+        assert!(git(128, "fatal: unable to access 'https://h/r.wiki.git/': The requested URL returned error: 404").is_remote_missing());
 
         for stderr in [
             "fatal: Authentication failed for 'https://github.com/o/r.wiki.git/'",

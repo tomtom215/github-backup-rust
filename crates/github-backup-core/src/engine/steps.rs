@@ -45,6 +45,11 @@ impl RunControl {
         }
     }
 
+    /// Completes when the run is cancelled.
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+
     /// `true` once nothing further should be started.
     pub(crate) fn should_stop(&self) -> bool {
         self.cancel.is_cancelled()
@@ -107,7 +112,14 @@ impl<'a> Steps<'a> {
             self.clean = false;
             return None;
         }
-        match work.await {
+        // Cancellation abandons an in-flight API request at once instead of
+        // waiting for it.  Dropping a step mid-way is safe: files are written
+        // atomically and nothing is recorded as complete until it finishes.
+        let outcome = tokio::select! {
+            outcome = work => outcome,
+            () = self.control.cancelled() => Err(CoreError::Interrupted),
+        };
+        match outcome {
             Ok(value) => Some(value),
             Err(e) => {
                 self.fail(step, e);

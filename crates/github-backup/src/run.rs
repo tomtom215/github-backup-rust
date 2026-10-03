@@ -207,7 +207,9 @@ pub(crate) async fn execute(
                  re-run to resume"
             );
             shutdown::begin_shutdown(&cancel, code);
-            let _ = engine_run.await;
+            // Steps abandon in-flight requests and git is killed, so this is
+            // quick; the bound keeps a stuck task from outlasting the watchdog.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(4), engine_run).await;
             return ExitCode::from(code);
         }
     };

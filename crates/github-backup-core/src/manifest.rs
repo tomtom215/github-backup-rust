@@ -163,6 +163,16 @@ pub fn verify_manifest(root: &Path) -> Result<VerifyReport, String> {
     Ok(report)
 }
 
+/// Files in the root that record how runs went rather than what was backed up.
+/// They are rewritten after the manifest (the history needs the final outcome,
+/// including the upload), so covering them would make every verification fail.
+const OPERATIONAL_FILES: &[&str] = &[
+    "backup_history.json",
+    "backup_state.json",
+    "backup_checkpoint.json",
+    ".backup.lock",
+];
+
 /// Walks `root` recursively and hashes every file, skipping `exclude`.
 fn collect_entries(root: &Path, exclude: &Path) -> Result<Vec<ManifestEntry>, String> {
     let mut entries = Vec::new();
@@ -183,7 +193,13 @@ fn visit_dir(
         let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
         let path = entry.path();
 
-        if path == exclude {
+        if path == exclude
+            || (dir == root
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| OPERATIONAL_FILES.contains(&n)))
+        {
             continue;
         }
 
@@ -414,5 +430,17 @@ mod tests {
         let report = verify_manifest(root).expect("verify");
         assert!(report.is_clean());
         assert_eq!(report.ok, 4, "ok counter must increment per matching file");
+    }
+
+    #[test]
+    fn operational_files_are_neither_listed_nor_reported_as_unexpected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("issues.json"), b"[]").expect("data");
+        write_manifest(dir.path(), "2026-01-01T00:00:00Z").expect("manifest");
+        // The history is written after the manifest, as the CLI does.
+        std::fs::write(dir.path().join("backup_history.json"), b"{}").expect("history");
+        let report = verify_manifest(dir.path()).expect("verify");
+        assert!(report.unexpected.is_empty(), "{:?}", report.unexpected);
+        assert!(report.tampered.is_empty() && report.missing.is_empty());
     }
 }
