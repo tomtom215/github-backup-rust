@@ -99,6 +99,18 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+/// Current Unix time in seconds.
+///
+/// Falls back to `0` when the system clock is somehow before the epoch
+/// (effectively impossible on any host we run on, but the saturating
+/// fallback avoids a panic in pathological environments).
+pub(crate) fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Formats a Unix timestamp (seconds since epoch) as an RFC 3339 / ISO 8601
 /// UTC string in the form `"YYYY-MM-DDTHH:MM:SSZ"`.
 #[must_use]

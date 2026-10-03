@@ -352,6 +352,54 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+/// Prints a restore warning banner and, when interactive, asks for explicit
+/// confirmation.
+///
+/// Returns `true` if the user confirmed.  Confirmation can come from any of:
+/// - The `--restore-yes` CLI flag.
+/// - The `GITHUB_BACKUP_RESTORE_YES=1` environment variable (handy for CI
+///   pipelines where adding a flag is awkward).
+/// - Typing `yes` on a TTY.
+///
+/// Returns `false` if the user declined, stdin is not a TTY, or any of the
+/// above failed.  The non-TTY error message explicitly tells the user *both*
+/// escape hatches so they don't have to dig through `--help`.
+pub(crate) fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
+    if restore_yes {
+        return true;
+    }
+    if std::env::var("GITHUB_BACKUP_RESTORE_YES").as_deref() == Ok("1") {
+        info!("GITHUB_BACKUP_RESTORE_YES=1 — proceeding with restore");
+        return true;
+    }
+
+    eprintln!();
+    eprintln!("╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║         WARNING: RESTORE WILL MODIFY GITHUB DATA            ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════╝");
+    eprintln!("  Target : {target_org}");
+    eprintln!("  This will CREATE labels, milestones, and issues in the target");
+    eprintln!("  organisation.  This action cannot be automatically undone.");
+    eprintln!();
+
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        eprintln!("  stdin is not a TTY — to confirm non-interactively, either:");
+        eprintln!("    • re-run with --restore-yes, or");
+        eprintln!("    • export GITHUB_BACKUP_RESTORE_YES=1");
+        eprintln!();
+        return false;
+    }
+
+    eprint!("  Type 'yes' to continue: ");
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    eprintln!();
+    input.trim() == "yes"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
