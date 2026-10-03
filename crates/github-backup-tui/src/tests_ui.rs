@@ -1141,3 +1141,24 @@ fn push_log_keeps_view_still_when_scrolled_back() {
     });
     assert_eq!(run.log_back, 4);
 }
+
+// ── Terminal hang-up ──────────────────────────────────────────────────────────
+
+#[test]
+fn a_reader_stuck_in_read_cannot_hang_shutdown() {
+    // Stands in for crossterm's `read` spinning forever on a hung-up tty.
+    let stuck = std::thread::spawn(|| std::thread::sleep(std::time::Duration::from_secs(30)));
+    let t0 = std::time::Instant::now();
+    let joined = crate::join_with_timeout(stuck, std::time::Duration::from_millis(200));
+    assert!(!joined);
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(2),
+        "must give up promptly"
+    );
+
+    let quick = std::thread::spawn(|| {});
+    assert!(crate::join_with_timeout(
+        quick,
+        std::time::Duration::from_secs(2)
+    ));
+}

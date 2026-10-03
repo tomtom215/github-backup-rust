@@ -68,6 +68,8 @@ const MIN_HEIGHT: u16 = 8;
 
 /// How long a signal-initiated shutdown waits for a running backup to stop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// After SIGHUP the terminal is gone and its reader may be spinning: wait less.
+const HANGUP_GRACE: Duration = Duration::from_secs(3);
 
 // ── Terminal ownership ────────────────────────────────────────────────────────
 
@@ -180,18 +182,7 @@ pub async fn run_tui(initial: InitialConfig) -> ExitCode {
     .await;
 
     stop_input.store(true, Ordering::Relaxed);
-    // The reader normally notices the flag within 100 ms.  If the terminal has
-    // hung up, crossterm's blocking `read` can spin on EOF forever and never
-    // return, so waiting for it unconditionally would hang the process (this
-    // happened when the terminal window was closed): give it a moment, then
-    // leave it behind; it dies with the process.
-    let patience = Instant::now() + Duration::from_millis(400);
-    while !input_thread.is_finished() && Instant::now() < patience {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if input_thread.is_finished() {
-        let _ = input_thread.join();
-    }
+    join_with_timeout(input_thread, Duration::from_millis(400));
 
     // Leave the alternate screen before anything is printed.
     drop(terminal);
@@ -214,6 +205,25 @@ pub async fn run_tui(initial: InitialConfig) -> ExitCode {
             eprintln!("TUI error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Joins `handle` if it ends within `patience`, otherwise leaves it behind.
+///
+/// The input reader normally notices its stop flag within 100 ms.  If the
+/// terminal has hung up, crossterm's blocking `read` can spin on EOF and never
+/// return, so an unconditional `join` hangs the process (it did when the
+/// terminal window was closed).  A left-behind thread dies with the process.
+fn join_with_timeout(handle: std::thread::JoinHandle<()>, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+        true
+    } else {
+        false
     }
 }
 
@@ -344,7 +354,12 @@ async fn event_loop(
 
         // ── Leave? ─────────────────────────────────────────────────────────
         if app.shutdown_requested && shutdown_deadline.is_none() {
-            shutdown_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
+            let grace = if app.shutdown_code == 129 {
+                HANGUP_GRACE
+            } else {
+                SHUTDOWN_GRACE
+            };
+            shutdown_deadline = Some(Instant::now() + grace);
         }
         let grace_over = shutdown_deadline.is_some_and(|d| Instant::now() >= d);
         if app.should_quit || (app.shutdown_requested && (!app.run.is_active() || grace_over)) {
