@@ -8,6 +8,8 @@
 //! by resource category into smaller focused files.
 
 mod endpoints;
+#[cfg(test)]
+mod http_tests;
 mod proxy;
 
 use std::sync::Arc;
@@ -164,6 +166,34 @@ impl GitHubClient {
             api_base,
             login: Arc::new(OnceCell::new()),
         })
+    }
+
+    /// A client for tests that talk to a local **plain-HTTP** server.
+    ///
+    /// It ignores `HTTPS_PROXY`, needs no CA bundle and accepts `http://`
+    /// URLs; the API base is `http://127.0.0.1` (tests pass full URLs).
+    #[cfg(test)]
+    pub(crate) fn for_tests(credential: Credential) -> Self {
+        Self::for_tests_at(credential, "http://127.0.0.1")
+    }
+
+    /// Like [`for_tests`](Self::for_tests) with an explicit API base URL.
+    #[cfg(test)]
+    pub(crate) fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls)
+            .https_or_http()
+            .enable_http1()
+            .build();
+        Self {
+            http: HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(connector)),
+            credential,
+            api_base: api_base_url.trim_end_matches('/').to_string(),
+            login: Arc::new(OnceCell::new()),
+        }
     }
 
     /// Returns the API base URL (without trailing slash).

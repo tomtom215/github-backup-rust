@@ -4,11 +4,13 @@
 //! GitHub Actions and deployment environment listing endpoints.
 //!
 //! Covers workflow metadata, workflow run history, and deployment environment
-//! configurations for a repository.
+//! configurations for a repository.  All three endpoints wrap their list in an
+//! object (`{"total_count": n, "<key>": [...]}`) and paginate through the
+//! `Link` header like every other list; every page is followed and merged.
 
 use tracing::info;
 
-use github_backup_types::{Environment, Workflow, WorkflowRun};
+use github_backup_types::{Environment, Page, Workflow, WorkflowRun};
 
 use crate::error::ClientError;
 
@@ -33,28 +35,16 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Page<Workflow>, ClientError> {
-        // The API wraps the array under {"total_count": N, "workflows": [...]}
-        #[derive(serde::Deserialize)]
-        struct WorkflowsResponse {
-            workflows: Vec<Workflow>,
-        }
-
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/actions/workflows?per_page={PER_PAGE}");
-        let (resp, _) = self.get_json_with_link::<WorkflowsResponse>(&url).await?;
-        info!(
-            owner,
-            repo,
-            count = resp.workflows.len(),
-            "fetched workflows"
-        );
-        Ok(resp.workflows)
+        let workflows = self.get_all_wrapped_pages(&url, "workflows").await?;
+        info!(owner, repo, count = workflows.len(), "fetched workflows");
+        Ok(workflows)
     }
 
-    /// Lists workflow runs for a specific workflow.
+    /// Lists every run of a specific workflow, following all pages.
     ///
-    /// Returns the most recent runs (paginated).  Callers should handle
-    /// 403/404 gracefully.
+    /// Callers should handle 403/404 gracefully.
     ///
     /// # Errors
     ///
@@ -65,25 +55,19 @@ impl GitHubClient {
         repo: &str,
         workflow_id: u64,
     ) -> Result<Page<WorkflowRun>, ClientError> {
-        // The API wraps runs under {"total_count": N, "workflow_runs": [...]}
-        #[derive(serde::Deserialize)]
-        struct RunsResponse {
-            workflow_runs: Vec<WorkflowRun>,
-        }
-
         let api = self.api();
         let url = format!(
             "{api}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs?per_page={PER_PAGE}"
         );
-        let (resp, _) = self.get_json_with_link::<RunsResponse>(&url).await?;
+        let runs = self.get_all_wrapped_pages(&url, "workflow_runs").await?;
         info!(
             owner,
             repo,
             workflow_id,
-            count = resp.workflow_runs.len(),
+            count = runs.len(),
             "fetched workflow runs"
         );
-        Ok(resp.workflow_runs)
+        Ok(runs)
     }
 
     // ── Deployment environments ───────────────────────────────────────────
@@ -104,21 +88,10 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Page<Environment>, ClientError> {
-        // The API wraps environments under {"total_count": N, "environments": [...]}
-        #[derive(serde::Deserialize)]
-        struct EnvsResponse {
-            environments: Vec<Environment>,
-        }
-
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/environments?per_page={PER_PAGE}");
-        let (resp, _) = self.get_json_with_link::<EnvsResponse>(&url).await?;
-        info!(
-            owner,
-            repo,
-            count = resp.environments.len(),
-            "fetched environments"
-        );
-        Ok(resp.environments)
+        let envs = self.get_all_wrapped_pages(&url, "environments").await?;
+        info!(owner, repo, count = envs.len(), "fetched environments");
+        Ok(envs)
     }
 }

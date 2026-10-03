@@ -3,7 +3,7 @@
 
 //! Deploy key and collaborator listing endpoints.
 
-use github_backup_types::{Collaborator, DeployKey};
+use github_backup_types::{Collaborator, DeployKey, Page};
 
 use crate::error::ClientError;
 

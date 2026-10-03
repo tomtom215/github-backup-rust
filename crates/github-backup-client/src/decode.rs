@@ -67,6 +67,7 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)] // the fields only decide whether an element fits
     struct Item {
         id: u64,
         title: String,

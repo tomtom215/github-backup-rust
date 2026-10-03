@@ -6,7 +6,7 @@
 //! Covers organisation member lists and team rosters. Only meaningful when
 //! the backup target is an organisation.
 
-use github_backup_types::{Team, User};
+use github_backup_types::{Page, Team, User};
 
 use crate::error::ClientError;
 

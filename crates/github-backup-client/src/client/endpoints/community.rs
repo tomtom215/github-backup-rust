@@ -5,10 +5,9 @@
 //!
 //! These endpoints require specific repository settings or token scopes:
 //!
-//! - **Discussions** – the repository must have Discussions enabled; otherwise
-//!   the API returns 404.  Callers should handle 404 gracefully.
-//! - **Classic Projects** – the Projects feature must be enabled on the repo.
-//!   The API returns 404 when the feature is disabled.
+//! - **Discussions** – GitHub offers Discussions through GraphQL only; the
+//!   REST route called here does not exist, so it answers 404.
+//! - **Classic Projects** – sunset by GitHub; the REST routes answer 404/410.
 //! - **Packages** – requires the `read:packages` OAuth scope.  Callers should
 //!   handle 403/404 gracefully when the user has no packages or the token lacks
 //!   the required scope.
@@ -16,7 +15,7 @@
 use tracing::info;
 
 use github_backup_types::{
-    ClassicProject, Discussion, DiscussionComment, Package, PackageVersion, ProjectColumn,
+    ClassicProject, Discussion, DiscussionComment, Package, PackageVersion, Page, ProjectColumn,
 };
 
 use crate::error::ClientError;
@@ -28,9 +27,6 @@ impl GitHubClient {
 
     /// Lists discussions for a repository.
     ///
-    /// GitHub Discussions must be enabled on the repository.  If the feature
-    /// is disabled the API returns 404; callers should handle this gracefully.
-    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
@@ -40,18 +36,8 @@ impl GitHubClient {
         repo: &str,
     ) -> Result<Page<Discussion>, ClientError> {
         let api = self.api();
-        let mut url = format!("{api}/repos/{owner}/{repo}/discussions?per_page={PER_PAGE}");
-        let mut all: Vec<Discussion> = Vec::new();
-
-        loop {
-            let (page, link) = self.get_json_with_link::<Vec<Discussion>>(&url).await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let url = format!("{api}/repos/{owner}/{repo}/discussions?per_page={PER_PAGE}");
+        let all = self.get_all_pages(&url).await?;
         info!(owner, repo, count = all.len(), "fetched discussions");
         Ok(all)
     }
@@ -68,22 +54,10 @@ impl GitHubClient {
         discussion_number: u64,
     ) -> Result<Page<DiscussionComment>, ClientError> {
         let api = self.api();
-        let mut url = format!(
+        let url = format!(
             "{api}/repos/{owner}/{repo}/discussions/{discussion_number}/comments?per_page={PER_PAGE}"
         );
-        let mut all: Vec<DiscussionComment> = Vec::new();
-
-        loop {
-            let (page, link) = self
-                .get_json_with_link::<Vec<DiscussionComment>>(&url)
-                .await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let all = self.get_all_pages(&url).await?;
         info!(
             owner,
             repo,
@@ -98,9 +72,6 @@ impl GitHubClient {
 
     /// Lists classic (v1) projects for a repository.
     ///
-    /// Classic Projects must be enabled on the repository; if not, the API
-    /// returns 404.  Callers should handle 404 gracefully.
-    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
@@ -110,18 +81,8 @@ impl GitHubClient {
         repo: &str,
     ) -> Result<Page<ClassicProject>, ClientError> {
         let api = self.api();
-        let mut url = format!("{api}/repos/{owner}/{repo}/projects?per_page={PER_PAGE}&state=all");
-        let mut all: Vec<ClassicProject> = Vec::new();
-
-        loop {
-            let (page, link) = self.get_json_with_link::<Vec<ClassicProject>>(&url).await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let url = format!("{api}/repos/{owner}/{repo}/projects?per_page={PER_PAGE}&state=all");
+        let all = self.get_all_pages(&url).await?;
         info!(owner, repo, count = all.len(), "fetched classic projects");
         Ok(all)
     }
@@ -136,18 +97,8 @@ impl GitHubClient {
         project_id: u64,
     ) -> Result<Page<ProjectColumn>, ClientError> {
         let api = self.api();
-        let mut url = format!("{api}/projects/{project_id}/columns?per_page={PER_PAGE}");
-        let mut all: Vec<ProjectColumn> = Vec::new();
-
-        loop {
-            let (page, link) = self.get_json_with_link::<Vec<ProjectColumn>>(&url).await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let url = format!("{api}/projects/{project_id}/columns?per_page={PER_PAGE}");
+        let all = self.get_all_pages(&url).await?;
         info!(project_id, count = all.len(), "fetched project columns");
         Ok(all)
     }
@@ -168,20 +119,10 @@ impl GitHubClient {
         package_type: &str,
     ) -> Result<Page<Package>, ClientError> {
         let api = self.api();
-        let mut url = format!(
+        let url = format!(
             "{api}/users/{username}/packages?package_type={package_type}&per_page={PER_PAGE}"
         );
-        let mut all: Vec<Package> = Vec::new();
-
-        loop {
-            let (page, link) = self.get_json_with_link::<Vec<Package>>(&url).await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let all = self.get_all_pages(&url).await?;
         info!(
             username,
             package_type,
@@ -203,20 +144,10 @@ impl GitHubClient {
         package_name: &str,
     ) -> Result<Page<PackageVersion>, ClientError> {
         let api = self.api();
-        let mut url = format!(
+        let url = format!(
             "{api}/users/{username}/packages/{package_type}/{package_name}/versions?per_page={PER_PAGE}"
         );
-        let mut all: Vec<PackageVersion> = Vec::new();
-
-        loop {
-            let (page, link) = self.get_json_with_link::<Vec<PackageVersion>>(&url).await?;
-            all.extend(page);
-            match link.as_deref().and_then(crate::pagination::parse_next_link) {
-                Some(next) => url = next,
-                None => break,
-            }
-        }
-
+        let all = self.get_all_pages(&url).await?;
         info!(
             username,
             package_type,

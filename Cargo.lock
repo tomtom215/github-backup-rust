@@ -950,6 +950,7 @@ dependencies = [
  "tokio-test",
  "tower-service",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

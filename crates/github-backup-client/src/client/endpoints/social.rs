@@ -6,7 +6,9 @@
 //! Covers followers, following, starred repos, watched repos, and gists for a
 //! given user.
 
-use github_backup_types::{Gist, Repository, User};
+use tracing::info;
+
+use github_backup_types::{Gist, Page, Repository, User};
 
 use crate::error::ClientError;
 
@@ -63,12 +65,26 @@ impl GitHubClient {
 
     /// Returns gists owned by `username`.
     ///
+    /// `GET /users/{username}/gists` lists **public** gists only, so when the
+    /// credential belongs to `username` (compared case-insensitively) the
+    /// authenticated listing `GET /gists` is used instead; it includes the
+    /// account's secret gists.  For any other user, for an anonymous client,
+    /// and for tokens that cannot call `GET /user`, the public listing is used.
+    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_gists(&self, username: &str) -> Result<Page<Gist>, ClientError> {
         let api = self.api();
-        let url = format!("{api}/users/{username}/gists?per_page={PER_PAGE}");
+        let url = if self.is_authenticated_user(username).await? {
+            info!(
+                username,
+                "the token belongs to this account: listing its secret gists too"
+            );
+            format!("{api}/gists?per_page={PER_PAGE}")
+        } else {
+            format!("{api}/users/{username}/gists?per_page={PER_PAGE}")
+        };
         self.get_all_pages(&url).await
     }
 
