@@ -10,22 +10,20 @@
 mod endpoints;
 #[cfg(test)]
 mod http_tests;
-mod proxy;
+#[cfg(test)]
+mod retry_tests;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::{Method, Request, StatusCode};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper::{Method, Request};
 use serde_json::{Map, Value};
 use tokio::sync::OnceCell;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use proxy::ProxyConnector;
+use crate::proxy::ProxyClient;
 
 use github_backup_types::config::Credential;
 use github_backup_types::Page;
@@ -33,17 +31,29 @@ use github_backup_types::Page;
 use crate::decode::extend_page;
 use crate::error::ClientError;
 use crate::pagination::parse_next_link;
-use crate::rate_limit::RateLimitInfo;
+use crate::rate_limit::{self, RateLimitInfo, RateLimitWait};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
 /// Default page size for all paginated GitHub API endpoints.
 pub(crate) const PER_PAGE: u32 = 100;
 /// Maximum number of times to retry a rate-limited request.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+const MAX_RATE_LIMIT_RETRIES: u32 = 6;
+/// Total time one request may spend waiting out rate limits.  Slightly over
+/// GitHub's one-hour primary window, so a primary limit that resets within the
+/// hour is waited out, while a longer one fails instead of hanging the run.
+const MAX_RATE_WAIT_TOTAL_SECS: u64 = 3700;
+/// First wait when GitHub reports a secondary rate limit without saying how
+/// long to wait (`Retry-After` / `X-RateLimit-Reset`); doubled on every
+/// further hit.  GitHub's guidance is "at least one minute".
+const SECONDARY_LIMIT_BASE_SECS: u64 = 60;
 /// Maximum number of times to retry a transient 5xx response.
 const MAX_SERVER_ERROR_RETRIES: u32 = 3;
+/// Maximum number of times to retry a connection failure, timeout or a
+/// response cut off mid-body (idempotent requests only).
+const MAX_TRANSPORT_RETRIES: u32 = 3;
 /// Default request timeout in seconds. GitHub's API can be slow for large repos.
+/// Also the longest a response body may stall between two chunks.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Hard cap on a single back-off sleep (5 minutes).
 ///
@@ -60,27 +70,6 @@ const MAX_BACKOFF_SECS: u64 = 300;
 /// Capping the body protects the process from OOM kills.
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Backing HTTP client — either a direct TLS connection or a CONNECT-tunnelled
-/// proxy connection.  Both variants share the same `hyper_util::client::legacy`
-/// error type so call sites need no special casing.
-#[derive(Clone)]
-pub(crate) enum HyperClientKind {
-    Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
-    Proxied(Client<ProxyConnector, Full<Bytes>>),
-}
-
-impl HyperClientKind {
-    async fn request(
-        &self,
-        req: hyper::Request<Full<Bytes>>,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
-        match self {
-            HyperClientKind::Direct(c) => c.request(req).await,
-            HyperClientKind::Proxied(c) => c.request(req).await,
-        }
-    }
-}
-
 /// Async GitHub REST API v3 client.
 ///
 /// Construct via [`GitHubClient::new`] for standard GitHub.com use, or
@@ -90,14 +79,11 @@ impl HyperClientKind {
 /// The client is cheaply cloneable — the underlying hyper connection pool is
 /// `Arc`-wrapped.
 ///
-/// **Proxy support**: if `HTTPS_PROXY` (or `https_proxy`) is set in the
-/// environment the client automatically routes all connections through the
-/// proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL
-/// (`http://user:pass@host:port`) are forwarded as a `Proxy-Authorization`
-/// header.
+/// **Proxy support**: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`
+/// (lower or upper case) are honoured, see [`crate::ProxySettings`].
 #[derive(Clone)]
 pub struct GitHubClient {
-    pub(crate) http: HyperClientKind,
+    pub(crate) http: ProxyClient,
     pub(crate) credential: Credential,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(crate) api_base: String,
@@ -105,6 +91,28 @@ pub struct GitHubClient {
     /// `GET /user` and shared by every clone of the client.  `None` inside
     /// means the lookup is not possible with this credential.
     login: Arc<OnceCell<Option<String>>>,
+    /// Time base of all waits and timeouts (tests shrink it).
+    timing: Timing,
+}
+
+/// Waits and timeouts of the retry loop.  `unit` is what one "second" of
+/// back-off lasts: always one second in production, shrunk by tests so that
+/// minute-long rate-limit waits can be exercised quickly.
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+    unit: Duration,
+    /// Limit on receiving response headers, and on the silence between two
+    /// chunks of a response body.
+    request_timeout: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            unit: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        }
+    }
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -133,31 +141,17 @@ impl GitHubClient {
     /// typically at `https://github.example.com/api/v3`.  The URL is stored
     /// verbatim and used as the prefix for all API requests.
     ///
-    /// If `HTTPS_PROXY` (or `https_proxy`) is set in the environment, the
-    /// client will route HTTPS requests through that proxy via HTTP `CONNECT`.
+    /// The proxy environment variables are honoured (see [`crate::ProxySettings`]).
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError::Tls`] if the native CA bundle cannot be loaded.
+    /// Returns [`ClientError::InvalidApiUrl`] unless `api_base_url` is an
+    /// `https://` URL with a host, and [`ClientError::Tls`] if the native CA
+    /// bundle cannot be loaded.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
-        let http = if let Some(proxy_config) = proxy::proxy_config_from_env() {
-            info!(
-                host = %proxy_config.host,
-                port = proxy_config.port,
-                "routing GitHub API calls through HTTPS proxy"
-            );
-            let tls_config = build_tls_config()?;
-            let connector = ProxyConnector::new(proxy_config, tls_config);
-            HyperClientKind::Proxied(Client::builder(TokioExecutor::new()).build(connector))
-        } else {
-            let tls_config = build_tls_config()?;
-            let https = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config(tls_config)
-                .https_only()
-                .enable_http1()
-                .build();
-            HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(https))
-        };
+        validate_api_url(api_base_url)?;
+        // HTTPS only: the token must never travel in clear text.
+        let http = ProxyClient::from_env(false)?;
 
         let api_base = api_base_url.trim_end_matches('/').to_string();
         Ok(Self {
@@ -165,6 +159,7 @@ impl GitHubClient {
             credential,
             api_base,
             login: Arc::new(OnceCell::new()),
+            timing: Timing::default(),
         })
     }
 
@@ -178,21 +173,25 @@ impl GitHubClient {
     }
 
     /// Like [`for_tests`](Self::for_tests) with an explicit API base URL.
-    #[cfg(test)]
-    pub(crate) fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
+    ///
+    /// Plain HTTP, no proxy, no CA bundle: only for tests against a local
+    /// server (the `test-support` feature exposes it to other crates' tests).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls)
-            .https_or_http()
-            .enable_http1()
-            .build();
+        let http = ProxyClient::new(crate::proxy::ProxySettings::default(), tls, true);
         Self {
-            http: HyperClientKind::Direct(Client::builder(TokioExecutor::new()).build(connector)),
+            http,
             credential,
             api_base: api_base_url.trim_end_matches('/').to_string(),
             login: Arc::new(OnceCell::new()),
+            timing: Timing {
+                unit: Duration::from_millis(1),
+                request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            },
         }
     }
 
@@ -224,18 +223,16 @@ impl GitHubClient {
             .body(Full::new(Bytes::new()))
             .map_err(ClientError::Http)?;
 
-        let response = tokio::time::timeout(
-            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            self.http.request(req),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout { url: url.clone() })??;
+        let response = tokio::time::timeout(self.timing.request_timeout, self.http.request(req))
+            .await
+            .map_err(|_| ClientError::Timeout { url: url.clone() })??;
 
         let status = response.status();
         let headers = response.headers().clone();
 
         if !status.is_success() {
-            let body = collect_body_limited(response.into_body()).await?;
+            let body =
+                collect_body_limited(response.into_body(), self.timing.request_timeout).await?;
             return Err(ClientError::ApiError {
                 status: status.as_u16(),
                 body: String::from_utf8_lossy(&body).into_owned(),
@@ -243,6 +240,20 @@ impl GitHubClient {
         }
 
         Ok(RateLimitInfo::oauth_scopes(&headers))
+    }
+
+    /// Checks that the credential is accepted, with `GET /rate_limit` (which
+    /// does not count against the rate limit), and returns the number of core
+    /// requests left in the current window if the server reports it.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::ApiError`] with status 401 for a revoked, expired or
+    /// mistyped token; transport errors when the API cannot be reached.
+    pub async fn verify_token(&self) -> Result<Option<u64>, ClientError> {
+        let url = format!("{}/rate_limit", self.api_base);
+        let (body, _) = self.get_json_with_link::<Value>(&url).await?;
+        Ok(body["resources"]["core"]["remaining"].as_u64())
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
@@ -476,14 +487,22 @@ impl GitHubClient {
     /// when `capture_link` is true, otherwise `None`).
     ///
     /// Retry policy:
-    /// - 429 / 403 with `X-RateLimit-Remaining == 0`: up to
-    ///   [`MAX_RATE_LIMIT_RETRIES`], sleeping for `Retry-After` or
-    ///   `X-RateLimit-Reset`, capped at [`MAX_BACKOFF_SECS`].
-    /// - 5xx: up to [`MAX_SERVER_ERROR_RETRIES`] with exponential back-off
-    ///   `2^attempt` seconds **plus deterministic jitter** to prevent
-    ///   thundering-herd on shared rate-limit buckets.
-    /// - 4xx (except those above): fail immediately — they will never succeed
-    ///   on retry.
+    /// - Rate limits (see [`rate_limit::classify`]): a 429, or a 403 that
+    ///   carries `Retry-After`, `X-RateLimit-Remaining: 0` or a "rate limit"
+    ///   message, is waited out and retried: for `Retry-After`, else until
+    ///   `X-RateLimit-Reset`, else (secondary limit) at least a minute,
+    ///   doubling on every further hit.  The waits of one request are bounded
+    ///   by [`MAX_RATE_WAIT_TOTAL_SECS`]; beyond that it fails with
+    ///   [`ClientError::RateLimitExceeded`] - never with a plain 403, which the
+    ///   backup treats as "no access, skip".
+    /// - GET only (a repeated POST could act twice): 500/502/503/504 up to
+    ///   [`MAX_SERVER_ERROR_RETRIES`] retries with exponential back-off and
+    ///   jitter; connection failures, timeouts and bodies cut off mid-stream up
+    ///   to [`MAX_TRANSPORT_RETRIES`] retries.
+    /// - Any other non-success status fails immediately.
+    ///
+    /// The waits are plain `await`s, so dropping the future (as the engine
+    /// does on cancellation) ends them at once.
     async fn execute_with_retry(
         &self,
         method: Method,
@@ -492,8 +511,11 @@ impl GitHubClient {
         extra_headers: &[(&str, &str)],
         capture_link: bool,
     ) -> Result<(Bytes, Option<String>), ClientError> {
-        let mut rate_retries = 0u32;
+        let idempotent = method == Method::GET;
+        let mut rate_hits = 0u32;
+        let mut rate_waited = 0u64;
         let mut server_retries = 0u32;
+        let mut transport_retries = 0u32;
 
         loop {
             let mut builder = self
@@ -506,67 +528,79 @@ impl GitHubClient {
                 .body(Full::new(body.clone()))
                 .map_err(ClientError::Http)?;
 
-            let response = tokio::time::timeout(
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                self.http.request(req),
-            )
-            .await
-            .map_err(|_| ClientError::Timeout {
-                url: url.to_string(),
-            })??;
-
-            let status = response.status();
-            let headers = response.headers().clone();
-            let rate_info = RateLimitInfo::from_headers(&headers);
+            let sent =
+                tokio::time::timeout(self.timing.request_timeout, self.http.request(req)).await;
+            let attempt = match sent {
+                Ok(Ok(response)) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    collect_body_limited(response.into_body(), self.timing.request_timeout)
+                        .await
+                        .map(|bytes| (status, headers, bytes))
+                }
+                Ok(Err(e)) => Err(ClientError::from(e)),
+                Err(_) => Err(ClientError::Timeout {
+                    url: url.to_string(),
+                }),
+            };
+            let (status, headers, bytes) = match attempt {
+                Ok(done) => done,
+                Err(
+                    e @ (ClientError::Transport(_)
+                    | ClientError::Body(_)
+                    | ClientError::Timeout { .. }),
+                ) if idempotent && transport_retries < MAX_TRANSPORT_RETRIES => {
+                    let backoff = backoff_with_jitter(transport_retries);
+                    warn!(
+                        url = %url,
+                        error = %e,
+                        backoff_secs = backoff.as_secs(),
+                        attempt = transport_retries + 1,
+                        "request failed, retrying"
+                    );
+                    tokio::time::sleep(self.scaled(backoff)).await;
+                    transport_retries += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             // ── Rate limiting ─────────────────────────────────────────────
-            //
-            // GitHub sends two kinds of rate-limit responses:
-            //   • Primary limits   (X-RateLimit-Remaining == 0, 403/429)
-            //   • Secondary limits (abuse detection, 429 with Retry-After)
-            //
-            // 1. If `Retry-After` is present, sleep for that many seconds.
-            // 2. Else if X-RateLimit-Reset says we are out, sleep until reset
-            //    (plus the clock-skew buffer baked into seconds_until_reset).
-            // 3. Otherwise fall back to a 60-second sleep.
-            // Every wait is clamped to MAX_BACKOFF_SECS so a pathological
-            // server header can't pause the run for hours.
-            let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
-                || (status == StatusCode::FORBIDDEN
-                    && rate_info.map(|r| r.is_exhausted()).unwrap_or(false));
-
-            if is_rate_limited {
-                let wait = RateLimitInfo::retry_after(&headers)
-                    .or_else(|| rate_info.map(|r| r.seconds_until_reset(unix_now())))
-                    .unwrap_or(60)
-                    .clamp(1, MAX_BACKOFF_SECS);
-
-                if rate_retries >= MAX_RATE_LIMIT_RETRIES {
+            if let Some(limit) = rate_limit::classify(status.as_u16(), &headers, &bytes, unix_now())
+            {
+                let (wait, jitter_span) = match limit {
+                    RateLimitWait::Explicit(secs) => (secs.max(1), 1.0),
+                    RateLimitWait::Unspecified => (
+                        SECONDARY_LIMIT_BASE_SECS << rate_hits.min(4),
+                        // Spread concurrent clients over a few seconds.
+                        5.0,
+                    ),
+                };
+                if rate_hits >= MAX_RATE_LIMIT_RETRIES
+                    || rate_waited.saturating_add(wait) > MAX_RATE_WAIT_TOTAL_SECS
+                {
                     return Err(ClientError::RateLimitExceeded {
                         retry_after_secs: wait,
                     });
                 }
-
                 warn!(
                     url = %url,
-                    wait_secs = wait,
-                    attempt = rate_retries + 1,
-                    "rate limit hit, sleeping until reset"
+                    status = status.as_u16(),
+                    "rate limited; waiting {wait}s (attempt {})",
+                    rate_hits + 1
                 );
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                rate_retries += 1;
+                let jitter = Duration::from_millis((jitter_ms() as f64 * jitter_span) as u64);
+                tokio::time::sleep(self.scaled(Duration::from_secs(wait) + jitter)).await;
+                rate_waited += wait;
+                rate_hits += 1;
                 continue;
             }
 
-            // ── Transient server errors (5xx) ─────────────────────────────
-            if status.is_server_error() {
-                if server_retries >= MAX_SERVER_ERROR_RETRIES {
-                    let body = collect_body_limited(response.into_body()).await?;
-                    return Err(ClientError::ApiError {
-                        status: status.as_u16(),
-                        body: String::from_utf8_lossy(&body).into_owned(),
-                    });
-                }
+            // ── Transient server errors ───────────────────────────────────
+            if idempotent
+                && matches!(status.as_u16(), 500 | 502 | 503 | 504)
+                && server_retries < MAX_SERVER_ERROR_RETRIES
+            {
                 let backoff = backoff_with_jitter(server_retries);
                 warn!(
                     url = %url,
@@ -575,17 +609,15 @@ impl GitHubClient {
                     attempt = server_retries + 1,
                     "transient server error, retrying with jitter"
                 );
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(self.scaled(backoff)).await;
                 server_retries += 1;
                 continue;
             }
 
-            // ── Client errors (non-retryable) ─────────────────────────────
             if !status.is_success() {
-                let body = collect_body_limited(response.into_body()).await?;
                 return Err(ClientError::ApiError {
                     status: status.as_u16(),
-                    body: String::from_utf8_lossy(&body).into_owned(),
+                    body: String::from_utf8_lossy(&bytes).into_owned(),
                 });
             }
 
@@ -597,10 +629,13 @@ impl GitHubClient {
             } else {
                 None
             };
-
-            let body_bytes = collect_body_limited(response.into_body()).await?;
-            return Ok((body_bytes, link_header));
+            return Ok((bytes, link_header));
         }
+    }
+
+    /// Converts a nominal wait into real time (identity outside tests).
+    fn scaled(&self, d: Duration) -> Duration {
+        d.mul_f64(self.timing.unit.as_secs_f64())
     }
 }
 
@@ -635,6 +670,23 @@ fn jitter_ms() -> u64 {
     x % 1000
 }
 
+/// An API base URL must be `https://host[...]`: the token is sent with every
+/// request, so a typo like `http://` must fail early instead of leaking it (the
+/// transport would refuse it too, but only at the first request).
+fn validate_api_url(raw: &str) -> Result<(), ClientError> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| ClientError::InvalidApiUrl(format!("{raw:?} is not a valid URL: {e}")))?;
+    if url.scheme() != "https" {
+        return Err(ClientError::InvalidApiUrl(format!(
+            "{raw:?} must start with https:// (the token is sent with every request)"
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(ClientError::InvalidApiUrl(format!("{raw:?} has no host")));
+    }
+    Ok(())
+}
+
 /// Returns the current time as a Unix timestamp in seconds.
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
@@ -663,12 +715,20 @@ pub(crate) async fn collect_body(
 /// unbounded stream.
 pub(crate) async fn collect_body_limited(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
+    idle_timeout: Duration,
 ) -> Result<Bytes, ClientError> {
     use http_body_util::BodyExt as _;
 
     let mut body = std::pin::pin!(body);
     let mut buf = bytes::BytesMut::new();
-    while let Some(frame) = body.frame().await {
+    // `idle_timeout` bounds the silence between two chunks, not the whole
+    // transfer: a slow but steady body is fine, a stalled one is not.
+    while let Some(frame) = tokio::time::timeout(idle_timeout, body.frame())
+        .await
+        .map_err(|_| ClientError::Timeout {
+            url: "(response body stalled)".to_string(),
+        })?
+    {
         let frame = frame?;
         if let Some(chunk) = frame.data_ref() {
             if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -687,7 +747,7 @@ pub(crate) async fn collect_body_limited(
 }
 
 /// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
-fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
+pub(crate) fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
     let mut root_store = rustls::RootCertStore::empty();
     let cert_result = rustls_native_certs::load_native_certs();
     if cert_result.certs.is_empty() {
@@ -757,6 +817,27 @@ mod tests {
         let client =
             GitHubClient::with_api_url(cred, "https://github.example.com/api/v3/").expect("client");
         assert_eq!(client.api(), "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn api_urls_must_be_https_with_a_host() {
+        for ok in ["https://api.github.com", "https://ghe.example.com/api/v3/"] {
+            assert!(validate_api_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://ghe.example.com/api/v3",
+            "ghe.example.com",
+            "https://",
+            "ftp://h",
+            "",
+        ] {
+            assert!(
+                matches!(validate_api_url(bad), Err(ClientError::InvalidApiUrl(_))),
+                "{bad}"
+            );
+        }
+        let cred = Credential::Token("ghp_test".to_string());
+        assert!(GitHubClient::with_api_url(cred, "http://ghe.example.com").is_err());
     }
 
     // ── Back-off + jitter ────────────────────────────────────────────────

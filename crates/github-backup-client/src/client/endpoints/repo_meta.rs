@@ -6,9 +6,6 @@
 //! Covers labels, milestones, releases, hooks, security advisories, topics,
 //! branches, and release asset downloads.
 
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::Method;
 use tracing::info;
 
 use github_backup_types::{
@@ -17,7 +14,7 @@ use github_backup_types::{
 
 use crate::error::ClientError;
 
-use super::super::{collect_body, GitHubClient, DEFAULT_TIMEOUT_SECS, PER_PAGE};
+use super::super::{GitHubClient, PER_PAGE};
 
 impl GitHubClient {
     // ── Repository metadata ───────────────────────────────────────────────
@@ -104,34 +101,13 @@ impl GitHubClient {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}/topics");
 
-        let req = self
-            .build_request(Method::GET, &url)?
-            .header("Accept", "application/vnd.github.v3+json")
-            .body(Full::new(Bytes::new()))
-            .map_err(ClientError::Http)?;
-
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            self.http.request(req),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout { url: url.clone() })??;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = collect_body(response.into_body()).await?;
-            return Err(ClientError::ApiError {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-
-        let body = collect_body(response.into_body()).await?;
         #[derive(serde::Deserialize)]
         struct TopicsResponse {
             names: Vec<String>,
         }
-        let parsed: TopicsResponse = serde_json::from_slice(&body)?;
+        // Through the shared retry loop: a rate-limit 403 must be waited out,
+        // not mistaken for "no access" by the caller.
+        let (parsed, _) = self.get_json_with_link::<TopicsResponse>(&url).await?;
         info!(owner, repo, count = parsed.names.len(), "fetched topics");
         Ok(parsed.names)
     }

@@ -98,8 +98,9 @@ pub(crate) async fn run_doctor(args: &Args) -> ExitCode {
     report.push(doctor::check_git_binary());
     report.push(doctor::check_output_dir(args.output.as_deref()));
     report.push(doctor::check_credential(args));
-    let api_url = args.api_url.as_deref();
-    report.push(doctor::check_connectivity(api_url).await);
+    for check in doctor::check_api(args).await {
+        report.push(check);
+    }
 
     let ansi = ui::use_ansi();
     let label = if args.check { "check" } else { "doctor" };

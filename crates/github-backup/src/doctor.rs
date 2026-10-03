@@ -21,6 +21,9 @@
 
 use std::time::Duration;
 
+use github_backup_client::{ClientError, GitHubClient};
+use github_backup_types::config::Credential;
+
 use crate::cli::Args;
 
 /// Outcome of a single check.
@@ -330,80 +333,138 @@ fn token_kind(token: &str) -> TokenKind {
     }
 }
 
-/// Pings the configured API base to confirm network connectivity.
+/// How long `--doctor` waits for the API before calling it unreachable.
+const API_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Checks the API URL, that the API is reachable (through the proxy
+/// environment, exactly as the backup would reach it) and that the credential
+/// is accepted.
 ///
-/// Uses a fresh hyper client so a misconfigured proxy / firewall is
-/// reported as a connectivity failure rather than producing a confusing
-/// `Transport` error several seconds later.
-pub async fn check_connectivity(api_url: Option<&str>) -> Check {
-    let url = api_url
-        .map(str::to_string)
-        .unwrap_or_else(|| "https://api.github.com".to_string());
-    let url_for_log = url.clone();
-
-    // We don't need authentication for a connectivity ping — `GET /` on
-    // the root returns 200 with a JSON map of endpoints.
-    use bytes::Bytes;
-    use http_body_util::Full;
-    use hyper::{Method, Request};
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
-
-    let mut root_store = rustls::RootCertStore::empty();
-    let certs = rustls_native_certs::load_native_certs();
-    if certs.certs.is_empty() {
-        return Check::fail(
-            "system TLS roots",
-            "no CA certificates found on this host",
-            "install your distribution's `ca-certificates` package",
-        );
-    }
-    root_store.add_parsable_certificates(certs.certs);
-    let tls = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls)
-        .https_or_http()
-        .enable_http1()
-        .build();
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
-
-    let req = match Request::builder()
-        .method(Method::GET)
-        .uri(&url)
-        .header(
-            "User-Agent",
-            concat!("github-backup-rust/", env!("CARGO_PKG_VERSION")),
-        )
-        .body(Full::new(Bytes::new()))
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Check::fail(
-                "API connectivity",
-                format!("could not build request to {url_for_log}: {e}"),
-                "verify the URL is well-formed (https://… )",
-            );
-        }
+/// This builds the very client the backup uses, so an invalid `--api-url`, a
+/// missing CA bundle or a bad proxy shows up here and not minutes into a run.
+/// The token is verified with `GET /rate_limit`, which does not consume rate
+/// limit: a revoked, expired or mistyped token is a failure, not a pass.
+pub async fn check_api(args: &Args) -> Vec<Check> {
+    let url = args.api_url.as_deref().unwrap_or("https://api.github.com");
+    let token = args
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let credential = match token {
+        Some(t) => Credential::Token(t.to_string()),
+        None => Credential::Anonymous,
     };
+    let client = match GitHubClient::with_api_url(credential, url) {
+        Ok(c) => c,
+        Err(e) => return vec![client_setup_failure(url, &e)],
+    };
+    check_api_with(&client, url, token.is_some()).await
+}
 
-    match tokio::time::timeout(Duration::from_secs(10), client.request(req)).await {
-        Ok(Ok(resp)) => Check::pass(
-            "API connectivity",
-            format!("{url_for_log} → HTTP {}", resp.status().as_u16()),
+fn client_setup_failure(url: &str, e: &ClientError) -> Check {
+    match e {
+        ClientError::InvalidApiUrl(why) => Check::fail(
+            "API url",
+            format!("{url}: {why}"),
+            "use the https:// base URL of the API, e.g. https://ghe.example.com/api/v3",
         ),
-        Ok(Err(e)) => Check::fail(
-            "API connectivity",
-            format!("{url_for_log}: {e}"),
-            "check your network, firewall, or set HTTPS_PROXY",
-        ),
-        Err(_) => Check::fail(
-            "API connectivity",
-            format!("{url_for_log}: timed out after 10s"),
-            "check your network or set HTTPS_PROXY for proxied environments",
+        e => Check::fail(
+            "system TLS roots",
+            e.to_string(),
+            "install your distribution's `ca-certificates` package",
         ),
     }
+}
+
+/// The checks behind [`check_api`], for an already-built client.
+pub(crate) async fn check_api_with(
+    client: &GitHubClient,
+    url: &str,
+    has_token: bool,
+) -> Vec<Check> {
+    let outcome = match tokio::time::timeout(API_CHECK_TIMEOUT, client.verify_token()).await {
+        Ok(r) => r,
+        Err(_) => Err(ClientError::Timeout {
+            url: url.to_string(),
+        }),
+    };
+    interpret_api_result(url, has_token, outcome)
+}
+
+fn interpret_api_result(
+    url: &str,
+    has_token: bool,
+    outcome: Result<Option<u64>, ClientError>,
+) -> Vec<Check> {
+    let reachable = |detail: String| Check::pass("API connectivity", detail);
+    let token_failure = |detail: String, hint: &str| Check::fail("token", detail, hint);
+    match outcome {
+        Ok(remaining) => {
+            let mut checks = vec![reachable(format!("{url} reachable"))];
+            if has_token {
+                checks.push(Check::pass(
+                    "token",
+                    match remaining {
+                        Some(n) => format!("accepted by GitHub ({n} API requests left)"),
+                        None => "accepted by GitHub".to_string(),
+                    },
+                ));
+            }
+            checks
+        }
+        // The server answered, so the network is fine.
+        Err(ClientError::ApiError { status: 401, body }) => vec![
+            reachable(format!("{url} reachable")),
+            token_failure(
+                format!("rejected by GitHub (HTTP 401{})", message_suffix(&body)),
+                "the token is revoked, expired or mistyped; create a new one at \
+                 https://github.com/settings/tokens",
+            ),
+        ],
+        Err(ClientError::ApiError { status: 403, body }) => vec![
+            reachable(format!("{url} reachable")),
+            token_failure(
+                format!("refused by GitHub (HTTP 403{})", message_suffix(&body)),
+                "check that the token is allowed to use this API (SSO authorisation, \
+                 organisation token policy, IP allow list)",
+            ),
+        ],
+        Err(ClientError::ApiError { status: 404, .. }) => vec![
+            reachable(format!("{url} reachable")),
+            Check::warn(
+                "token",
+                "could not be verified: the server has no /rate_limit endpoint",
+                "check that --api-url is the API base (…/api/v3 for GitHub Enterprise Server)",
+            ),
+        ],
+        Err(ClientError::RateLimitExceeded { .. }) => vec![
+            reachable(format!("{url} reachable")),
+            Check::warn(
+                "token",
+                "GitHub is rate limiting this client",
+                "wait a while, then run --doctor again",
+            ),
+        ],
+        Err(e) => vec![Check::fail(
+            "API connectivity",
+            format!("{url}: {e}"),
+            "check your network, firewall, or set HTTPS_PROXY (and NO_PROXY) for proxied environments",
+        )],
+    }
+}
+
+/// `: <message>` from a GitHub error body, or nothing.
+fn message_suffix(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v["message"]
+                .as_str()
+                .map(|m| m.chars().take(80).collect::<String>())
+        })
+        .map(|m| format!(": {m}"))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -490,3 +551,7 @@ mod tests {
         assert!(!dir.path().join(".github-backup-doctor-probe").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "doctor_api_tests.rs"]
+mod api_tests;

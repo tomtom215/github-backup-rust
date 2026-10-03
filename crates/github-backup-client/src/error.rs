@@ -44,6 +44,10 @@ pub enum ClientError {
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 
+    /// The configured API base URL cannot be used.
+    #[error("invalid API URL: {0}")]
+    InvalidApiUrl(String),
+
     /// TLS configuration failed.
     #[error("TLS error: {0}")]
     Tls(String),
