@@ -361,4 +361,15 @@ pub trait BackupClient: Send + Sync {
         package_type: &'a str,
         package_name: &'a str,
     ) -> BoxFuture<'a, Result<Vec<PackageVersion>, ClientError>>;
+
+    // ── Credentials ───────────────────────────────────────────────────────
+
+    /// The access token in use, if any.
+    ///
+    /// The engine hands it to git (through a `GIT_ASKPASS` helper, never on the
+    /// command line) so HTTPS clones of private repositories authenticate.
+    /// The default, for clients without a token, is `None`.
+    fn token(&self) -> Option<String> {
+        None
+    }
 }

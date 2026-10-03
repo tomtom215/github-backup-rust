@@ -17,6 +17,7 @@ pub mod gist;
 pub mod hooks;
 pub mod issue;
 pub mod labels;
+pub(crate) mod merge;
 pub mod milestones;
 pub mod package;
 pub mod project;

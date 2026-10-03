@@ -21,8 +21,8 @@
 //!   `--progress`, so a huge repository that takes hours to clone is never
 //!   interrupted while it is making progress, but a hung connection is.
 //!
-//! - **Prompt shutdown** — [`request_shutdown`] stops running git processes
-//!   (and their transport helpers) within a fraction of a second.
+//! - **Prompt cancellation** — triggering [`CloneOptions::cancel`] stops running
+//!   git processes (and their transport helpers) within a fraction of a second.
 //!
 //! - **Partial clone cleanup** — if a fresh clone fails (destination did not
 //!   exist before the attempt), any partially written directory is removed so
@@ -49,10 +49,9 @@ use std::process::Command;
 
 use tracing::{debug, info, warn};
 
+use crate::cancel::CancelFlag;
 use crate::error::CoreError;
 use process::run_git;
-
-pub use process::{request_shutdown, shutdown_requested};
 
 // ── Public test-support re-export ─────────────────────────────────────────────
 
@@ -89,6 +88,9 @@ pub struct CloneOptions {
     /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
     /// detect repository corruption early.
     pub run_fsck: bool,
+    /// Triggering this stops running git processes promptly and makes new ones
+    /// fail with [`CoreError::Interrupted`].
+    pub cancel: CancelFlag,
 }
 
 impl CloneOptions {
@@ -100,6 +102,7 @@ impl CloneOptions {
             no_prune: false,
             stall_timeout_secs: DEFAULT_STALL_TIMEOUT_SECS,
             run_fsck: false,
+            cancel: CancelFlag::new(),
         }
     }
 }
@@ -613,7 +616,7 @@ mod tests {
 
     // ── Process handling (stand-in `git` scripts, Unix only) ─────────────
     //
-    // Process-wide shutdown (`request_shutdown`) is covered by the
+    // Cancellation (`CloneOptions::cancel`) is covered by the
     // integration test `tests/git_shutdown.rs`, which runs in its own process
     // so the one-way flag cannot leak into these tests.
 

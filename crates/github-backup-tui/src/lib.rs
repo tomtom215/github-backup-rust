@@ -316,12 +316,14 @@ async fn run_backup_task(
         opts,
     );
 
+    // Cancelling must really stop the run: git processes are killed and no
+    // further work starts, then the engine is awaited so its lock is released.
+    let cancel = engine.cancel_handle();
+    let mut run = Box::pin(engine.run(&owner));
     tokio::select! {
-        result = engine.run(&owner) => {
+        result = &mut run => {
             match result {
                 Ok(stats) => {
-                    // Persist backup state.
-                    save_backup_state(&owner, &output_path, &stats);
                     let _ = tx.send(event::BackupEvent::BackupDone {
                         repos_backed_up:    stats.repos_backed_up(),
                         repos_discovered:   stats.repos_discovered(),
@@ -343,29 +345,13 @@ async fn run_backup_task(
             }
         }
         _ = cancel_rx => {
+            cancel.cancel();
+            let _ = run.await;
             let _ = tx.send(event::BackupEvent::BackupFailed {
                 error: "Backup cancelled by user.".into(),
             });
         }
     }
-}
-
-fn save_backup_state(
-    owner: &str,
-    output_path: &std::path::Path,
-    stats: &github_backup_core::BackupStats,
-) {
-    use github_backup_types::backup_state::BackupState;
-
-    let output = OutputConfig::new(output_path);
-    let state_path = output.backup_state_path(owner);
-    let now = chrono::Utc::now();
-    let s = BackupState {
-        last_successful_run: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        repos_backed_up: stats.repos_backed_up(),
-    };
-    let _ = s.save(&state_path);
 }
 
 // ── Verify task ───────────────────────────────────────────────────────────────

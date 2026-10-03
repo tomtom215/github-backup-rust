@@ -17,8 +17,9 @@
 //!   [`CloneOptions::stall_timeout_secs`].  git is run with `--progress`, so a
 //!   healthy multi-hour clone of a very large repository keeps emitting
 //!   progress and is never interrupted, while a hung connection is.
-//! * **A shutdown request stops the child promptly.**  See
-//!   [`request_shutdown`].
+//! * **Cancellation stops the child promptly.**  When
+//!   [`CloneOptions::cancel`] is triggered the child is killed within one poll
+//!   interval.
 //! * **The child leads its own process group** (Unix), so killing it also
 //!   reaches git's transport helpers (`git-remote-https`, `ssh`, …) instead of
 //!   leaving them blocked on a dead socket.
@@ -32,7 +33,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,30 +52,11 @@ const STDERR_TAIL_BYTES: usize = 16 * 1024;
 const READER_GRACE: Duration = Duration::from_secs(2);
 
 /// How often the supervisor checks the child, the stall timer and the
-/// shutdown flag.
+/// cancel flag.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How many lines of the stderr tail are kept in an error message.
 const ERROR_LINES: usize = 12;
-
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// Asks every running and future git subprocess to stop.
-///
-/// Called by the binary when it receives SIGINT/SIGTERM.  Running children are
-/// killed within one poll interval and new ones are refused with
-/// [`CoreError::Interrupted`], so the process can exit promptly (for example
-/// inside Docker's 10-second `docker stop` grace period) without leaving git
-/// processes behind.  The flag is process-wide and one-way.
-pub fn request_shutdown() {
-    SHUTDOWN.store(true, Ordering::SeqCst);
-}
-
-/// Returns `true` once [`request_shutdown`] has been called.
-#[must_use]
-pub fn shutdown_requested() -> bool {
-    SHUTDOWN.load(Ordering::SeqCst)
-}
 
 /// Retains the tail of a child's stderr and the time of its last output.
 struct StderrCapture {
@@ -192,7 +174,7 @@ pub(super) fn run_git(
     token: Option<&str>,
     opts: &CloneOptions,
 ) -> Result<(), CoreError> {
-    if shutdown_requested() {
+    if opts.cancel.is_cancelled() {
         return Err(CoreError::Interrupted);
     }
     debug!(args = ?args, cwd = %cwd.display(), "running git");
@@ -246,7 +228,7 @@ pub(super) fn run_git(
                 });
             }
             None => {
-                if shutdown_requested() {
+                if opts.cancel.is_cancelled() {
                     kill_tree(&mut child);
                     return Err(CoreError::Interrupted);
                 }

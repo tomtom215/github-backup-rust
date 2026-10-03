@@ -23,36 +23,32 @@
 //!   "issues_fetched": 150,
 //!   "prs_fetched": 42,
 //!   "workflows_fetched": 5,
+//!   "failure_count": 0,
+//!   "failures": [],
 //!   "success": true
 //! }
 //! ```
+//!
+//! `success` is `true` only when **nothing** failed (`failure_count == 0`):
+//! every failed step — a repository that could not be cloned, an issue list that
+//! could not be fetched, an S3 upload that errored — is listed in `failures`
+//! with its `scope`, `step` and `message`, and makes the run unsuccessful.
 
 use chrono::{DateTime, TimeZone, Utc};
 use github_backup_core::BackupStats;
 
-/// Writes a JSON summary report to `path`.
-///
-/// The report includes counters, elapsed time, tool version, and an ISO 8601
-/// timestamp so monitoring systems can parse and alert on backup health.
+/// Builds the JSON summary report.
 ///
 /// The schema is **append-only stable**: existing keys keep the same name and
 /// type across releases.  Monitoring jobs may pin to the set of keys
 /// currently documented in the module-level doc-comment.
-///
-/// # Errors
-///
-/// Returns an error string if the file cannot be created or written.
-pub fn write_report(
-    path: &std::path::Path,
-    owner: &str,
-    stats: &BackupStats,
-    started_at_unix: u64,
-) -> Result<(), String> {
+#[must_use]
+pub fn build_report(owner: &str, stats: &BackupStats, started_at_unix: u64) -> serde_json::Value {
     let started_iso = unix_secs_to_iso8601(started_at_unix);
     let elapsed = stats.elapsed_secs();
     let finished_iso = unix_secs_to_iso8601(started_at_unix.saturating_add(elapsed as u64));
 
-    let report = serde_json::json!({
+    serde_json::json!({
         "tool_version": env!("CARGO_PKG_VERSION"),
         "schema_version": 1,
         "owner": owner,
@@ -67,8 +63,28 @@ pub fn write_report(
         "issues_fetched": stats.issues_fetched(),
         "prs_fetched": stats.prs_fetched(),
         "workflows_fetched": stats.workflows_fetched(),
-        "success": stats.repos_errored() == 0,
-    });
+        "failure_count": stats.failure_count(),
+        "failures": stats.failures(),
+        "success": !stats.has_failures(),
+    })
+}
+
+/// Writes a JSON summary report to `path`.
+///
+/// The report includes counters, elapsed time, tool version, the list of
+/// failures and an ISO 8601 timestamp so monitoring systems can parse and alert
+/// on backup health.  See [`build_report`] for the schema.
+///
+/// # Errors
+///
+/// Returns an error string if the file cannot be created or written.
+pub fn write_report(
+    path: &std::path::Path,
+    owner: &str,
+    stats: &BackupStats,
+    started_at_unix: u64,
+) -> Result<(), String> {
+    let report = build_report(owner, stats, started_at_unix);
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -147,8 +163,61 @@ pub fn is_valid_iso8601(s: &str) -> bool {
     DateTime::parse_from_rfc3339(s).is_ok()
 }
 
+/// Normalises a `--since` value to `YYYY-MM-DDTHH:MM:SSZ` (UTC).
+///
+/// Accepts a bare date (`2024-01-01`, taken as midnight UTC) or a full RFC 3339
+/// timestamp with any offset.
+///
+/// # Errors
+///
+/// Returns what is wrong with `value` when it is neither.
+pub fn normalise_since(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if is_valid_iso8601(value) {
+        let dt = DateTime::parse_from_rfc3339(value).map_err(|e| e.to_string())?;
+        return Ok(dt
+            .with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string());
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .ok_or_else(|| {
+            "expected a date like 2024-01-01 or a timestamp like 2024-01-01T00:00:00Z".to_string()
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalise_since_accepts_dates_and_timestamps() {
+        use super::normalise_since;
+        assert_eq!(
+            normalise_since("2024-01-01").unwrap(),
+            "2024-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            normalise_since("2024-01-01T12:00:00+02:00").unwrap(),
+            "2024-01-01T10:00:00Z",
+            "offsets are converted to UTC"
+        );
+        assert_eq!(
+            normalise_since(" 2024-01-01T00:00:00Z ").unwrap(),
+            "2024-01-01T00:00:00Z"
+        );
+        for bad in [
+            "",
+            "yesterday",
+            "2024-13-01",
+            "2024-02-30",
+            "2024-01-01 00:00:00",
+        ] {
+            assert!(normalise_since(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
     use super::*;
 
     // ── is_valid_iso8601 ──────────────────────────────────────────────────
@@ -261,5 +330,74 @@ mod tests {
         std::fs::write(&target, b"old").expect("seed");
         super::write_atomic(&target, b"new").expect("overwrite");
         assert_eq!(std::fs::read(&target).expect("read"), b"new");
+    }
+
+    // ── build_report ──────────────────────────────────────────────────────
+
+    #[test]
+    fn report_of_a_clean_run_is_successful_with_an_empty_failure_list() {
+        let stats = BackupStats::new();
+        stats.add_discovered(3);
+        stats.inc_backed_up();
+        let r = build_report("octocat", &stats, 1_705_305_600);
+        assert_eq!(r["owner"], "octocat");
+        assert_eq!(r["started_at"], "2024-01-15T08:00:00Z");
+        assert_eq!(r["success"], true);
+        assert_eq!(r["failure_count"], 0);
+        assert_eq!(r["failures"], serde_json::json!([]));
+        assert_eq!(r["repos_discovered"], 3);
+        assert_eq!(r["schema_version"], 1);
+    }
+
+    /// A run that lost data is not a success, even if no repository counter
+    /// says so: here every repository counter is clean but a gist failed.
+    #[test]
+    fn report_is_unsuccessful_whenever_anything_failed() {
+        let stats = BackupStats::new();
+        stats.record_failure("octocat", "gist abc", "fatal: boom");
+        assert_eq!(stats.repos_errored(), 0);
+        let r = build_report("octocat", &stats, 0);
+        assert_eq!(r["success"], false);
+        assert_eq!(r["failure_count"], 1);
+        assert_eq!(r["failures"][0]["scope"], "octocat");
+        assert_eq!(r["failures"][0]["step"], "gist abc");
+        assert_eq!(r["failures"][0]["message"], "fatal: boom");
+    }
+
+    #[test]
+    fn every_documented_key_is_present() {
+        let r = build_report("o", &BackupStats::new(), 0);
+        for key in [
+            "tool_version",
+            "schema_version",
+            "owner",
+            "started_at",
+            "finished_at",
+            "duration_secs",
+            "repos_discovered",
+            "repos_backed_up",
+            "repos_skipped",
+            "repos_errored",
+            "gists_backed_up",
+            "issues_fetched",
+            "prs_fetched",
+            "workflows_fetched",
+            "failure_count",
+            "failures",
+            "success",
+        ] {
+            assert!(r.get(key).is_some(), "report is missing `{key}`");
+        }
+    }
+
+    #[test]
+    fn write_report_creates_parent_directories_and_valid_json() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("report.json");
+        write_report(&path, "octocat", &BackupStats::new(), 0).expect("write");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("valid JSON");
+        assert_eq!(parsed["owner"], "octocat");
     }
 }
