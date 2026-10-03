@@ -48,6 +48,7 @@
 //!     &config,
 //!     Path::new("/backup/octocat/git/repos"),
 //!     "Mirror of ",
+//!     &std::collections::HashSet::new(),
 //! ).await?;
 //!
 //! println!("Pushed {} repos, {} errors", stats.pushed, stats.errored);
@@ -64,6 +65,7 @@ pub mod config;
 pub mod error;
 pub mod gitlab_client;
 pub mod gitlab_runner;
+mod push;
 pub mod runner;
 
 pub use client::GiteaClient;

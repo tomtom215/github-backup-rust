@@ -59,6 +59,17 @@ pub enum MirrorError {
     #[error("could not spawn git: {0}")]
     GitSpawn(#[from] std::io::Error),
 
+    /// The destination already holds a repository of that name that this tool
+    /// did not create; pushing `--prune` into it could destroy unrelated work.
+    #[error(
+        "repository {repo:?} already exists at the mirror destination and was not created by \
+         github-backup (its description is not the mirror marker); refusing to overwrite it"
+    )]
+    ForeignRepository {
+        /// Repository name.
+        repo: String,
+    },
+
     /// Request timed out.
     #[error("request to {url} timed out")]
     Timeout {

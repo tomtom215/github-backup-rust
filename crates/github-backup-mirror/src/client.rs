@@ -19,6 +19,7 @@ use tracing::{debug, info};
 
 use crate::config::GiteaConfig;
 use crate::error::MirrorError;
+use crate::push::verify_ours;
 
 const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -65,6 +66,12 @@ struct GiteaRepo {
     /// Full name of the repository (owner/name).
     #[allow(dead_code)]
     full_name: String,
+    /// Free-text description; carries the mirror marker.
+    #[serde(default)]
+    description: Option<String>,
+    /// `true` while the repository has no commits.
+    #[serde(default)]
+    empty: bool,
 }
 
 impl GiteaClient {
@@ -80,9 +87,11 @@ impl GiteaClient {
 
     /// Ensures the repository `name` exists at the mirror destination.
     ///
-    /// If it already exists, this is a no-op.  If it does not exist, it is
-    /// created as an empty repository so the subsequent `git push --mirror`
-    /// can succeed.
+    /// If it already exists it must carry `description` (the marker set when
+    /// this tool created it) or still be empty; otherwise it belongs to
+    /// someone else and [`MirrorError::ForeignRepository`] is returned.  If it
+    /// does not exist, it is created as an empty repository (`private` or
+    /// public) so the subsequent push can succeed.
     ///
     /// # Errors
     ///
@@ -91,8 +100,15 @@ impl GiteaClient {
         &self,
         name: &str,
         description: &str,
+        private: bool,
     ) -> Result<(), MirrorError> {
-        if self.repo_exists(name).await? {
+        if let Some(existing) = self.fetch_repo(name).await? {
+            verify_ours(
+                name,
+                existing.description.as_deref(),
+                existing.empty,
+                description,
+            )?;
             info!(
                 owner = %self.config.owner,
                 repo = %name,
@@ -106,11 +122,11 @@ impl GiteaClient {
             repo = %name,
             "creating mirror repository"
         );
-        self.create_repo(name, description).await
+        self.create_repo(name, description, private).await
     }
 
-    /// Returns `true` if the repository `name` exists at the mirror destination.
-    async fn repo_exists(&self, name: &str) -> Result<bool, MirrorError> {
+    /// Returns the repository `name` at the mirror destination, if it exists.
+    async fn fetch_repo(&self, name: &str) -> Result<Option<GiteaRepo>, MirrorError> {
         let url = format!(
             "{}/repos/{}/{}",
             self.config.api_base(),
@@ -136,8 +152,11 @@ impl GiteaClient {
         .map_err(|_| MirrorError::Timeout { url: url.clone() })??;
 
         match response.status() {
-            StatusCode::OK => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
+            StatusCode::OK => {
+                let body = collect_body(response.into_body()).await?;
+                Ok(Some(serde_json::from_slice(&body)?))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
             status => {
                 let body = collect_body(response.into_body()).await?;
                 Err(MirrorError::Api {
@@ -148,16 +167,56 @@ impl GiteaClient {
         }
     }
 
+    /// Returns the login of the account the token belongs to.
+    async fn authenticated_login(&self) -> Result<String, MirrorError> {
+        #[derive(Deserialize)]
+        struct Me {
+            login: String,
+        }
+        let url = format!("{}/user", self.config.api_base());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(&url)
+            .header("Authorization", format!("token {}", self.config.token))
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json")
+            .body(Full::new(Bytes::new()))
+            .map_err(MirrorError::Request)?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.http.request(req),
+        )
+        .await
+        .map_err(|_| MirrorError::Timeout { url: url.clone() })??;
+        let status = response.status();
+        let body = collect_body(response.into_body()).await?;
+        if !status.is_success() {
+            return Err(MirrorError::Api {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+        Ok(serde_json::from_slice::<Me>(&body)?.login)
+    }
+
     /// Creates a new empty repository at the mirror destination.
-    async fn create_repo(&self, name: &str, description: &str) -> Result<(), MirrorError> {
-        // Gitea supports creating repos for a user or an org; try the user
-        // endpoint first and fall back to the org endpoint if needed.
-        let url = format!("{}/user/repos", self.config.api_base());
+    async fn create_repo(
+        &self,
+        name: &str,
+        description: &str,
+        private: bool,
+    ) -> Result<(), MirrorError> {
+        // `/user/repos` always creates under the *token's* account.  When the
+        // configured owner is another account (an organisation), the repository
+        // must be created through the organisation endpoint or the push below
+        // would target a repository that does not exist.
+        let login = self.authenticated_login().await?;
+        let url = create_repo_url(&self.config.api_base(), &self.config.owner, &login);
 
         let body = serde_json::to_vec(&CreateRepoRequest {
             name,
             description,
-            private: self.config.private,
+            private,
             auto_init: false,
         })?;
 
@@ -195,6 +254,16 @@ impl GiteaClient {
         }
 
         Ok(())
+    }
+}
+
+/// The endpoint that creates a repository under `owner` for a token that
+/// belongs to `login`.
+fn create_repo_url(api_base: &str, owner: &str, login: &str) -> String {
+    if owner.eq_ignore_ascii_case(login) {
+        format!("{api_base}/user/repos")
+    } else {
+        format!("{api_base}/orgs/{owner}/repos")
     }
 }
 
@@ -246,6 +315,19 @@ mod tests {
         // We can't easily construct a GiteaClient in tests without TLS,
         // so just test the config formatting indirectly.
         assert!(!config.token.contains("secret_token") || config.token == "secret_token");
+    }
+
+    #[test]
+    fn repositories_are_created_under_the_configured_owner() {
+        let api = "https://git.example/api/v1";
+        assert_eq!(
+            create_repo_url(api, "Alice", "alice"),
+            "https://git.example/api/v1/user/repos"
+        );
+        assert_eq!(
+            create_repo_url(api, "my-org", "alice"),
+            "https://git.example/api/v1/orgs/my-org/repos"
+        );
     }
 
     #[test]
