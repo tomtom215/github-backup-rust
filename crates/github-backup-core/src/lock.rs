@@ -1,41 +1,38 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Advisory lock file that prevents two backup processes from running
-//! concurrently against the same output directory.
+//! Advisory lock that prevents two backup processes from running concurrently
+//! against the same owner directory.
 //!
 //! # Design
 //!
-//! [`BackupLock`] creates `<owner-json-dir>/.backup.lock` using
-//! `O_CREAT | O_EXCL`, which is atomic on POSIX filesystems.  The lock file
-//! contains the current process PID so that a stale lock from a crashed
-//! process can be detected.
+//! [`BackupLock`] holds an OS-level exclusive lock (`flock` on Unix,
+//! `LockFileEx` on Windows, via `fslock`) on `<owner-json-dir>/.backup.lock`.
+//! The kernel releases such a lock the moment the holding process dies — however
+//! it dies (`SIGKILL`, OOM kill, power loss, container stop) — so there is **no
+//! stale-lock state to detect and nothing to clean up by hand**.  An earlier
+//! design stored a PID in the file and probed whether that PID was alive, which
+//! reported a lock as held whenever an unrelated process (or PID 1 in a fresh
+//! container) happened to reuse the number.
 //!
-//! When the guard is dropped the lock file is removed.  If the process crashes
-//! before the guard is dropped (power loss, SIGKILL, panic) the lock file will
-//! remain on disk.  On the next run:
-//!
-//! - The PID stored in the file is read.
-//! - If no process with that PID exists the stale lock is deleted and the new
-//!   run proceeds.  Liveness is checked via `/proc/<pid>` on Linux and via
-//!   `kill(pid, 0)` on other Unix platforms.
-//! - If a process with that PID exists, the new run is aborted with an error.
-//!
-//! On non-Unix platforms (Windows) stale-PID detection falls back to a
-//! permissive "delete and proceed" strategy; the atomic `O_CREAT | O_EXCL`
-//! still prevents two *concurrent* processes from racing.
+//! The file itself is left in place when the guard is dropped; removing it would
+//! race with a process that has just opened it.  It records the PID of the last
+//! holder purely so the "already running" message can name it.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use tracing::{debug, warn};
+use fslock::LockFile;
+use tracing::debug;
 
-/// RAII guard that holds a backup lock file for its lifetime.
+/// RAII guard that holds the lock for its lifetime.
 ///
-/// Create via [`BackupLock::acquire`].  The lock file is removed when this
-/// value is dropped.
+/// Create via [`BackupLock::acquire`].  The lock is released when this value is
+/// dropped or the process exits.
 #[derive(Debug)]
 pub struct BackupLock {
     path: PathBuf,
+    _file: LockFile,
 }
 
 /// Errors that can occur when acquiring a backup lock.
@@ -43,12 +40,12 @@ pub struct BackupLock {
 pub enum LockError {
     /// Another backup process is already running.
     AlreadyRunning {
-        /// PID of the existing process, if readable.
+        /// PID recorded by the holder, if readable (informational only).
         pid: Option<u32>,
     },
     /// The lock file directory could not be created.
     DirCreate(std::io::Error),
-    /// The lock file could not be written.
+    /// The lock file could not be opened or locked.
     Write(std::io::Error),
 }
 
@@ -59,7 +56,7 @@ impl std::fmt::Display for LockError {
                 write!(f, "another backup is already running (PID {p})")
             }
             Self::AlreadyRunning { pid: None } => {
-                write!(f, "another backup is already running (lock file exists)")
+                write!(f, "another backup is already running (lock file is held)")
             }
             Self::DirCreate(e) => write!(f, "could not create lock directory: {e}"),
             Self::Write(e) => write!(f, "could not write lock file: {e}"),
@@ -70,129 +67,46 @@ impl std::fmt::Display for LockError {
 impl BackupLock {
     /// Acquires the lock for `json_dir`.
     ///
-    /// Creates `json_dir/.backup.lock` exclusively.  If the file already
-    /// exists but the recorded PID is no longer alive the stale lock is
-    /// removed and acquisition proceeds normally.
-    ///
     /// # Errors
     ///
     /// Returns [`LockError::AlreadyRunning`] if another live process holds the
-    /// lock, or I/O errors if the directory/file cannot be created.
+    /// lock, or I/O errors if the directory/file cannot be created or locked.
     pub fn acquire(json_dir: &Path) -> Result<Self, LockError> {
-        if let Some(parent) = json_dir.parent() {
-            std::fs::create_dir_all(parent).map_err(LockError::DirCreate)?;
-        }
         std::fs::create_dir_all(json_dir).map_err(LockError::DirCreate)?;
 
         let path = json_dir.join(".backup.lock");
+        let mut file = LockFile::open(&path).map_err(LockError::Write)?;
+        let acquired = file.try_lock().map_err(LockError::Write)?;
+        if !acquired {
+            let pid = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            return Err(LockError::AlreadyRunning { pid });
+        }
+
+        // Informational: who holds it now.
         let pid = std::process::id();
-        let content = pid.to_string();
-
-        // Attempt exclusive creation.
-        match try_create_exclusive(&path, &content) {
-            Ok(()) => {
-                debug!(path = %path.display(), pid, "backup lock acquired");
-                return Ok(Self { path });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Lock file exists.  Check if the owning process is alive.
-            }
-            Err(e) => return Err(LockError::Write(e)),
+        if let Err(e) = write_pid(&path, pid) {
+            debug!(path = %path.display(), error = %e, "could not record the PID in the lock file");
         }
+        debug!(path = %path.display(), pid, "backup lock acquired");
+        Ok(Self { path, _file: file })
+    }
 
-        // Lock file exists — read the stored PID.
-        let stored_pid = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
-
-        if let Some(stale_pid) = stored_pid {
-            if is_process_alive(stale_pid) {
-                return Err(LockError::AlreadyRunning {
-                    pid: Some(stale_pid),
-                });
-            }
-            // Process is dead — stale lock.
-            warn!(
-                pid = stale_pid,
-                path = %path.display(),
-                "removing stale backup lock from dead process"
-            );
-            let _ = std::fs::remove_file(&path);
-        } else {
-            // Cannot determine staleness — remove cautiously and proceed.
-            warn!(
-                path = %path.display(),
-                "backup lock file exists with unreadable PID; removing and proceeding"
-            );
-            let _ = std::fs::remove_file(&path);
-        }
-
-        // Retry now that the stale lock is gone.
-        try_create_exclusive(&path, &content).map_err(LockError::Write)?;
-        debug!(path = %path.display(), pid, "backup lock acquired (after stale removal)");
-        Ok(Self { path })
+    /// Path of the lock file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
-impl Drop for BackupLock {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            // Warn but never panic in a Drop impl.
-            warn!(
-                path = %self.path.display(),
-                error = %e,
-                "failed to remove backup lock file"
-            );
-        } else {
-            debug!(path = %self.path.display(), "backup lock released");
-        }
-    }
-}
-
-/// Creates `path` exclusively (fails if it already exists) and writes `content`.
-fn try_create_exclusive(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+/// Overwrites the lock file's content with `pid`.
+fn write_pid(path: &Path, pid: u32) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create_new(true)
+        .truncate(true)
         .open(path)?;
-    file.write_all(content.as_bytes())?;
-    Ok(())
-}
-
-/// Returns `true` if a process with `pid` is currently running.
-///
-/// - **Linux**: checks `/proc/<pid>` (efficient, no syscall round-trip).
-/// - **Other Unix** (macOS, FreeBSD, …): uses POSIX `kill(pid, 0)` which
-///   probes process existence without delivering any signal.
-/// - **Windows / other**: falls back to `false` (assume dead).
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        // PID 0 is never a real user-space process.  kill(0, sig) is a POSIX
-        // special case that signals the entire process group — it would return
-        // 0 (success) for any running process, giving a false positive.
-        if pid == 0 {
-            return false;
-        }
-        // POSIX kill(pid, 0): returns 0 if the process exists and we have
-        // permission to signal it; returns -1 (ESRCH) if not found.
-        // pid_t is i32 on all Unix platforms we support.
-        extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        // SAFETY: signal 0 is never delivered; this only checks existence.
-        unsafe { kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    f.write_all(pid.to_string().as_bytes())
 }
 
 #[cfg(test)]
@@ -201,44 +115,47 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn acquire_creates_lock_file() {
+    fn acquire_creates_the_lock_file_and_records_the_pid() {
         let dir = tempdir().unwrap();
         let lock = BackupLock::acquire(dir.path()).expect("acquire lock");
-        assert!(dir.path().join(".backup.lock").exists());
-        drop(lock);
-        assert!(!dir.path().join(".backup.lock").exists());
+        let recorded = std::fs::read_to_string(lock.path()).unwrap();
+        assert_eq!(recorded, std::process::id().to_string());
     }
 
     #[test]
-    fn acquire_fails_when_lock_held_by_live_process() {
+    fn a_second_acquire_fails_while_the_first_is_held_and_names_the_holder() {
         let dir = tempdir().unwrap();
         let _lock = BackupLock::acquire(dir.path()).expect("first acquire");
-
-        // Second acquire should fail because our own PID is alive.
-        let result = BackupLock::acquire(dir.path());
-        assert!(
-            result.is_err(),
-            "second acquire should fail while first lock is held"
-        );
+        match BackupLock::acquire(dir.path()) {
+            Err(LockError::AlreadyRunning { pid }) => {
+                assert_eq!(pid, Some(std::process::id()));
+            }
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
     }
 
     #[test]
-    fn acquire_clears_stale_lock_with_dead_pid() {
+    fn the_lock_is_free_again_after_the_guard_is_dropped() {
         let dir = tempdir().unwrap();
-        // Write a lock file with a PID that is guaranteed not to exist.
-        // PID 0 is never a valid user-space process.
-        std::fs::write(dir.path().join(".backup.lock"), b"0").unwrap();
+        drop(BackupLock::acquire(dir.path()).expect("first"));
+        BackupLock::acquire(dir.path()).expect("re-acquire after release");
+    }
 
-        // Should succeed by removing the stale lock.
-        let lock = BackupLock::acquire(dir.path()).expect("acquire after stale removal");
-        drop(lock);
+    /// Regression (audit K6, e2e S9e): a lock file naming a PID that is alive
+    /// but unrelated — an old holder's PID reused, or PID 1 in a new container —
+    /// must not block a new run.  Only a held OS lock does.
+    #[test]
+    fn a_leftover_file_naming_a_live_pid_does_not_block() {
+        let dir = tempdir().unwrap();
+        for pid in ["1", &std::process::id().to_string(), "0", "garbage", ""] {
+            std::fs::write(dir.path().join(".backup.lock"), pid).unwrap();
+            BackupLock::acquire(dir.path())
+                .unwrap_or_else(|e| panic!("leftover file {pid:?} must not block: {e}"));
+        }
     }
 
     #[test]
     fn lock_error_display_includes_pid_when_known() {
-        // Pins down the `Some(p)` arm of the Display impl so a mutant
-        // returning the constant `Default::default()` `fmt::Result` is
-        // observable (the formatter buffer would be empty).
         let err = LockError::AlreadyRunning { pid: Some(1234) };
         let s = format!("{err}");
         assert!(s.contains("1234"), "should contain the pid: {s}");
@@ -250,46 +167,21 @@ mod tests {
         let err = LockError::AlreadyRunning { pid: None };
         let s = format!("{err}");
         assert!(s.contains("already running"));
-        assert!(s.contains("lock file"));
         assert!(!s.contains("PID "), "should not mention a PID number: {s}");
     }
 
     #[test]
     fn lock_error_display_dir_create_includes_inner() {
         let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let err = LockError::DirCreate(inner);
-        let s = format!("{err}");
+        let s = format!("{}", LockError::DirCreate(inner));
         assert!(s.contains("lock directory"), "got: {s}");
         assert!(s.contains("denied"), "should propagate inner error: {s}");
     }
 
     #[test]
     fn lock_error_display_write_includes_inner() {
-        let inner = std::io::Error::other("boom");
-        let err = LockError::Write(inner);
-        let s = format!("{err}");
+        let s = format!("{}", LockError::Write(std::io::Error::other("boom")));
         assert!(s.contains("lock file"), "got: {s}");
         assert!(s.contains("boom"), "should propagate inner error: {s}");
-    }
-
-    #[test]
-    fn is_process_alive_current_pid_is_true() {
-        // Our own PID is always alive. Pins down the `pid == 0` early-return
-        // (so the body is exercised) and the equality check itself.
-        assert!(
-            is_process_alive(std::process::id()),
-            "current process should be observed as alive"
-        );
-    }
-
-    #[test]
-    fn is_process_alive_pid_zero_is_false() {
-        // PID 0 is the magic "process group" sentinel; the function must
-        // explicitly reject it. Pins down the `== 0` guard against
-        // mutations to `!=`.
-        assert!(
-            !is_process_alive(0),
-            "PID 0 must never be reported as alive"
-        );
     }
 }

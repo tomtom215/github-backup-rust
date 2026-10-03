@@ -961,6 +961,7 @@ version = "0.3.2"
 dependencies = [
  "bytes",
  "chrono",
+ "fslock",
  "github-backup-client",
  "github-backup-types",
  "nix 0.30.1",

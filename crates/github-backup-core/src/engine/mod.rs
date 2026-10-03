@@ -326,13 +326,11 @@ where
                 let msg = match pid {
                     Some(p) => format!(
                         "another backup for '{owner}' is already running (PID {p}); \
-                         if that process is dead, remove {json_dir}/.backup.lock and retry",
-                        json_dir = json_dir.display()
+                         wait for it to finish (the lock is released automatically if it dies)"
                     ),
                     None => format!(
                         "another backup for '{owner}' is already running; \
-                         if you believe this is stale, remove {json_dir}/.backup.lock",
-                        json_dir = json_dir.display()
+                         wait for it to finish (the lock is released automatically if it dies)"
                     ),
                 };
                 Err(CoreError::Io {

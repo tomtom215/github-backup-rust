@@ -28,7 +28,7 @@
 //! [`BackupClient`]: github_backup_client::BackupClient
 //! [`GitHubClient`]: github_backup_client::GitHubClient
 
-#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 

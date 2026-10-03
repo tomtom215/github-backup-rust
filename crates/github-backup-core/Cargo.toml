@@ -27,6 +27,7 @@ bytes = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+fslock = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
