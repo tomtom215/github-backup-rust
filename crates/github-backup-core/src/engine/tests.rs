@@ -432,6 +432,7 @@ async fn resume_skips_repositories_the_interrupted_run_finished() {
     let out = OutputConfig::new(root.path());
     let mut cp = BackupCheckpoint {
         run_started_at: "2026-01-01T00:00:00Z".into(),
+        last_updated_at: chrono::Utc::now().to_rfc3339(),
         ..Default::default()
     };
     cp.mark_complete_and_save("octocat/a", &out.backup_checkpoint_path(OWNER))
@@ -592,4 +593,61 @@ async fn an_explicit_since_never_becomes_a_stored_watermark() {
         "an asserted --since must not poison later automatic runs: {:?}",
         saved.repos
     );
+}
+
+/// Regression (audit GS-13, e2e S9a): a checkpoint left by a crashed run made
+/// the next run — hours later, on schedule — skip refreshing every repository
+/// the crashed run had finished.
+#[tokio::test]
+async fn an_old_checkpoint_is_not_resumed_so_every_repository_is_refreshed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = OutputConfig::new(root.path());
+    let day_ago = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let mut cp = BackupCheckpoint {
+        run_started_at: day_ago.clone(),
+        last_updated_at: day_ago,
+        ..Default::default()
+    };
+    cp.mark_complete_and_save("octocat/a", &out.backup_checkpoint_path(OWNER))
+        .expect("seed checkpoint");
+
+    let git = SpyGitRunner::default();
+    let client = MockBackupClient::new().with_user_repos(vec![repo("a"), repo("b")]);
+    let engine = engine_with(
+        client,
+        MemStorage::default(),
+        git.clone(),
+        root.path(),
+        opts(),
+    );
+
+    let stats = engine.run(OWNER).await.expect("run");
+
+    assert_eq!(git.recorded_calls().len(), 2, "a is refreshed too");
+    assert_eq!(stats.repos_skipped(), 0);
+}
+
+/// A checkpoint from an older version has no activity time: never resumed.
+#[tokio::test]
+async fn a_checkpoint_without_an_activity_time_is_not_resumed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let out = OutputConfig::new(root.path());
+    std::fs::create_dir_all(out.owner_json_dir(OWNER)).expect("dir");
+    std::fs::write(
+        out.backup_checkpoint_path(OWNER),
+        r#"{"completed_repos":["octocat/a"],"run_started_at":""}"#,
+    )
+    .expect("legacy checkpoint");
+
+    let git = SpyGitRunner::default();
+    let client = MockBackupClient::new().with_user_repos(vec![repo("a")]);
+    let engine = engine_with(
+        client,
+        MemStorage::default(),
+        git.clone(),
+        root.path(),
+        opts(),
+    );
+    engine.run(OWNER).await.expect("run");
+    assert_eq!(git.recorded_calls().len(), 1);
 }

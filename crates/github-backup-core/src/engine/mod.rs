@@ -417,6 +417,13 @@ where
 
         // Load any existing checkpoint from an interrupted prior run.
         let checkpoint = match BackupCheckpoint::load(&checkpoint_path) {
+            Ok(cp) if !cp.completed_repos.is_empty() && checkpoint_is_stale(&cp) => {
+                warn!(
+                    last_activity = %cp.last_updated_at,
+                    "ignoring a checkpoint that is too old to resume: every repository is refreshed"
+                );
+                Arc::new(tokio::sync::Mutex::new(BackupCheckpoint::default()))
+            }
             Ok(cp) => {
                 let resumed = cp.completed_repos.len();
                 if resumed > 0 {
@@ -529,6 +536,12 @@ where
                         }
                         // Mark complete in the checkpoint.
                         let mut guard = cp.lock().await;
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        if guard.run_started_at.is_empty() {
+                            guard.run_started_at = now.clone();
+                        }
+                        guard.last_updated_at = now;
                         if let Err(e) = guard.mark_complete_and_save(&repo.full_name, &cp_path) {
                             warn!(
                                 repo = %repo.full_name,
@@ -586,6 +599,18 @@ where
             cancel: self.cancel.clone(),
             ..CloneOptions::default()
         }
+    }
+}
+
+/// How long after its last activity an interrupted run's checkpoint is still
+/// resumed.
+const CHECKPOINT_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);
+
+/// `true` if `cp` is too old (or of unknown age) to resume.
+fn checkpoint_is_stale(cp: &BackupCheckpoint) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(&cp.last_updated_at) {
+        Ok(last) => chrono::Utc::now().signed_duration_since(last) > CHECKPOINT_MAX_AGE,
+        Err(_) => true,
     }
 }
 

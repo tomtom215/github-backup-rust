@@ -272,6 +272,14 @@ pub struct BackupCheckpoint {
 
     /// ISO 8601 timestamp when this checkpoint was first created (= run start).
     pub run_started_at: String,
+
+    /// ISO 8601 timestamp of the last repository completed.  A checkpoint is
+    /// only resumed while this is recent: after a crash the next *scheduled*
+    /// run, hours later, must refresh every repository rather than skip the
+    /// ones the crashed run happened to finish.  Empty in files written by
+    /// older versions, which are therefore never resumed.
+    #[serde(default)]
+    pub last_updated_at: String,
 }
 
 impl BackupCheckpoint {
@@ -515,6 +523,7 @@ mod tests {
         let mut cp = BackupCheckpoint {
             completed_repos: BTreeSet::new(),
             run_started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_updated_at: String::new(),
         };
         cp.mark_complete_and_save("owner/repo-a", &path)
             .expect("save");

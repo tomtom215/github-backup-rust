@@ -217,7 +217,7 @@ pub(crate) async fn execute(
 
     let stats = match backup_result {
         Ok(stats) => stats,
-        Err(e) => return fatal(&post, &owner, &e).await,
+        Err(e) => return fatal(&post, &output, &owner, started_at_unix, &e).await,
     };
 
     finish(
@@ -233,29 +233,62 @@ pub(crate) async fn execute(
 }
 
 /// Reports a run that could not be completed.
-async fn fatal(post: &Post, owner: &str, e: &CoreError) -> ExitCode {
+///
+/// The report, metrics and history are written too — with the run marked failed
+/// — so monitors reading them do not keep seeing the previous run's success.
+async fn fatal(
+    post: &Post,
+    output: &OutputConfig,
+    owner: &str,
+    started_at_unix: u64,
+    e: &CoreError,
+) -> ExitCode {
     let raw = errors::redact_secrets(&e.to_string());
     error!("backup failed: {raw}");
     if let Some(hint) = errors::explain_error(&raw) {
         error!("hint: {hint}");
     }
+    if post.dry_run {
+        return ExitCode::from(EXIT_FAILURE);
+    }
+
+    let stats = BackupStats::new();
+    stats.record_failure(owner, "run", raw.clone());
+    let elapsed = report::unix_now_secs().saturating_sub(started_at_unix);
+    write_history(post, output, owner, &stats, started_at_unix, elapsed);
+    write_outputs(post, owner, &stats, started_at_unix);
+
     if let Some(url) = &post.webhook {
-        if !post.dry_run {
-            notify::send_webhook(
-                url,
-                &Notification {
-                    status: Status::Failure,
-                    owner,
-                    error: Some(&raw),
-                    repos_backed_up: 0,
-                    repos_errored: 0,
-                    failures: &[],
-                },
-            )
-            .await;
-        }
+        notify::send_webhook(
+            url,
+            &Notification {
+                status: Status::Failure,
+                owner,
+                error: Some(&raw),
+                repos_backed_up: 0,
+                repos_errored: 0,
+                failures: &stats.failures(),
+            },
+        )
+        .await;
     }
     ExitCode::from(EXIT_FAILURE)
+}
+
+/// Writes the `--report` and `--prometheus-metrics` files, if requested.
+fn write_outputs(post: &Post, owner: &str, stats: &BackupStats, started_at_unix: u64) {
+    if let Some(path) = &post.report {
+        match write_report(path, owner, stats, started_at_unix) {
+            Ok(()) => info!(path = %path.display(), "wrote summary report"),
+            Err(e) => error!("failed to write report: {e}"),
+        }
+    }
+    if let Some(path) = &post.metrics {
+        match write_prometheus_metrics(path, owner, stats, started_at_unix) {
+            Ok(()) => info!(path = %path.display(), "wrote Prometheus metrics"),
+            Err(e) => error!("failed to write Prometheus metrics: {e}"),
+        }
+    }
 }
 
 /// Everything after a completed engine run: post-processing, then the reports
@@ -354,18 +387,7 @@ async fn finish(
 
     write_history(post, output, owner, stats, started_at_unix, elapsed);
 
-    if let Some(path) = &post.report {
-        match write_report(path, owner, stats, started_at_unix) {
-            Ok(()) => info!(path = %path.display(), "wrote summary report"),
-            Err(e) => error!("failed to write report: {e}"),
-        }
-    }
-    if let Some(path) = &post.metrics {
-        match write_prometheus_metrics(path, owner, stats, started_at_unix) {
-            Ok(()) => info!(path = %path.display(), "wrote Prometheus metrics"),
-            Err(e) => error!("failed to write Prometheus metrics: {e}"),
-        }
-    }
+    write_outputs(post, owner, stats, started_at_unix);
 
     let failures = stats.failures();
     let incomplete = !failures.is_empty();

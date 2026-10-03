@@ -120,6 +120,19 @@ impl<'a> WebhookPayload<'a> {
     }
 }
 
+/// `scheme://host` of `url`: all that may appear in logs, because the path (and
+/// any userinfo) of a Slack, Discord or Teams webhook is a bearer secret.
+fn display_host(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let host = authority.rsplit('@').next().unwrap_or("");
+            format!("{scheme}://{host}")
+        }
+        None => "<invalid webhook URL>".to_string(),
+    }
+}
+
 /// Posts a JSON notification to `url`.
 ///
 /// The function is "fire and forget": any error (network, TLS, non-2xx
@@ -130,9 +143,10 @@ impl<'a> WebhookPayload<'a> {
 pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
     // Warn when the URL is plain HTTP — the payload contains owner name and
     // error messages that should not travel over an unencrypted connection.
+    let shown = display_host(url);
     if url.starts_with("http://") {
         warn!(
-            url,
+            url = %shown,
             "webhook URL uses plain HTTP; backup metadata (owner, error messages) \
              will be transmitted unencrypted. Use an https:// URL to protect this data."
         );
@@ -150,13 +164,13 @@ pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
 
     match send_post(url, body_bytes).await {
         Ok(status_code) if status_code.is_success() => {
-            debug!(url, http_status = %status_code, "webhook notification sent");
+            debug!(url = %shown, http_status = %status_code, "webhook notification sent");
         }
         Ok(status_code) => {
-            warn!(url, http_status = %status_code, "webhook notification returned non-2xx status");
+            warn!(url = %shown, http_status = %status_code, "webhook notification returned non-2xx status");
         }
         Err(e) => {
-            warn!(url, error = %e, "webhook notification failed");
+            warn!(url = %shown, error = %e, "webhook notification failed");
         }
     }
 }
@@ -182,7 +196,12 @@ async fn send_post(url: &str, body: Vec<u8>) -> Result<StatusCode, String> {
         http.request(req),
     )
     .await
-    .map_err(|_| format!("webhook POST to {url} timed out after {NOTIFY_TIMEOUT_SECS}s"))?
+    .map_err(|_| {
+        format!(
+            "webhook POST to {} timed out after {NOTIFY_TIMEOUT_SECS}s",
+            display_host(url)
+        )
+    })?
     .map_err(|e: hyper_util::client::legacy::Error| format!("HTTP error: {e}"))?;
 
     Ok(response.status())
@@ -329,5 +348,18 @@ mod tests {
             v["failed"].as_array().expect("array").len(),
             MAX_LISTED_FAILURES
         );
+    }
+
+    #[test]
+    fn only_scheme_and_host_of_a_webhook_url_are_ever_shown() {
+        assert_eq!(
+            display_host("https://hooks.slack.com/services/T000/B000/SECRETSECRET"),
+            "https://hooks.slack.com"
+        );
+        assert_eq!(
+            display_host("https://user:pw@host.example:8443/path?token=x#f"),
+            "https://host.example:8443"
+        );
+        assert_eq!(display_host("not a url"), "<invalid webhook URL>");
     }
 }
