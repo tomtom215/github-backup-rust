@@ -249,7 +249,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\n{{ tr '\\0' ' ' < /proc/$$/cmdline; echo; echo \"env=$GH_BACKUP_MIRROR_TOKEN\"; }} > '{}'\n",
+                "#!/bin/sh\n{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_MIRROR_TOKEN\"; }} > '{}'\n",
                 seen.display()
             ),
         )

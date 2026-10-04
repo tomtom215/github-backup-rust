@@ -1173,7 +1173,7 @@ mod credential_tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\n{{ tr '\\0' ' ' < /proc/$$/cmdline; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
+                "#!/bin/sh\n{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
                 seen.display()
             ),
         )
@@ -1258,11 +1258,14 @@ mod credential_tests {
     /// cause) is never offered the token.
     #[tokio::test]
     async fn token_is_not_offered_to_a_different_host() {
-        let other = Server::start("127.0.0.2", None);
+        // `localhost` is a different host from `127.0.0.1` as far as git's
+        // credential scoping goes, and (unlike 127.0.0.2) it is available on
+        // every platform the tests run on, macOS included.
+        let other = Server::start("127.0.0.1", None);
         let origin = Server::start(
             "127.0.0.1",
             Some(format!(
-                "http://127.0.0.2:{}/o/r.git/info/refs?service=git-upload-pack",
+                "http://localhost:{}/o/r.git/info/refs?service=git-upload-pack",
                 other.port
             )),
         );
