@@ -63,7 +63,7 @@ url = "2"
 # Cryptography (AWS SigV4 signing for S3 backend + AES-256-GCM at-rest encryption)
 sha2 = "0.10"
 hmac = "0.12"
-aes-gcm = { version = "0.10", features = ["zeroize"] }
+aes-gcm = { version = "0.11", features = ["zeroize"] }
 zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 
 # Workspace crates.
