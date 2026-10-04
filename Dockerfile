@@ -79,7 +79,7 @@ FROM scratch AS export
 COPY --from=builder /build/target/release/github-backup /github-backup
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM alpine:3.23 AS runtime
+FROM alpine:3.24 AS runtime
 
 # OCI image metadata.  These propagate to GHCR / Docker Hub so Dependabot,
 # Renovate, and humans can find the source from the image alone.
