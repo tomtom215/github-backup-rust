@@ -15,6 +15,11 @@ categories.workspace    = true
 # Internal workspace crate. Not published to crates.io.
 publish                 = false
 
+[features]
+# Exposes `GitHubClient::for_tests_at` (plain HTTP, no proxy) to other crates'
+# tests.  Never enabled in a normal build.
+test-support = []
+
 [dependencies]
 github-backup-types = { workspace = true }
 tokio = { workspace = true }
@@ -37,3 +42,6 @@ url = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-test = { workspace = true }
+# Captures `tracing` output in tests (warnings about elements that do not fit
+# their model must name the endpoint, index and id).
+tracing-subscriber = { workspace = true }

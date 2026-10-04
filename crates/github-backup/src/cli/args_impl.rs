@@ -1,17 +1,140 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! `impl Args` — config-file merge and conversion to `BackupOptions`.
+//! `impl Args` — process-level parsing, config-file merge and conversion to
+//! `BackupOptions`.
+
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 
 use super::args::Args;
 
+/// Treats a blank string option as unset and trims surrounding whitespace.
+fn normalize(value: &mut Option<String>) {
+    if let Some(text) = value.as_mut() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            *value = None;
+        } else if trimmed.len() != text.len() {
+            *text = trimmed.to_string();
+        }
+    }
+}
+
 impl Args {
+    /// Parses the process arguments and environment.
+    ///
+    /// Behaves like [`clap::Parser::parse`] (a clap-formatted message and exit
+    /// status 2 on invalid input) but additionally returns the [`ArgMatches`],
+    /// which [`Args::check_dependencies`] needs to tell command-line flags
+    /// from environment variables, and normalises blank option values.
+    pub fn parse_cli() -> (Self, ArgMatches) {
+        let matches = Self::command().get_matches();
+        let mut args = Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        args.normalize_env_values();
+        (args, matches)
+    }
+
+    /// Treats blank string options as unset and trims surrounding whitespace.
+    ///
+    /// Container launchers (Docker Compose, Kubernetes manifests, Unraid) pass
+    /// every optional variable to the process as an *empty string*, and clap
+    /// counts a set-but-empty variable as a supplied value: an empty
+    /// `GITHUB_API_URL` would otherwise be used as an (invalid) API URL and an
+    /// empty `GITHUB_TOKEN` as an (invalid) credential.  Whitespace — usually
+    /// a trailing newline pasted along with a token — is trimmed because it
+    /// would make the value an invalid HTTP header.
+    pub(crate) fn normalize_env_values(&mut self) {
+        for value in [
+            &mut self.token,
+            &mut self.oauth_client_id,
+            &mut self.api_url,
+            &mut self.clone_host,
+            &mut self.mirror_token,
+            &mut self.s3_access_key,
+            &mut self.s3_secret_key,
+            &mut self.encrypt_key,
+            &mut self.notify_webhook,
+        ] {
+            normalize(value);
+        }
+    }
+
+    /// Rejects command-line flags whose companion flag is missing.
+    ///
+    /// These pairs used to be declared with clap's `requires`, but clap
+    /// applies `requires` to environment variables as well, so an ambient
+    /// `AWS_ACCESS_KEY_ID` (or an empty `MIRROR_TOKEN` forwarded by Compose)
+    /// made every run fail with "required arguments were not provided".  A
+    /// credential that merely arrives through the environment is now ignored
+    /// when its feature is not in use; one the user *typed* without the
+    /// matching flag is still an error.
+    ///
+    /// Call after `merge_config_with` so a companion value supplied by the
+    /// config file counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a clap error (print it with [`clap::Error::exit`]).
+    pub fn check_dependencies(&self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        let typed = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+        let missing = |flag: &str, needs: &str| {
+            Err(Self::command().error(
+                ErrorKind::MissingRequiredArgument,
+                format!("the argument '{flag}' requires '{needs}' to be given as well"),
+            ))
+        };
+
+        if typed("s3_access_key") && self.s3_access_key.is_some() && self.s3_bucket.is_none() {
+            return missing("--s3-access-key", "--s3-bucket <BUCKET>");
+        }
+        if typed("s3_secret_key") && self.s3_secret_key.is_some() && self.s3_bucket.is_none() {
+            return missing("--s3-secret-key", "--s3-bucket <BUCKET>");
+        }
+        if typed("mirror_token") && self.mirror_token.is_some() && self.mirror_to.is_none() {
+            return missing("--mirror-token", "--mirror-to <URL>");
+        }
+        if typed("oauth_client_id") && self.oauth_client_id.is_some() && !self.device_auth {
+            return missing("--oauth-client-id", "--device-auth");
+        }
+        Ok(())
+    }
+
     /// Merges a loaded `ConfigFile` into this [`Args`], with CLI values taking
     /// precedence over config file values.
     ///
     /// Call this after parsing CLI args but before calling
     /// [`into_backup_options`][Args::into_backup_options].
+    #[cfg(test)]
     pub fn merge_config(&mut self, cfg: &github_backup_types::config::ConfigFile) {
+        // Without the parse matches the best available guess is "anything but
+        // the default was typed".
+        let explicit = self.clone_type != crate::cli::clone_type::CliCloneType::Mirror;
+        self.merge_config_inner(cfg, explicit);
+    }
+
+    /// Like `merge_config`, but uses the parse matches to
+    /// tell an explicit `--clone-type mirror` from the default, so the command
+    /// line always beats the config file — including when it asks for the default.
+    pub fn merge_config_with(
+        &mut self,
+        cfg: &github_backup_types::config::ConfigFile,
+        matches: &clap::ArgMatches,
+    ) {
+        use clap::parser::ValueSource;
+        let explicit = matches!(
+            matches.value_source("clone_type"),
+            Some(ValueSource::CommandLine | ValueSource::EnvVariable)
+        );
+        self.merge_config_inner(cfg, explicit);
+    }
+
+    fn merge_config_inner(
+        &mut self,
+        cfg: &github_backup_types::config::ConfigFile,
+        clone_type_explicit: bool,
+    ) {
         // Owner: config file wins only if CLI did not provide it.
         if self.owner.is_none() {
             if let Some(ref o) = cfg.owner {
@@ -54,9 +177,13 @@ impl Args {
         // Clone behaviour flags.
         self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
         self.lfs |= cfg.lfs.unwrap_or(false);
-        self.no_prune |= cfg.no_prune.unwrap_or(false);
-        // Clone type: config supplies default only when CLI left it at Mirror.
-        if self.clone_type == crate::cli::clone_type::CliCloneType::Mirror {
+        // `--no-prune` (deprecated) is the default now; an explicit one still
+        // beats a `prune = true` in the file.
+        if !self.no_prune {
+            self.prune |= cfg.prune.unwrap_or(false);
+        }
+        // Clone type: the config supplies it only when the command line did not.
+        if !clone_type_explicit {
             if let Some(ref ct) = cfg.clone_type {
                 use github_backup_types::config::CloneType;
                 self.clone_type = match ct {
@@ -89,7 +216,15 @@ impl Args {
                 self.mirror_owner = Some(o.clone());
             }
         }
-        self.mirror_private |= cfg.mirror_private.unwrap_or(false);
+        // The command line decides when it says either; the file fills in only
+        // when it is silent.  `mirror_private` wins over `mirror_public` if a
+        // file sets both (see `build_mirror_dest`).
+        if !self.mirror_public {
+            self.mirror_private |= cfg.mirror_private.unwrap_or(false);
+        }
+        if !self.mirror_private {
+            self.mirror_public |= cfg.mirror_public.unwrap_or(false);
+        }
         // S3 storage: CLI takes precedence.
         if self.s3_bucket.is_none() {
             if let Some(ref b) = cfg.s3_bucket {
@@ -215,13 +350,18 @@ impl Args {
                     prefer_ssh: self.prefer_ssh,
                     clone_type,
                     lfs: self.lfs,
-                    no_prune: self.no_prune,
+                    prune: self.prune,
                     dry_run: self.dry_run,
                     concurrency,
                     include_repos: self.include_repos,
                     exclude_repos: self.exclude_repos,
                     since: self.since,
+                    full: self.full,
                     clone_host: self.clone_host,
+                    // `--all` leaves these opt-in categories off; an explicit
+                    // flag must still turn them on.
+                    clone_starred: self.clone_starred,
+                    action_runs: self.action_runs,
                     ..BackupOptions::all()
                 },
             );
@@ -238,7 +378,7 @@ impl Args {
                 prefer_ssh: self.prefer_ssh,
                 clone_type,
                 lfs: self.lfs,
-                no_prune: self.no_prune,
+                prune: self.prune,
                 issues: self.issues,
                 issue_comments: self.issue_comments,
                 issue_events: self.issue_events,
@@ -275,6 +415,7 @@ impl Args {
                 include_repos: self.include_repos,
                 exclude_repos: self.exclude_repos,
                 since: self.since,
+                full: self.full,
                 clone_host: self.clone_host,
                 dry_run: self.dry_run,
                 concurrency,

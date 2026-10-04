@@ -7,13 +7,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
-use github_backup_client::{BackupClient, BoxFuture, ClientError};
+use github_backup_client::{AssetSink, BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
     Branch, BranchProtection, ClassicProject, Collaborator, DeployKey, Discussion,
     DiscussionComment, Environment, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
-    Package, PackageVersion, ProjectColumn, PullRequest, PullRequestComment, PullRequestCommit,
-    PullRequestReview, Release, Repository, SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Package, PackageVersion, Page, ProjectColumn, PullRequest, PullRequestComment,
+    PullRequestCommit, PullRequestReview, Raw, Release, Repository, SecurityAdvisory, Team, User,
+    Workflow, WorkflowRun,
 };
 
 /// Configurable [`BackupClient`] for unit tests.
@@ -27,6 +27,8 @@ pub struct MockBackupClient {
 
 #[derive(Default)]
 struct MockData {
+    /// `list_user_repos` never completes (simulates a server that never answers).
+    hang_repo_listing: bool,
     user_repos: Vec<Repository>,
     gists: Vec<Gist>,
     starred_gists: Vec<Gist>,
@@ -64,6 +66,11 @@ struct MockData {
     project_columns: Vec<ProjectColumn>,
     packages: Vec<Package>,
     package_versions: Vec<PackageVersion>,
+    /// Raw JSON served instead of the typed fixtures, keyed by endpoint name
+    /// (`"issues"`, `"issue_comments"`, `"pull_requests"`, `"releases"`,
+    /// `"user_repos"`).  Lets tests serve what the API really sends: extra
+    /// properties, nulls, garbage elements.
+    raw: std::collections::HashMap<&'static str, Vec<serde_json::Value>>,
 }
 
 #[allow(dead_code)]
@@ -71,6 +78,34 @@ impl MockBackupClient {
     /// Creates a new empty [`MockBackupClient`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serves `values` as the raw JSON elements of `endpoint` (one of
+    /// `"issues"`, `"issue_comments"`, `"pull_requests"`, `"releases"`,
+    /// `"user_repos"`), decoded like the real client does: elements that do
+    /// not fit the typed model end up in [`Page::unparsed`].
+    pub fn with_raw(self, endpoint: &'static str, values: Vec<serde_json::Value>) -> Self {
+        self.inner.lock().unwrap().raw.insert(endpoint, values);
+        self
+    }
+
+    /// The page for `endpoint`: the raw override if one was set, otherwise the
+    /// typed fixture selected by `typed` wrapped with [`Raw::from_typed`].
+    fn page<T>(&self, endpoint: &str, typed: impl FnOnce(&MockData) -> Vec<T>) -> Page<T>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let data = self.inner.lock().unwrap();
+        match data.raw.get(endpoint) {
+            Some(values) => Page::from_values(values.clone()),
+            None => Page::from_typed(typed(&data)),
+        }
+    }
+
+    /// Makes the repository listing hang forever, like an unresponsive server.
+    pub fn with_repo_listing_that_never_answers(self) -> Self {
+        self.inner.lock().unwrap().hang_repo_listing = true;
+        self
     }
 
     /// Pre-loads the issues list.
@@ -272,7 +307,7 @@ impl MockBackupClient {
 // Helper macro to cut down on boilerplate.
 macro_rules! boxed_empty {
     ($t:ty) => {
-        Box::pin(async { Ok(Vec::<$t>::new()) })
+        Box::pin(async { Ok(Page::<$t>::new()) })
     };
 }
 
@@ -280,61 +315,64 @@ impl BackupClient for MockBackupClient {
     fn list_user_repos<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Repository>, ClientError>> {
-        let d = self.inner.lock().unwrap().user_repos.clone();
+    ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>> {
+        if self.inner.lock().unwrap().hang_repo_listing {
+            return Box::pin(std::future::pending());
+        }
+        let d = self.page("user_repos", |m| m.user_repos.clone());
         Box::pin(async move { Ok(d) })
     }
 
     fn list_org_repos<'a>(
         &'a self,
         _org: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Repository>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>> {
         boxed_empty!(Repository)
     }
 
     fn list_followers<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<User>, ClientError>> {
         let d = self.inner.lock().unwrap().followers.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_following<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<User>, ClientError>> {
         let d = self.inner.lock().unwrap().following.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_starred<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Repository>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>> {
         let d = self.inner.lock().unwrap().starred.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_watched<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Repository>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>> {
         let d = self.inner.lock().unwrap().watched.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_gists<'a>(
         &'a self,
         _username: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Gist>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Gist>, ClientError>> {
         let d = self.inner.lock().unwrap().gists.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
-    fn list_starred_gists<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Gist>, ClientError>> {
+    fn list_starred_gists<'a>(&'a self) -> BoxFuture<'a, Result<Page<Gist>, ClientError>> {
         let d = self.inner.lock().unwrap().starred_gists.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_issues<'a>(
@@ -342,8 +380,8 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _since: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<Issue>, ClientError>> {
-        let d = self.inner.lock().unwrap().issues.clone();
+    ) -> BoxFuture<'a, Result<Page<Issue>, ClientError>> {
+        let d = self.page("issues", |m| m.issues.clone());
         Box::pin(async move { Ok(d) })
     }
 
@@ -352,8 +390,8 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _issue_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<IssueComment>, ClientError>> {
-        let d = self.inner.lock().unwrap().issue_comments.clone();
+    ) -> BoxFuture<'a, Result<Page<IssueComment>, ClientError>> {
+        let d = self.page("issue_comments", |m| m.issue_comments.clone());
         Box::pin(async move { Ok(d) })
     }
 
@@ -362,9 +400,9 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _issue_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<IssueEvent>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<IssueEvent>, ClientError>> {
         let d = self.inner.lock().unwrap().issue_events.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_pull_requests<'a>(
@@ -372,8 +410,8 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _since: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<PullRequest>, ClientError>> {
-        let d = self.inner.lock().unwrap().pull_requests.clone();
+    ) -> BoxFuture<'a, Result<Page<PullRequest>, ClientError>> {
+        let d = self.page("pull_requests", |m| m.pull_requests.clone());
         Box::pin(async move { Ok(d) })
     }
 
@@ -382,9 +420,9 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _pr_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<PullRequestComment>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<PullRequestComment>, ClientError>> {
         let d = self.inner.lock().unwrap().pull_comments.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_pull_commits<'a>(
@@ -392,9 +430,9 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _pr_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<PullRequestCommit>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<PullRequestCommit>, ClientError>> {
         let d = self.inner.lock().unwrap().pull_commits.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_pull_reviews<'a>(
@@ -402,35 +440,35 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _pr_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<PullRequestReview>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<PullRequestReview>, ClientError>> {
         let d = self.inner.lock().unwrap().pull_reviews.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_labels<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Label>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Label>, ClientError>> {
         let d = self.inner.lock().unwrap().labels.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_milestones<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Milestone>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Milestone>, ClientError>> {
         let d = self.inner.lock().unwrap().milestones.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_releases<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Release>, ClientError>> {
-        let d = self.inner.lock().unwrap().releases.clone();
+    ) -> BoxFuture<'a, Result<Page<Release>, ClientError>> {
+        let d = self.page("releases", |m| m.releases.clone());
         Box::pin(async move { Ok(d) })
     }
 
@@ -438,18 +476,18 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Hook>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Hook>, ClientError>> {
         let d = self.inner.lock().unwrap().hooks.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_security_advisories<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<SecurityAdvisory>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<SecurityAdvisory>, ClientError>> {
         let d = self.inner.lock().unwrap().security_advisories.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_repo_topics<'a>(
@@ -465,9 +503,9 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Branch>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Branch>, ClientError>> {
         let d = self.inner.lock().unwrap().branches.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn get_branch_protection<'a>(
@@ -475,14 +513,15 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         branch: &'a str,
-    ) -> BoxFuture<'a, Result<BranchProtection, ClientError>> {
+    ) -> BoxFuture<'a, Result<Raw<BranchProtection>, ClientError>> {
         let result = self
             .inner
             .lock()
             .unwrap()
             .branch_protections
             .get(branch)
-            .cloned();
+            .cloned()
+            .map(Raw::from_typed);
         Box::pin(async move {
             result.ok_or_else(|| ClientError::ApiError {
                 status: 404,
@@ -494,52 +533,59 @@ impl BackupClient for MockBackupClient {
     fn download_release_asset<'a>(
         &'a self,
         _asset_url: &'a str,
-    ) -> BoxFuture<'a, Result<Bytes, ClientError>> {
+        sink: &'a mut dyn AssetSink,
+    ) -> BoxFuture<'a, Result<u64, ClientError>> {
         let d = self.inner.lock().unwrap().asset_bytes.clone();
-        Box::pin(async move { Ok(Bytes::from(d)) })
+        Box::pin(async move {
+            // Deliver in small chunks, as the real client does.
+            for chunk in d.chunks(4) {
+                sink.write_chunk(chunk)?;
+            }
+            Ok(d.len() as u64)
+        })
     }
 
     fn list_deploy_keys<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<DeployKey>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<DeployKey>, ClientError>> {
         let d = self.inner.lock().unwrap().deploy_keys.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_collaborators<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Collaborator>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Collaborator>, ClientError>> {
         let d = self.inner.lock().unwrap().collaborators.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_org_members<'a>(
         &'a self,
         _org: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<User>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<User>, ClientError>> {
         let d = self.inner.lock().unwrap().org_members.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_org_teams<'a>(
         &'a self,
         _org: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Team>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Team>, ClientError>> {
         let d = self.inner.lock().unwrap().org_teams.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_workflows<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Workflow>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Workflow>, ClientError>> {
         let d = self.inner.lock().unwrap().workflows.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_workflow_runs<'a>(
@@ -547,27 +593,27 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _workflow_id: u64,
-    ) -> BoxFuture<'a, Result<Vec<WorkflowRun>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<WorkflowRun>, ClientError>> {
         let d = self.inner.lock().unwrap().workflow_runs.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_environments<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Environment>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Environment>, ClientError>> {
         let d = self.inner.lock().unwrap().environments.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_discussions<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Discussion>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Discussion>, ClientError>> {
         let d = self.inner.lock().unwrap().discussions.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_discussion_comments<'a>(
@@ -575,35 +621,35 @@ impl BackupClient for MockBackupClient {
         _owner: &'a str,
         _repo: &'a str,
         _discussion_number: u64,
-    ) -> BoxFuture<'a, Result<Vec<DiscussionComment>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<DiscussionComment>, ClientError>> {
         let d = self.inner.lock().unwrap().discussion_comments.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_repo_projects<'a>(
         &'a self,
         _owner: &'a str,
         _repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<ClassicProject>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<ClassicProject>, ClientError>> {
         let d = self.inner.lock().unwrap().repo_projects.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_project_columns<'a>(
         &'a self,
         _project_id: u64,
-    ) -> BoxFuture<'a, Result<Vec<ProjectColumn>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<ProjectColumn>, ClientError>> {
         let d = self.inner.lock().unwrap().project_columns.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_user_packages<'a>(
         &'a self,
         _username: &'a str,
         _package_type: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Package>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<Package>, ClientError>> {
         let d = self.inner.lock().unwrap().packages.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 
     fn list_package_versions<'a>(
@@ -611,8 +657,8 @@ impl BackupClient for MockBackupClient {
         _username: &'a str,
         _package_type: &'a str,
         _package_name: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<PackageVersion>, ClientError>> {
+    ) -> BoxFuture<'a, Result<Page<PackageVersion>, ClientError>> {
         let d = self.inner.lock().unwrap().package_versions.clone();
-        Box::pin(async move { Ok(d) })
+        Box::pin(async move { Ok(Page::from_typed(d)) })
     }
 }

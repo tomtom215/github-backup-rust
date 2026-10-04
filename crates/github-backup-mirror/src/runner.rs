@@ -4,14 +4,15 @@
 //! Push-mirror runner: discovers local git repos and mirrors them to a remote
 //! Git host (Gitea, Codeberg, Forgejo, etc.).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use tracing::{error, info, warn};
 
 use crate::config::GiteaConfig;
 use crate::error::MirrorError;
+use crate::push::{push_refs, wants_private};
 
 /// Discovers all bare git repositories under `repos_dir` and pushes each
 /// one as a mirror to the configured Gitea destination.
@@ -21,10 +22,17 @@ use crate::error::MirrorError;
 /// For each `*.git` directory found directly under `repos_dir`:
 /// 1. Extract the repository name (strip the `.git` suffix).
 /// 2. Ensure the repository exists on the Gitea instance (creates it if not).
-/// 3. Run `git push --mirror <remote_url>` from the local bare clone.
+/// 3. Push branches and tags (pruning deleted ones) from the local bare clone.
 ///
-/// Errors per repository are logged as warnings; the function continues with
-/// remaining repositories and returns the count of successfully pushed repos.
+/// A repository is created private unless the user forced `private` or the
+/// source is listed in `public_repos`.  An existing destination repository
+/// that this tool did not create (its description is not `description_prefix`
+/// plus the name) is never pushed into.
+///
+/// Errors per repository are logged as warnings and collected in
+/// [`MirrorStats::failures`]; the function continues with the remaining
+/// repositories, and the caller decides how a non-empty failure list ends the
+/// run.
 ///
 /// # Errors
 ///
@@ -35,6 +43,7 @@ pub async fn push_mirrors(
     config: &GiteaConfig,
     repos_dir: &Path,
     description_prefix: &str,
+    public_repos: &HashSet<String>,
 ) -> Result<MirrorStats, MirrorError> {
     let mut stats = MirrorStats::default();
 
@@ -52,13 +61,15 @@ pub async fn push_mirrors(
 
     for (repo_path, repo_name) in &repos {
         let description = format!("{description_prefix}{repo_name}");
-        match push_one_mirror(client, config, repo_path, repo_name, &description).await {
+        let private = wants_private(config.private, public_repos, repo_name);
+        match push_one_mirror(client, config, repo_path, repo_name, &description, private).await {
             Ok(()) => {
                 stats.pushed += 1;
                 info!(repo = %repo_name, "mirror pushed successfully");
             }
             Err(e) => {
                 stats.errored += 1;
+                stats.failures.push(format!("{repo_name}: {e}"));
                 warn!(repo = %repo_name, error = %e, "mirror push failed, continuing");
             }
         }
@@ -74,6 +85,8 @@ pub struct MirrorStats {
     pub pushed: usize,
     /// Number of repositories that failed to push.
     pub errored: usize,
+    /// One `name: error` line per failed repository.
+    pub failures: Vec<String>,
 }
 
 /// Pushes a single repository to the Gitea mirror.
@@ -83,58 +96,22 @@ async fn push_one_mirror(
     repo_path: &Path,
     repo_name: &str,
     description: &str,
+    private: bool,
 ) -> Result<(), MirrorError> {
-    // Ensure the destination repo exists (creates it if needed).
-    client.ensure_repo_exists(repo_name, description).await?;
+    // Ensure the destination repo exists (creates it if needed) and is ours.
+    client
+        .ensure_repo_exists(repo_name, description, private)
+        .await?;
 
-    // Build the remote URL with credentials embedded for the git push.
-    // We use the askpass approach to keep the token out of process listings.
     let remote_url = config.repo_clone_url(repo_name);
 
     info!(
         repo = %repo_name,
         remote = %config.base_url,
-        "running git push --mirror"
+        "pushing branches and tags"
     );
 
-    run_git_push_mirror(repo_path, &remote_url, &config.token)
-}
-
-/// Runs `git push --mirror <remote_url>` from `repo_path`.
-///
-/// Injects the token via `GIT_ASKPASS` to avoid exposing it in process
-/// listings.
-fn run_git_push_mirror(repo_path: &Path, remote_url: &str, token: &str) -> Result<(), MirrorError> {
-    let askpass = AskpassScript::create(token);
-
-    let mut cmd = Command::new("git");
-    cmd.args([
-        "-C",
-        &repo_path.to_string_lossy(),
-        "push",
-        "--mirror",
-        remote_url,
-    ]);
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("GIT_USERNAME", "x-access-token");
-
-    if let Some(ref script) = askpass {
-        cmd.env("GIT_ASKPASS", script.path());
-    }
-
-    let output = cmd.output().map_err(MirrorError::GitSpawn)?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let code = output.status.code().unwrap_or(-1);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Err(MirrorError::GitFailed {
-        args: format!("push --mirror {remote_url}"),
-        code,
-        stderr,
-    })
+    push_refs(repo_path, &remote_url, &config.token, "x-access-token")
 }
 
 /// Discovers all `*.git` directories directly under `dir`.
@@ -158,48 +135,6 @@ fn discover_git_repos(dir: &Path) -> Vec<(PathBuf, String)> {
             Some((path, repo_name))
         })
         .collect()
-}
-
-/// RAII guard for a temporary `GIT_ASKPASS` shell script.
-struct AskpassScript {
-    path: PathBuf,
-}
-
-impl AskpassScript {
-    fn create(token: &str) -> Option<Self> {
-        let script = format!("#!/bin/sh\necho '{}'", token.replace('\'', "'\\''"));
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "gh-mirror-askpass-{}-{}.sh",
-            std::process::id(),
-            format!("{:?}", std::thread::current().id())
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect::<String>(),
-        ));
-
-        if std::fs::write(&path, script.as_bytes()).is_err() {
-            return None;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
-        }
-
-        Some(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for AskpassScript {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Retries an async operation up to `max_attempts` times with exponential

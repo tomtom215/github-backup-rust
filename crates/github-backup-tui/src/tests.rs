@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::{handle_backup_event, handle_key_dispatch, App, InitialConfig};
 use crate::event::BackupEvent;
-use crate::state::{CloneTypeForm, MirrorTypeForm, RepoStatus, ResultsState, RunState, Screen};
+use crate::state::{CloneTypeForm, Outcome, RepoStatus, ResultsState, RunState, RunStatus, Screen};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,7 @@ fn initial_config_populates_fields() {
         owner: Some("octocat".into()),
         output: Some("/var/backup".into()),
         api_url: Some("https://ghe.example.com/api/v3".into()),
+        ..Default::default()
     });
     assert_eq!(app.config.token, "ghp_abc");
     assert_eq!(app.config.owner, "octocat");
@@ -205,8 +206,8 @@ fn configure_tab_resets_field_index() {
 fn configure_j_k_navigate_fields() {
     let mut app = make_app();
     app.screen = Screen::Configure;
-    // Tab 0 has 4 fields
-    assert_eq!(app.config.active_tab, 0);
+    // Target tab has 5 fields
+    app.config.active_tab = 1;
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.config.active_field, 1);
     press(&mut app, KeyCode::Char('j'));
@@ -285,14 +286,19 @@ fn configure_enter_commits_edit() {
 }
 
 #[test]
-fn configure_esc_commits_edit_too() {
+fn configure_esc_discards_edit() {
     let mut app = make_app();
+    app.config.token = "keep-me".into();
     app.screen = Screen::Configure;
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('x'));
+    for c in "garbage".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
     press(&mut app, KeyCode::Esc);
     assert!(!app.config.editing);
-    assert_eq!(app.config.token, "x");
+    assert!(app.config.edit_buffer.is_empty());
+    assert_eq!(app.config.token, "keep-me");
+    assert_eq!(app.screen, Screen::Configure); // Esc only left the field
 }
 
 #[test]
@@ -312,22 +318,24 @@ fn configure_number_keys_do_not_switch_screens_while_editing() {
 fn configure_space_toggles_bool_field() {
     let mut app = make_app();
     app.screen = Screen::Configure;
-    // Tab 0, field 2 = device_auth
+    // Target tab (1), field 2 = org_mode
+    app.config.active_tab = 1;
     app.config.active_field = 2;
-    assert!(!app.config.device_auth);
+    assert!(!app.config.org_mode);
     press(&mut app, KeyCode::Char(' '));
-    assert!(app.config.device_auth);
+    assert!(app.config.org_mode);
     press(&mut app, KeyCode::Char(' '));
-    assert!(!app.config.device_auth);
+    assert!(!app.config.org_mode);
 }
 
 #[test]
 fn configure_enter_on_toggle_field_also_toggles() {
     let mut app = make_app();
     app.screen = Screen::Configure;
-    app.config.active_field = 2; // device_auth
+    app.config.active_tab = 1;
+    app.config.active_field = 2; // org_mode
     press(&mut app, KeyCode::Enter);
-    assert!(app.config.device_auth);
+    assert!(app.config.org_mode);
 }
 
 #[test]
@@ -342,18 +350,20 @@ fn configure_categories_space_toggles() {
 }
 
 #[test]
-fn configure_a_selects_all_categories() {
+fn configure_a_selects_all_then_none() {
     let mut app = make_app();
     app.screen = Screen::Configure;
     app.config.active_tab = 2;
-    // First 'A' enables all (repositories was true, issues was false)
-    app.config.repositories = false; // ensure "all off" first toggle
+    // Default config has only `repositories` on: the first A must turn
+    // everything ON (it used to turn everything off).
+    assert!(app.config.repositories);
+    assert!(!app.config.issues);
     press(&mut app, KeyCode::Char('A'));
     assert!(app.config.repositories);
     assert!(app.config.issues);
     assert!(app.config.pulls);
     assert!(app.config.releases);
-    // Second 'A' disables all
+    // Everything on: the next A turns everything off.
     press(&mut app, KeyCode::Char('A'));
     assert!(!app.config.repositories);
     assert!(!app.config.issues);
@@ -380,19 +390,6 @@ fn configure_left_right_cycle_clone_type() {
     assert_eq!(app.config.clone_type, CloneTypeForm::Shallow);
 }
 
-#[test]
-fn configure_left_right_cycle_mirror_type() {
-    let mut app = make_app();
-    app.screen = Screen::Configure;
-    app.config.active_tab = 5;
-    app.config.active_field = 1;
-    assert_eq!(app.config.mirror_type, MirrorTypeForm::Gitea);
-    press(&mut app, KeyCode::Right);
-    assert_eq!(app.config.mirror_type, MirrorTypeForm::Gitlab);
-    press(&mut app, KeyCode::Right); // wraps
-    assert_eq!(app.config.mirror_type, MirrorTypeForm::Gitea);
-}
-
 // ── ConfigState validation ────────────────────────────────────────────────────
 
 #[test]
@@ -405,7 +402,7 @@ fn validate_fails_without_owner() {
 }
 
 #[test]
-fn validate_fails_without_token_or_device_auth() {
+fn validate_fails_without_token() {
     let app = App::new(InitialConfig {
         owner: Some("octocat".into()),
         ..Default::default()
@@ -420,16 +417,6 @@ fn validate_passes_with_owner_and_token() {
         owner: Some("octocat".into()),
         ..Default::default()
     });
-    assert!(app.config.validate().is_none());
-}
-
-#[test]
-fn validate_passes_with_owner_and_device_auth() {
-    let mut app = App::new(InitialConfig {
-        owner: Some("octocat".into()),
-        ..Default::default()
-    });
-    app.config.device_auth = true;
     assert!(app.config.validate().is_none());
 }
 
@@ -640,11 +627,13 @@ fn backup_event_done_transitions_to_results() {
             workflows_fetched: 20,
             discussions_fetched: 0,
             elapsed_secs: 42.5,
+            failures: vec![],
+            dry_run: false,
         },
     );
 
     assert_eq!(app.screen, Screen::Results);
-    assert!(app.results.success);
+    assert_eq!(app.results.outcome, Outcome::Complete);
     assert_eq!(app.results.repos_backed_up, 10);
     assert_eq!(app.results.repos_discovered, 12);
     assert_eq!(app.results.repos_skipped, 2);
@@ -663,7 +652,7 @@ fn backup_event_failed_transitions_to_results() {
         },
     );
     assert_eq!(app.screen, Screen::Results);
-    assert!(!app.results.success);
+    assert_eq!(app.results.outcome, Outcome::Failed);
     assert_eq!(
         app.results.error_message.as_deref(),
         Some("rate limit exceeded")
@@ -710,11 +699,14 @@ fn backup_event_verify_failed() {
 fn running_ctrl_c_cancels_if_running() {
     let mut app = make_app();
     app.screen = Screen::Running;
-    let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     app.cancel_tx = Some(tx);
+    app.run.status = RunStatus::Active;
     ctrl(&mut app, 'c');
     assert!(app.cancel_tx.is_none()); // consumed
     assert!(!app.should_quit);
+    assert_eq!(app.run.status, RunStatus::Cancelling);
+    assert!(rx.blocking_recv().is_ok(), "the cancel signal was sent");
 }
 
 #[test]
@@ -788,14 +780,26 @@ fn verify_v_with_config_starts_verify() {
 }
 
 #[test]
-fn verify_j_k_scroll() {
+fn verify_j_k_scroll_is_bounded_by_the_rows() {
     let mut app = make_app();
     app.screen = Screen::Verify;
+    // Nothing to scroll through yet.
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.verify.scroll, 1);
-    press(&mut app, KeyCode::Char('k'));
     assert_eq!(app.verify.scroll, 0);
-    press(&mut app, KeyCode::Char('k')); // clamps
+
+    app.verify.done = true;
+    app.verify.tampered = vec!["a".into(), "b".into()];
+    // rows: OK line + TAMPERED heading + 2 entries = 4
+    assert_eq!(app.verify.row_count(), 4);
+    for _ in 0..100 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.verify.scroll, 3, "must stop at the last row");
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.verify.scroll, 2, "one k must move back one row");
+    for _ in 0..10 {
+        press(&mut app, KeyCode::Char('k'));
+    }
     assert_eq!(app.verify.scroll, 0);
 }
 
@@ -854,7 +858,7 @@ fn run_state_push_log_caps_at_2000() {
     }
     assert_eq!(run.log_lines.len(), 2000);
     // Newest line should be last.
-    assert!(run.log_lines.last().unwrap().message.contains("2099"));
+    assert!(run.log_lines.back().unwrap().message.contains("2099"));
 }
 
 // ── ResultsState helpers ──────────────────────────────────────────────────────

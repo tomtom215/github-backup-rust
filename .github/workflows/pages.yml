@@ -31,7 +31,7 @@ jobs:
         # build fails with "The command `mdbook-linkcheck` wasn't found".
         run: |
           cargo install mdbook --version "0.4.40" --locked
-          cargo install mdbook-linkcheck --locked
+          cargo install mdbook-linkcheck --version "0.7.7" --locked
 
       - name: Build book
         run: mdbook build docs

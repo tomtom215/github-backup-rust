@@ -40,11 +40,14 @@ rustls-native-certs = "0.8"
 bytes = "1"
 
 # Serialisation
+#
+# `preserve_order` makes `serde_json::Map` insertion-ordered, so the lossless
+# backup files keep GitHub's own key order and re-serialise deterministically.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 
 # Error handling
@@ -85,6 +88,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "alloc"
 
 # Cross-platform exclusive file locking (output-directory protection)
 fslock = "0.2"
+
+# Safe wrapper for signalling a git subprocess's whole process group (Unix).
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 # Test-only
 tokio-test = "0.4"

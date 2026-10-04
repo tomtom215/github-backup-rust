@@ -24,6 +24,10 @@ pub enum ClientError {
     #[error("JSON deserialisation error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Storing a streamed download at its local destination failed.
+    #[error("local write error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// GitHub returned a non-success HTTP status code.
     ///
     /// The `status` field contains the numeric code; `body` contains the
@@ -39,6 +43,10 @@ pub enum ClientError {
     /// A URL could not be parsed.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    /// The configured API base URL cannot be used.
+    #[error("invalid API URL: {0}")]
+    InvalidApiUrl(String),
 
     /// TLS configuration failed.
     #[error("TLS error: {0}")]

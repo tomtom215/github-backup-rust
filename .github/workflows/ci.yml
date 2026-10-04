@@ -21,9 +21,20 @@ on:
           - diff
         required: true
 
+# Least privilege by default; jobs that need more declare it themselves.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Pinned toolchain: a new stable release (new clippy lints, new rustdoc
+  # warnings) must never turn CI red without a code change.  Bump it in a
+  # reviewed PR.  The MSRV job below checks the workspace `rust-version`.
+  RUST_TOOLCHAIN: "1.97.0"
+  # NOTE: third-party actions below are referenced by tag.  Pinning them to full
+  # commit SHAs needs the SHAs resolved from GitHub and checked; .github/dependabot.yml
+  # keeps these refs current in the meantime.
 
 jobs:
   # ── Format ──────────────────────────────────────────────────────────────────
@@ -34,6 +45,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -45,9 +57,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # ── Tests ───────────────────────────────────────────────────────────────────
   test:
@@ -60,8 +73,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   # ── MSRV ────────────────────────────────────────────────────────────────────
   msrv:
@@ -69,9 +84,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo build --workspace --locked
 
   # ── Docs (rustdoc) ──────────────────────────────────────────────────────────
   docs:
@@ -80,8 +97,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps --document-private-items
+      - run: cargo doc --workspace --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -94,7 +113,7 @@ jobs:
       - name: Install mdBook and link checker
         run: |
           cargo install mdbook --version "0.4.40" --locked
-          cargo install mdbook-linkcheck --locked
+          cargo install mdbook-linkcheck --version "0.7.7" --locked
       - run: mdbook build docs
       - uses: actions/upload-artifact@v7
         with:
@@ -140,6 +159,47 @@ jobs:
         with:
           command: check licenses bans advisories sources
 
+  # ── Docker image build + smoke test ─────────────────────────────────────────
+  #
+  # Builds the exact Dockerfile that release.yml publishes (so a broken
+  # Dockerfile fails here, not at tag time) and runs the image's entrypoint
+  # contract: `--version`, `--help`, and the empty-variable handling that
+  # Compose / Unraid rely on.  No credentials are used: a dummy token only.
+  docker:
+    name: Docker build + smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build image
+        run: docker build --tag github-backup:ci .
+      - name: --version and --help
+        run: |
+          docker run --rm github-backup:ci --version
+          docker run --rm github-backup:ci --help > /dev/null
+      - name: Runs as numeric non-root user
+        run: |
+          test "$(docker inspect --format '{{.Config.User}}' github-backup:ci)" = "1000:1000"
+          docker run --rm --entrypoint id github-backup:ci -u | grep -qx 1000
+      - name: Empty optional variables are ignored (Compose / Unraid)
+        run: |
+          docker run --rm \
+            -e GITHUB_TOKEN=ghp_dummy_not_a_real_token \
+            -e BACKUP_ENCRYPT_KEY= -e GITHUB_API_URL= \
+            -e BACKUP_MODE=--print-config-template \
+            github-backup:ci > /dev/null
+      - name: git, git-lfs and ssh are present
+        run: |
+          docker run --rm --entrypoint git github-backup:ci --version
+          docker run --rm --entrypoint git github-backup:ci lfs version
+          docker run --rm --entrypoint ssh github-backup:ci -V
+      - name: Existing repo owned by another uid does not trip safe.directory
+        run: |
+          mkdir out && sudo chown 4242:4242 out
+          docker run --rm --user 4242:4242 -v "$PWD/out:/backup" --entrypoint sh github-backup:ci -c \
+            'git init -q /backup/r.git && git -C /backup/r.git status >/dev/null'
+          docker run --rm --user 99:100 -v "$PWD/out:/backup" --entrypoint sh github-backup:ci -c \
+            'git -C /backup/r.git status >/dev/null && echo ok-other-uid'
+
   # ── Mutation testing (on-demand) ─────────────────────────────────────────────
   #
   # This job is gated on `workflow_dispatch` so it does NOT run automatically
@@ -163,6 +223,8 @@ jobs:
           fetch-depth: 0  # need full history for --in-diff
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-mutants

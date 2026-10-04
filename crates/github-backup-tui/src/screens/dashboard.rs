@@ -3,45 +3,84 @@
 
 //! Dashboard screen — the first screen a user sees.
 //!
-//! Shows the last backup summary and quick-action menu.
+//! Shows the last backup summary and quick-action menu.  Below about 15 rows
+//! or 56 columns it switches to a compact layout without borders so the
+//! actions and the key hints always stay visible.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
+use super::util::{fit, fit_tail, hint_lines};
 use crate::state::{ConfigState, DashboardState};
 use crate::theme;
 
-pub fn render(
-    frame: &mut Frame,
-    dash: &DashboardState,
-    cfg: &ConfigState,
-    area: ratatui::layout::Rect,
-) {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6), // info panel
-            Constraint::Min(8),    // actions
-            Constraint::Length(3), // status / hint
-        ])
-        .split(area);
+pub fn render(frame: &mut Frame, dash: &DashboardState, cfg: &ConfigState, area: Rect) {
+    let compact = area.height < 15 || area.width < 56;
+    let actions = DashboardState::ACTIONS.len() as u16;
 
-    render_info(frame, dash, cfg, outer[0]);
-    render_actions(frame, dash, outer[1]);
-    render_hint(frame, dash, outer[2]);
+    if compact {
+        let info_h = 4.min(area.height.saturating_sub(actions + 1));
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(info_h),
+                Constraint::Length(actions.min(area.height.saturating_sub(info_h))),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        render_info_compact(frame, dash, cfg, rows[0]);
+        render_actions(frame, dash, rows[1], false);
+        render_hint(frame, rows[2]);
+    } else {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5), // info panel
+                Constraint::Min(actions + 2),
+                Constraint::Length(2), // hint
+            ])
+            .split(area);
+        render_info(frame, dash, cfg, rows[0]);
+        render_actions(frame, dash, rows[1], true);
+        render_hint(frame, rows[2]);
+    }
 }
 
-fn render_info(
-    frame: &mut Frame,
-    dash: &DashboardState,
-    cfg: &ConfigState,
-    area: ratatui::layout::Rect,
-) {
+/// `"2026-10-03T18:49:42Z  3 repos  OK"` style summary of the last run.
+fn last_run_result(dash: &DashboardState) -> Span<'static> {
+    match (dash.last_run_ok, dash.last_run_failures) {
+        (Some(true), _) => Span::styled("complete", theme::OK_STYLE),
+        (Some(false), 0) => Span::styled("incomplete", theme::WARN_STYLE),
+        (Some(false), n) => Span::styled(
+            format!("INCOMPLETE ({n} failure{})", if n == 1 { "" } else { "s" }),
+            theme::WARN_STYLE,
+        ),
+        (None, _) => Span::styled("-", theme::DIM),
+    }
+}
+
+fn owner_span(cfg: &ConfigState, width: usize) -> Span<'static> {
+    if cfg.owner.trim().is_empty() {
+        Span::styled("(not configured)", theme::WARN_STYLE)
+    } else {
+        Span::styled(fit(cfg.owner.trim(), width), theme::ACCENT_BOLD)
+    }
+}
+
+fn token_span(cfg: &ConfigState) -> Span<'static> {
+    if cfg.token.trim().is_empty() {
+        Span::styled("not set", theme::WARN_STYLE)
+    } else {
+        Span::styled("configured", theme::OK_STYLE)
+    }
+}
+
+fn render_info(frame: &mut Frame, dash: &DashboardState, cfg: &ConfigState, area: Rect) {
     let block = Block::default()
         .title(Span::styled(" Status ", theme::TITLE))
         .borders(Borders::ALL)
@@ -55,71 +94,100 @@ fn render_info(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
-    // Left column
-    let owner_display = if cfg.owner.is_empty() {
-        Span::styled("(not configured)", theme::WARN_STYLE)
+    // Left column: 8 columns of label.
+    // One column of gap before the right-hand column.
+    let lw = (cols[0].width as usize).saturating_sub(8 + 1);
+    let output = if cfg.output_dir.trim().is_empty() {
+        "(not set)".to_string()
     } else {
-        Span::styled(cfg.owner.clone(), theme::ACCENT_BOLD)
+        fit_tail(cfg.output_dir.trim(), lw)
     };
-
-    let left_lines = vec![
-        Line::from(vec![Span::styled("Owner:  ", theme::DIM), owner_display]),
+    let left = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Owner:  ", theme::DIM),
+            owner_span(cfg, lw),
+        ]),
         Line::from(vec![
             Span::styled("Output: ", theme::DIM),
-            Span::styled(
-                if cfg.output_dir.is_empty() {
-                    "(not set)"
-                } else {
-                    &cfg.output_dir
-                },
-                theme::NORMAL,
-            ),
+            Span::styled(output, theme::NORMAL),
         ]),
-        Line::from(vec![
-            Span::styled("Token:  ", theme::DIM),
-            if cfg.token.is_empty() {
-                Span::styled("not set", theme::WARN_STYLE)
-            } else {
-                Span::styled("configured", theme::OK_STYLE)
-            },
-        ]),
-    ];
-    let left = Paragraph::new(left_lines);
+        Line::from(vec![Span::styled("Token:  ", theme::DIM), token_span(cfg)]),
+    ]);
     frame.render_widget(left, cols[0]);
 
-    // Right column
-    let last_run = dash.last_backup_time.as_deref().unwrap_or("never");
+    // Right column: 10 columns of label.
+    let rw = (cols[1].width as usize).saturating_sub(10 + 1);
+    let last_run = fit(dash.last_backup_time.as_deref().unwrap_or("never"), rw);
     let last_repos = dash
         .last_backup_repos
         .map(|n| n.to_string())
         .unwrap_or_else(|| "-".into());
-
-    let right_lines = vec![
+    let right = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Last run:   ", theme::DIM),
+            Span::styled("Last run: ", theme::DIM),
             Span::styled(last_run, theme::NORMAL),
         ]),
         Line::from(vec![
-            Span::styled("Repos:      ", theme::DIM),
+            Span::styled("Repos:    ", theme::DIM),
             Span::styled(last_repos, theme::NORMAL),
         ]),
         Line::from(vec![
-            Span::styled("Version:    ", theme::DIM),
-            Span::styled(dash.last_tool_version.as_deref().unwrap_or("-"), theme::DIM),
+            Span::styled("Result:   ", theme::DIM),
+            last_run_result(dash),
         ]),
-    ];
-    let right = Paragraph::new(right_lines);
+    ]);
     frame.render_widget(right, cols[1]);
 }
 
-fn render_actions(frame: &mut Frame, dash: &DashboardState, area: ratatui::layout::Rect) {
-    let block = Block::default()
-        .title(Span::styled(" Actions ", theme::TITLE))
-        .borders(Borders::ALL)
-        .border_style(theme::DIM);
+fn render_info_compact(frame: &mut Frame, dash: &DashboardState, cfg: &ConfigState, area: Rect) {
+    let w = area.width as usize;
+    let token = if cfg.token.trim().is_empty() {
+        Span::styled("not set", theme::WARN_STYLE)
+    } else {
+        Span::styled("ok", theme::OK_STYLE)
+    };
+    let output = if cfg.output_dir.trim().is_empty() {
+        "(not set)".to_string()
+    } else {
+        fit_tail(cfg.output_dir.trim(), w.saturating_sub(8))
+    };
+    let when = dash.last_backup_time.as_deref().unwrap_or("never");
+    // Most important first: the area may only have room for the first rows.
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Owner: ", theme::DIM),
+            owner_span(cfg, w.saturating_sub(7 + 9 + 7)),
+            Span::styled("  Token: ", theme::DIM),
+            token,
+        ]),
+        Line::from(vec![
+            Span::styled("Last:   ", theme::DIM),
+            Span::styled(fit(when, w.saturating_sub(8)), theme::NORMAL),
+        ]),
+        Line::from(vec![
+            Span::styled("Result: ", theme::DIM),
+            last_run_result(dash),
+        ]),
+        Line::from(vec![
+            Span::styled("Output: ", theme::DIM),
+            Span::styled(output, theme::NORMAL),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn render_actions(frame: &mut Frame, dash: &DashboardState, area: Rect, bordered: bool) {
+    let inner = if bordered {
+        let block = Block::default()
+            .title(Span::styled(" Actions ", theme::TITLE))
+            .borders(Borders::ALL)
+            .border_style(theme::DIM);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
 
     let items: Vec<ListItem> = DashboardState::ACTIONS
         .iter()
@@ -149,7 +217,7 @@ fn render_actions(frame: &mut Frame, dash: &DashboardState, area: ratatui::layou
             ]);
             let item = ListItem::new(line);
             if is_selected {
-                item.style(Style::default().bg(ratatui::style::Color::DarkGray))
+                item.style(Style::default().bg(theme::HIGHLIGHT_BG))
             } else {
                 item
             }
@@ -163,31 +231,19 @@ fn render_actions(frame: &mut Frame, dash: &DashboardState, area: ratatui::layou
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn render_hint(frame: &mut Frame, dash: &DashboardState, area: ratatui::layout::Rect) {
-    let msg = if let Some(ref err) = dash.error_message {
-        Line::from(vec![
-            Span::styled("Error: ", theme::ERR_STYLE),
-            Span::styled(err.as_str(), theme::ERR_STYLE),
-        ])
-    } else if let Some(ref status) = dash.status_message {
-        Line::from(Span::styled(status.as_str(), theme::OK_STYLE))
-    } else {
-        Line::from(vec![
-            Span::styled("j/k", theme::KEY_HINT),
-            Span::styled(" navigate  ", theme::KEY_DESC),
-            Span::styled("Enter", theme::KEY_HINT),
-            Span::styled(" select  ", theme::KEY_DESC),
-            Span::styled("r", theme::KEY_HINT),
-            Span::styled(" run backup  ", theme::KEY_DESC),
-            Span::styled("c", theme::KEY_HINT),
-            Span::styled(" configure  ", theme::KEY_DESC),
-            Span::styled("q", theme::KEY_HINT),
-            Span::styled(" quit", theme::KEY_DESC),
-        ])
-    };
-
-    let para = Paragraph::new(msg)
-        .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(para, area);
+fn render_hint(frame: &mut Frame, area: Rect) {
+    let lines = hint_lines(
+        &[
+            ("r", "run backup"),
+            ("q", "quit"),
+            ("c", "configure"),
+            ("v", "verify"),
+            ("j/k", "move"),
+            ("Enter", "select"),
+            ("1-5", "screens"),
+        ],
+        area.width as usize,
+        area.height as usize,
+    );
+    frame.render_widget(Paragraph::new(lines), area);
 }

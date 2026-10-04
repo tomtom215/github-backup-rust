@@ -1,72 +1,120 @@
 # Authentication
 
-`github-backup` supports three authentication modes: a **Personal Access Token** (PAT), the **GitHub OAuth device flow**, and **no token** (unauthenticated, public data only).
+`github-backup` supports three ways to authenticate: a **personal access
+token** (PAT), the **GitHub OAuth device flow**, and **no credential** (public
+data only).
 
 ---
 
 ## Personal Access Token (Recommended)
 
-The simplest and most reliable method for automated and scheduled backups.
+The simplest and most reliable method for scheduled backups.
 
 ### Creating a Token
 
 #### Classic PAT
 
-1. Go to [GitHub Settings → Developer settings → Personal access tokens → Tokens (classic)](https://github.com/settings/tokens)
-2. Click **Generate new token (classic)**
-3. Select scopes:
-   - `repo` — access private repositories
-   - `gist` — back up gists
-   - `read:org` — back up organisation repositories
-4. Copy the generated token
+1. Open [Settings → Developer settings → Personal access tokens → Tokens (classic)](https://github.com/settings/tokens).
+2. **Generate new token (classic)**.
+3. Select the scopes from [What each category needs](#what-each-category-needs).
+   For a complete backup (`--all`, organisation or personal) select
+   `repo`, `gist`, `read:org` and `read:packages`.
+4. Copy the token.
 
-#### Fine-grained PAT (Recommended for security)
+#### Fine-grained PAT
 
-1. Go to [GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta)
-2. Click **Generate new token**
-3. Set repository access to **All repositories** or specific repos
-4. Grant these repository permissions:
-   - **Contents**: Read
-   - **Issues**: Read
-   - **Pull requests**: Read
-   - **Metadata**: Read (mandatory)
-5. For webhooks: add **Webhooks: Read**
-6. For security advisories: add **Security advisories: Read**
+1. Open [Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta).
+2. Choose the **resource owner** (your account, or the organisation whose
+   repositories you back up; the organisation may need to approve the token) and
+   repository access (**All repositories** or a selection).
+3. Grant the repository permissions listed in the table below.
+4. Fine-grained tokens cannot read some account-level resources
+   (gists and packages are classic-only according to GitHub's documentation);
+   use a classic token if you need `--gists`, `--starred-gists` or `--packages`.
 
 ### Using the Token
 
-Via CLI flag:
-```bash
-github-backup octocat --token ghp_xxx --output /backup --all
-```
+Environment variable (preferred: the token stays out of shell history and
+the process list):
 
-Via environment variable (preferred — keeps the token out of shell history):
 ```bash
-export GITHUB_TOKEN=ghp_xxx
+export GITHUB_TOKEN=ghp_dummy_token_for_illustration
 github-backup octocat --output /backup --all
 ```
 
-Via config file (restrict file permissions to `0600`):
-```toml
-# /etc/github-backup/config.toml
-token = "ghp_xxx"
-```
+Other ways, in order of preference: a config file with mode `0600`
+(`token = "..."`; the tool warns if the file is readable by others) and the
+`--token` flag.  A command-line value is visible in `ps` to every user of the
+machine and ends up in the shell history (the tool warns about that for
+`--encrypt-key`, not for `--token`), so avoid `--token` on shared hosts.
+
+The token is only ever sent to the GitHub API host you configured, as
+`Authorization: Bearer ...`, and to `git` through a credential helper limited to
+the clone URL's host.  It is not written to disk by the tool and is removed from
+error messages.
+
+---
+
+## What Each Category Needs
+
+The table maps each flag to the classic scope and the fine-grained permission
+GitHub documents for the endpoint it uses.  It is derived from GitHub's
+documentation and has **not** been exercised against live accounts by the
+project: check with `--doctor` (token accepted) and a trial run, and look at the
+failures it reports.
+
+| Flags | Classic scope | Fine-grained permission |
+|-------|---------------|-------------------------|
+| `--repositories`, `--wikis` | `repo` for private repositories, none for public | Contents: read, Metadata: read |
+| `--issues`, `--issue-comments`, `--issue-events`, `--labels`, `--milestones` | `repo` (private) | Issues: read (pull request items also Pull requests: read) |
+| `--pulls`, `--pull-comments`, `--pull-commits`, `--pull-reviews` | `repo` (private) | Pull requests: read |
+| `--releases`, `--release-assets`, `--branches`, `--topics` | `repo` (private) | Contents: read, Metadata: read |
+| `--branches` protection rules, `--deploy-keys`, `--collaborators` | `repo`, and admin rights on the repository | Administration: read |
+| `--hooks` | `repo` (or `admin:repo_hook`), and admin rights | Webhooks: read |
+| `--security-advisories` | `repo` | Repository security advisories: read |
+| `--actions`, `--action-runs`, `--environments` | `repo` | Actions: read (environments: Actions/Administration as GitHub documents) |
+| `--org-members`, `--org-teams` | `read:org` | Organization: Members: read |
+| `--starred`, `--watched` | none (public) or `repo` | Starring: read, Watching: read |
+| `--followers`, `--following` | none (public data) | none |
+| `--gists`, `--starred-gists` | `gist` | not available to fine-grained tokens |
+| `--packages` | `read:packages` | not available to fine-grained tokens |
+| `--discussions`, `--projects` | n/a | n/a: nothing is backed up (no REST endpoint) |
+| `--restore` | `repo` (write) | Issues: read and write |
+
+Notes:
+
+* A user's **private repositories and secret gists** are listed only when the
+  token belongs to that user, see
+  [Private repositories](../backup-categories.md#private-repositories).
+* For organisation targets (`--org`) the token's owner must be able to see the
+  repositories.  If the organisation enforces SAML single sign-on, authorise the
+  token for it (Settings → token → *Configure SSO*), otherwise GitHub answers 403.
+* When a category is not permitted (HTTP 403 or 404) the tool skips that item
+  with an `INFO` line instead of failing; see
+  [Repository Metadata](../backup-categories.md#repository-metadata).  A repository
+  that cannot be listed or cloned at all is a failure (exit status `3`).
+* `github-backup --list-scopes <flags>` prints suggested scopes for the flags you
+  give, but it does not expand `--all` (it prints only `public_repo repo`) and it
+  suggests `user:follow` and `admin:public_key` for `--followers` and
+  `--deploy-keys`, which only read.  Use the table above rather than that output
+  for `--all`.
 
 ---
 
 ## OAuth Device Flow
 
-The interactive OAuth device flow is useful when you want to authenticate without
-creating a long-lived PAT — for example on a new machine or in a CI environment
-where you interact manually.
+The device flow signs in interactively without creating a long-lived PAT; the
+token is **not stored**, so every run needs the login.  It is unsuitable for
+unattended runs.
 
 ### Prerequisites
 
-1. Create an [OAuth App on GitHub](https://github.com/settings/developers):
-   - **Application name**: anything (e.g. `github-backup`)
+1. Create an [OAuth App](https://github.com/settings/developers):
+   - **Application name**: anything (for example `github-backup`)
    - **Homepage URL**: any valid URL
-   - **Authorization callback URL**: `http://localhost` (not actually used by device flow)
-2. Copy the **Client ID** (a string like `Iv1.xxxx`)
+   - **Authorization callback URL**: `http://localhost` (not used by the device flow)
+   - tick **Enable Device Flow** in the app's settings
+2. Copy the **Client ID**.
 
 ### Running Device Flow
 
@@ -74,12 +122,13 @@ where you interact manually.
 github-backup octocat \
   --device-auth \
   --oauth-client-id Iv1.xxxx \
-  --oauth-scopes "repo gist read:org" \
+  --oauth-scopes "repo gist read:org read:packages" \
   --output /backup \
   --all
 ```
 
 You will see:
+
 ```
 ──────────────────────────────────────────────────────
   GitHub OAuth device authorisation
@@ -90,49 +139,59 @@ You will see:
   Waiting for authorisation…
 ```
 
-Open the URL in a browser, enter the code, and authorise the app. `github-backup` polls for the token automatically.
+Open the URL, enter the code and authorise the app; `github-backup` polls for
+the token.  If you do not authorise in time the flow ends with an
+"expired" error; just run the command again.  `--oauth-client-id` is only valid
+together with `--device-auth`.
 
 ### Scopes
 
-The default scope string `"repo gist read:org"` is sufficient for a complete backup.  Narrow it if you only need specific categories:
-
-| Scope | Needed for |
-|-------|-----------|
-| `repo` | Private repositories, pull requests, releases, wikis |
-| `gist` | Gists |
-| `read:org` | Organisation repositories |
-| `admin:repo_hook` | Webhooks (`--hooks`) |
+The default `--oauth-scopes` is `"repo gist read:org"`.  It does **not** cover
+`--packages` (add `read:packages`).  Narrow it if you back up fewer categories;
+see the table above.
 
 ---
 
-## Unauthenticated Access (Public Repos Only)
+## Unauthenticated Access (Public Data Only)
 
-No token is required to back up **public** repositories, gists, and user data.
-Simply omit `--token` and skip the device flow:
+Omit the token to back up public data:
 
 ```bash
 github-backup octocat --output /backup --repositories --issues --releases
 ```
 
-`github-backup` will warn you at startup:
+At startup the tool warns:
 
 ```
-WARN  no token provided — running unauthenticated (public data only, 60 req/h rate limit)
+WARN no GitHub credential supplied — running unauthenticated. Limited to public data and 60 requests / hour. Set GITHUB_TOKEN, pass --token, or use --device-auth for a full backup.
 ```
 
-> **Rate limit**: unauthenticated requests are limited to **60 requests per hour** per source IP (GitHub's public bucket).  Accounts with many repositories or large issue histories will hit this quickly — use a token to get 5 000 requests/hour.
+Unauthenticated requests are limited to **60 per hour per IP address**, which
+accounts with many repositories or issues exhaust quickly.  If you name a flag
+that cannot work anonymously (`--private`, `--hooks`, `--deploy-keys`,
+`--collaborators`, `--org-members`, `--org-teams`, `--actions`, `--action-runs`,
+`--packages`, `--discussions`, `--projects`) the tool refuses to start (exit
+status `1`).  That check does not look inside `--all`, so do not use an
+anonymous `--all`.
 
-Useful for:
-- Quick one-off snapshots of a public project.
-- CI pipelines that only need public metadata.
-- Testing the tool before creating a token.
+---
+
+## Verify the Token
+
+```bash
+github-backup octocat --doctor
+```
+
+`--doctor` asks GitHub whether the token is accepted (`GET /rate_limit`, which
+costs no quota).  It does not check scopes or permissions.
 
 ---
 
 ## Security Best Practices
 
-1. **Use environment variables** rather than `--token` CLI flags to keep tokens out of shell history and process listings.
-2. **Use fine-grained PATs** scoped to only the repositories and permissions you need.
-3. **Rotate tokens regularly** — if a token is compromised, rotate it immediately in GitHub settings.
-4. **Restrict config file permissions**: `chmod 600 /etc/github-backup/config.toml`
-5. **Never commit tokens** to version control.
+1. Pass the token in `GITHUB_TOKEN` (or a `0600` config file), not with `--token`.
+2. Prefer a fine-grained token limited to what you need, or a classic token with
+   only the scopes in the table above.
+3. Rotate tokens regularly and revoke one immediately if it may have leaked.
+4. `chmod 600 /etc/github-backup/config.toml`.
+5. Never commit tokens to version control.

@@ -15,7 +15,7 @@
 //! The nonce is generated fresh for every file so that encrypting the same
 //! plaintext twice produces different ciphertext.  The nonce is stored
 //! prepended to the ciphertext so that decryption only needs the key and the
-//! stored blob.
+//! stored blob.  No associated data is authenticated.
 //!
 //! # Key format
 //!
@@ -28,13 +28,10 @@
 //!
 //! # Decryption
 //!
-//! ```bash
-//! # Split nonce (first 12 bytes) and ciphertext+tag, then decrypt:
-//! dd if=file.json.enc bs=12 count=1 of=nonce.bin
-//! dd if=file.json.enc bs=12 skip=1 of=ct.bin
-//! openssl enc -d -aes-256-gcm -K <hex_key> -iv <hex_nonce> \
-//!   -in ct.bin -out file.json
-//! ```
+//! Use the tool itself (`github-backup --decrypt …`) or any AES-GCM library
+//! (for example Python's `cryptography`: `AESGCM(key).decrypt(blob[:12],
+//! blob[12:], None)`).  The `openssl enc` command cannot decrypt GCM: it
+//! rejects AEAD ciphers.
 
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
@@ -46,6 +43,16 @@ use crate::error::S3Error;
 
 /// Nonce length for AES-256-GCM (96 bits / 12 bytes).
 const NONCE_LEN: usize = 12;
+
+/// GCM authentication tag length.
+const TAG_LEN: usize = 16;
+
+/// Size of the object that [`encrypt`] produces for `plaintext_len` bytes of
+/// input: nonce + ciphertext + tag.
+#[must_use]
+pub fn encrypted_len(plaintext_len: u64) -> u64 {
+    plaintext_len + (NONCE_LEN + TAG_LEN) as u64
+}
 
 /// Encrypts `plaintext` with AES-256-GCM using the provided 32-byte key.
 ///

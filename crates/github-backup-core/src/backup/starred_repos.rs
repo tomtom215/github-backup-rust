@@ -48,6 +48,15 @@ use crate::{
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
+/// What [`backup_starred_repos`] did in this run.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StarredOutcome {
+    /// Repositories that exhausted their retries in *this* run, as
+    /// `(owner/repo, last error)`.  Items that failed in an earlier run and are
+    /// still parked in the queue are not repeated here.
+    pub failed: Vec<(String, String)>,
+}
+
 /// Clones or updates every starred repository for `username`.
 ///
 /// Reads and writes a durable queue at `queue_path`.  Repositories that were
@@ -65,13 +74,14 @@ use crate::{
 /// - `starred_dir` — Root directory for cloned repos:
 ///   `<starred_dir>/<repo_owner>/<repo_name>.git`.
 /// - `queue_path` — Path to the JSON queue file (created if absent).
-/// - `clone_opts` — Token and no-prune settings passed to git.
+/// - `clone_opts` — Token and prune settings passed to git.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError`] on fatal API errors or queue I/O failures.
-/// Per-repo clone errors are retried and ultimately recorded as `Failed`
-/// in the queue rather than aborting the run.
+/// Returns [`CoreError`] on fatal errors (API, queue I/O, cancellation, full
+/// disk).  Per-repo clone errors are retried and ultimately recorded as
+/// `Failed` in the queue and in [`StarredOutcome::failed`] rather than aborting
+/// the run.
 pub async fn backup_starred_repos(
     client: &impl BackupClient,
     git: &impl GitRunner,
@@ -80,14 +90,15 @@ pub async fn backup_starred_repos(
     starred_dir: &Path,
     queue_path: &Path,
     clone_opts: &CloneOptions,
-) -> Result<(), CoreError> {
+) -> Result<StarredOutcome, CoreError> {
+    let mut outcome = StarredOutcome::default();
     if !opts.clone_starred {
-        return Ok(());
+        return Ok(outcome);
     }
 
     if opts.dry_run {
         info!(username, "dry-run: skipping starred repos clone");
-        return Ok(());
+        return Ok(outcome);
     }
 
     // ── Fetch starred list ────────────────────────────────────────────────────
@@ -101,6 +112,7 @@ pub async fn backup_starred_repos(
 
     // ── Load or create queue ──────────────────────────────────────────────────
     let mut queue = starred_queue::load_or_create(queue_path, username, &starred)?;
+    starred_queue::begin_pass(&mut queue);
     let initial = starred_queue::compute_stats(&queue);
 
     info!(
@@ -118,17 +130,11 @@ pub async fn backup_starred_repos(
             failed = initial.failed,
             "all starred repos already processed; nothing to clone"
         );
-        return Ok(());
+        return Ok(outcome);
     }
 
-    // ── Shutdown signal (Ctrl+C) ──────────────────────────────────────────────
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl+C received; finishing current clone and stopping");
-            let _ = shutdown_tx.send(true);
-        }
-    });
+    // Cancelling `clone_opts.cancel` (on SIGINT/SIGTERM, or from the TUI) also
+    // stops the git process that is running now.
 
     // ── Process queue ─────────────────────────────────────────────────────────
     let run_start = Instant::now();
@@ -140,10 +146,10 @@ pub async fn backup_starred_repos(
         }
 
         // Graceful shutdown: save and exit.
-        if *shutdown_rx.borrow() {
-            info!("shutdown signal received; saving queue and stopping");
+        if clone_opts.cancel.is_cancelled() {
+            info!("shutdown requested; saving queue and stopping");
             starred_queue::save(&mut queue, queue_path)?;
-            break;
+            return Err(CoreError::Interrupted);
         }
 
         // Snapshot fields needed during the retry loop to avoid borrow issues.
@@ -169,12 +175,26 @@ pub async fn backup_starred_repos(
 
         // ── Retry loop ──────────────────────────────────────────────────────
         let mut success = false;
+        let mut gone = false;
         let mut last_err: Option<String> = None;
 
         for attempt in 0..MAX_ATTEMPTS {
-            match do_clone(git, &url, &dest, opts, clone_opts) {
+            match do_clone(git, &url, &dest, opts, clone_opts).await {
                 Ok(()) => {
                     success = true;
+                    break;
+                }
+                Err(e) if e.is_fatal() => {
+                    // Cancelled or out of disk: not this repository's fault, so
+                    // it stays `Pending` with its retry budget untouched.
+                    starred_queue::save(&mut queue, queue_path)?;
+                    return Err(e);
+                }
+                // Deleted, blocked or made private upstream: retrying cannot help
+                // and it is not a failure of the backup — the earlier copy stays.
+                Err(e) if e.is_remote_missing() => {
+                    last_err = Some(e.to_string());
+                    gone = true;
                     break;
                 }
                 Err(e) => {
@@ -201,10 +221,10 @@ pub async fn backup_starred_repos(
                     starred_queue::save(&mut queue, queue_path)?;
                     tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
 
-                    if *shutdown_rx.borrow() {
+                    if clone_opts.cancel.is_cancelled() {
                         info!("shutdown during backoff; saving and stopping");
                         starred_queue::save(&mut queue, queue_path)?;
-                        return Ok(());
+                        return Err(CoreError::Interrupted);
                     }
                 }
             }
@@ -231,9 +251,23 @@ pub async fn backup_starred_repos(
                 eta_secs = eta,
                 "starred repo cloned"
             );
+        } else if gone {
+            queue.items[idx].state = CloneState::Done;
+            queue.items[idx].finished_at = Some(now);
+            queue.items[idx].last_error = last_err.clone();
+            warn!(
+                repo = %full_name,
+                "starred repository is no longer available upstream; keeping the copy from an earlier run"
+            );
         } else {
             queue.items[idx].state = CloneState::Failed;
             queue.items[idx].finished_at = Some(now);
+            outcome.failed.push((
+                full_name.clone(),
+                last_err
+                    .clone()
+                    .unwrap_or_else(|| "clone failed".to_string()),
+            ));
             warn!(
                 repo = %full_name,
                 retries = queue.items[idx].retries,
@@ -258,13 +292,13 @@ pub async fn backup_starred_repos(
         "starred repos clone run complete"
     );
 
-    Ok(())
+    Ok(outcome)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Dispatches to the appropriate [`GitRunner`] method based on `opts.clone_type`.
-fn do_clone(
+async fn do_clone(
     git: &impl GitRunner,
     url: &str,
     dest: &Path,
@@ -272,13 +306,13 @@ fn do_clone(
     clone_opts: &CloneOptions,
 ) -> Result<(), CoreError> {
     if opts.lfs {
-        return git.lfs_clone(url, dest, clone_opts);
+        return git.lfs_clone(url, dest, clone_opts).await;
     }
     match &opts.clone_type {
-        CloneType::Mirror => git.mirror_clone(url, dest, clone_opts),
-        CloneType::Bare => git.bare_clone(url, dest, clone_opts),
-        CloneType::Full => git.full_clone(url, dest, clone_opts),
-        CloneType::Shallow(depth) => git.shallow_clone(url, dest, clone_opts, *depth),
+        CloneType::Mirror => git.mirror_clone(url, dest, clone_opts).await,
+        CloneType::Bare => git.bare_clone(url, dest, clone_opts).await,
+        CloneType::Full => git.full_clone(url, dest, clone_opts).await,
+        CloneType::Shallow(depth) => git.shallow_clone(url, dest, clone_opts, *depth).await,
     }
 }
 

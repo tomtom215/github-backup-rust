@@ -19,8 +19,9 @@ pub struct Branch {
     pub name: String,
     /// Whether the branch has branch-protection rules enabled.
     ///
-    /// Detailed protection rules require an admin token and are not fetched
-    /// here; this flag indicates that *some* protection is in place.
+    /// This flag only says that *some* protection is in place.  The detailed
+    /// rules need admin access and are fetched separately, per protected
+    /// branch, into `branch_protections.json` (see [`crate::BranchProtection`]).
     pub protected: bool,
     /// The commit that the branch tip points to.
     pub commit: BranchCommit,

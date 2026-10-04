@@ -1,224 +1,225 @@
 # Architecture
 
+`github-backup` is a Rust workspace of seven crates.  This page describes how
+they fit together.  (It is also the book page *Development / Architecture*.)
+
 ## Workspace Layout
 
 ```
 github-backup-rust/
 ├── crates/
-│   ├── github-backup-types/    # GitHub API types + backup configuration
-│   ├── github-backup-client/   # Async HTTP client (GitHub API + OAuth)
-│   ├── github-backup-core/     # Backup engine: orchestration, storage, git
-│   ├── github-backup-mirror/   # Push-mirror to Gitea / GitLab
-│   ├── github-backup-s3/       # S3-compatible storage backend
-│   ├── github-backup-tui/      # Ratatui TUI front-end (--tui flag)
-│   └── github-backup/          # CLI binary (main entry point)
-├── Dockerfile
-├── docker-compose.yml
-└── deny.toml                   # cargo-deny: license + ban policy
+│   ├── github-backup-types/    # GitHub API models, Raw<T>/Page<T>, configuration types
+│   ├── github-backup-client/   # Async HTTP client (GitHub API, OAuth, proxy support)
+│   ├── github-backup-core/     # Backup engine: orchestration, storage, git, locks
+│   ├── github-backup-mirror/   # Push mirrors to Gitea / Forgejo / Codeberg / GitLab
+│   ├── github-backup-s3/       # S3-compatible client, sync, AES-256-GCM encryption
+│   ├── github-backup-tui/      # Ratatui front-end (--tui)
+│   └── github-backup/          # CLI binary (clap), run modes, reporting
+├── docker/entrypoint.sh        # container entrypoint wrapper
+├── Dockerfile, docker-compose.yml
+├── unraid/                     # Unraid Community Applications template
+├── docs/                       # mdBook sources
+└── deny.toml                   # cargo-deny: licences, bans, advisories, sources
 ```
 
 ## Crate Responsibilities
 
 ### `github-backup-types`
 
-Pure data: GitHub API response structs, backup configuration types.  No I/O.
-All types implement `Serialize + Deserialize` (serde).
+Pure data, no I/O.
 
-Key types:
-- `BackupOptions` — what to back up (all selection flags + `CloneType`)
-- `CloneType` — mirror / bare / full / shallow
-- `OutputConfig` — derives backup directory paths from a root
-- GitHub response types: `Repository`, `Issue`, `PullRequest`, …
+- GitHub models (`Repository`, `Issue`, `PullRequest`, ...).  Fields GitHub can
+  send as `null` are `Option`s.
+- `Raw<T>` pairs a typed view with the **original JSON object**, and `Page<T>`
+  is a list of them.  The engine writes the original objects (all properties, in
+  GitHub's key order; `serde_json` is built with `preserve_order`), so the
+  backup is lossless; the typed view is only used to make decisions.  An element
+  the typed model cannot read is still written verbatim and reported in the log.
+- Configuration: `BackupOptions`, `CloneType`, `ConfigFile` (the TOML schema, with
+  `deny_unknown_fields`), `OutputConfig` (all output paths), the persisted
+  `BackupState`, `BackupCheckpoint`, `BackupRunHistory` and the starred queue.
+- `glob_match()` for `--include-repos` / `--exclude-repos`.
 
 ### `github-backup-client`
 
-Async HTTP client for the GitHub REST API v3.
+Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
 
-- `GitHubClient` — hyper + rustls, automatic pagination, rate-limit back-off,
-  5xx retry
-- `BackupClient` trait — object-safe interface enabling mock substitution in tests
-- `oauth` module — GitHub OAuth Device Flow for browser-based auth
-- `endpoints/write.rs` — mutating endpoints used by `--restore`:
-  `create_label`, `create_milestone`, `create_issue`
+- `GitHubClient` (standard GitHub and, with `with_api_url`, GHES) behind the
+  object-safe `BackupClient` trait, which tests replace with `MockClient`.
+- **Pagination** with `Link` headers; wrapped responses (`{"workflows": [...]}`)
+  are merged into plain lists.
+- **Retry policy** (`execute_with_retry`): rate limits (429, or 403 with
+  `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message) are waited
+  out and retried (up to 6 times, about an hour in total per request); GET
+  requests retry 5xx and transport failures 3 times with jittered back-off;
+  other statuses fail at once.  Every response body is capped at 16 MiB and
+  every request has a 120 s timeout.
+- **Own-account listings**: `GET /user` is asked once; when the login equals the
+  owner the client lists `/user/repos?affiliation=owner&visibility=all` and
+  `/gists`, which include private repositories and secret gists.
+- **Release assets** are streamed to disk through an `AssetSink`; the
+  `Authorization` header is dropped on any redirect that leaves the origin.
+- `proxy`: HTTP `CONNECT` proxy support from `HTTPS_PROXY`, `HTTP_PROXY`,
+  `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook and `--doctor`.
+- `oauth`: the device flow.
 
 ### `github-backup-core`
 
-The backup engine and its abstractions.
+The engine and its abstractions.
 
 ```
-BackupEngine<S: Storage, G: GitRunner>
-  ├── GitHubClient           (API calls)
-  ├── S: Storage             (write JSON/bytes to a sink)
-  └── G: GitRunner           (git subprocess: clone, fetch, push)
+BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
+  ├── C  (API calls)
+  ├── S  (write JSON / bytes atomically; production: FsStorage)
+  └── G  (git subprocesses; production: ProcessGitRunner)
 ```
 
-Key traits:
-- `Storage` — write JSON and binary files (production: `FsStorage`)
-- `GitRunner` — git operations (production: `ProcessGitRunner`)
-
-Both traits have test stubs (`MemStorage`, `SpyGitRunner`) enabling full
-coverage without network or filesystem access.
-
-Backup modules (`crates/github-backup-core/src/backup/`), one file per category:
-- `repository.rs` — git clone dispatching on `CloneType`
-- `issue.rs`, `pull_request.rs`, `release.rs` — JSON metadata
-- `gist.rs`, `wiki.rs` — secondary git clones
-- `user_data.rs` — starred, watched, followers, following
-- `labels.rs`, `milestones.rs` — repository metadata
-- `hooks.rs`, `security_advisories.rs` — admin metadata (graceful 403/404)
-- `topics.rs`, `branches.rs` — repository topology; `branches.rs` also saves
-  `branch_protections.json` for protected branches (graceful 403/404 per branch)
-- `deploy_keys.rs`, `collaborators.rs` — access control metadata
-- `actions.rs`, `environments.rs` — GitHub Actions and deployments
-- `discussion.rs`, `project.rs`, `package.rs` — Discussions, Classic Projects, Packages
-- `starred_repos.rs` — durable-queue starred-repo cloning
+- **Failure model** (`engine/steps.rs`): every unit of work is a *step*.  A failing
+  step is recorded in `BackupStats` (scope, step, message) and the run carries on,
+  so one bad repository or category never costs the rest.  `run` returns `Err`
+  only for things that make continuing pointless (`CoreError::is_fatal`:
+  rejected credentials, exhausted rate-limit budget, full disk, cancellation) or
+  when the repository list cannot be fetched.  Callers read
+  `BackupStats::failures()` and decide the exit status.
+- **Run order**: owner-level data, packages, starred clones, gists, then the
+  repository list (written to `repos.json`), then repositories concurrently
+  (bounded by `--concurrency`); per repository the steps are repository clone,
+  wiki, issues, pull requests, releases, labels, milestones, hooks, security
+  advisories, topics, branches, deploy keys, collaborators, actions,
+  environments (plus the inert discussions and projects steps).
+- **Incremental state** (`engine/incremental.rs`): a watermark per repository in
+  `backup_state.json`, advanced only for repositories whose every step
+  succeeded, trusted only for the categories it was recorded with, set 15
+  minutes before the run started.  Lists are always fetched in full and merged
+  (`backup/merge.rs`); the watermark only decides which per-item requests
+  (comments, events, commits, reviews) can be skipped.  `--full` ignores it; an
+  explicit `--since` replaces it and is never stored.
+- **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
+  current run; a later run resumes from it only if it is less than 6 hours old.
+- **Locking** (`lock.rs`): an operating-system exclusive lock (`fslock`: `flock` /
+  `LockFileEx`) on `<owner>/json/.backup.lock`; the CLI takes another on
+  `<output>/.github-backup.lock`.  The kernel releases them when the process dies,
+  so there are no stale locks and no PID heuristics.
+- **Storage** (`storage.rs`): every JSON file is written to a temporary name and
+  renamed; release assets are streamed to `.<file>.part` and renamed after the
+  size and digest checks.
+- **Git** (`git/`): clones are made into a hidden staging directory and renamed
+  into place; updates use `fetch` (mirror: `--all --prune`; bare: explicit
+  refspecs; shallow: `--depth`; `--lfs`: mirror update plus `git lfs fetch --all`).
+  Each `git` runs in its own process group with a **stall** timeout (600 s without
+  output), is killed with its helpers on cancellation, and receives the token only
+  through an environment variable and a host-scoped credential helper (`credential.rs`).
+  `-c safe.directory=<path>` trusts exactly the repository being worked on.
+- **Cancellation** (`cancel.rs`): a flag that kills running git processes and makes
+  in-flight steps give way; the CLI sets it on `SIGINT` / `SIGTERM`.
 
 ### `github-backup-mirror`
 
-Post-processing: push cloned repositories to a secondary Git host.
+Post-processing: push the cloned repositories to another host.
 
-- `GiteaClient` — Gitea REST API v1 (repo existence check, creation)
-- `runner::push_mirrors` — walks local `*.git` dirs, ensures repos exist,
-  runs `git push --mirror`
-- Compatible with Codeberg, Gitea, Forgejo, and any Gitea API v1 host
+- `GiteaClient` (REST v1) and `GitLabClient` (REST v4): check the destination,
+  create it (private unless the source is known to be public), and verify that it
+  is ours (description marker `GitHub mirror of <owner>/<repo>`) or empty.
+- `push.rs`: `git push --prune` of `refs/heads/*` and `refs/tags/*` only (never
+  `--mirror`), with the token in an environment variable and a credential helper
+  scoped to the destination origin.
+- `runner` / `gitlab_runner`: walk `git/repos/*.git` and report per-repository
+  failures.
 
 ### `github-backup-s3`
 
-Post-processing: upload backup artefacts to S3-compatible object stores.
+Post-processing: upload the JSON metadata to an S3-compatible store.
 
-- `signing::Signer` — AWS Signature Version 4 (pure Rust, no AWS SDK)
-- `S3Client` — PutObject / HeadObject / multipart upload using hyper + rustls
-- `sync::sync_to_s3` — concurrent incremental directory sync (up to 8 parallel
-  uploads via Tokio JoinSet + Semaphore; skips already-uploaded objects)
-- `encrypt` — AES-256-GCM at-rest encryption; wire format `[12-byte nonce |
-  ciphertext | 16-byte GCM tag]`; exposed as public `encrypt` / `decrypt` fns
-- Supports AWS S3, Backblaze B2, MinIO, Cloudflare R2, DigitalOcean Spaces
+- `signing`: AWS Signature V4 built from `sha2` + `hmac` (no AWS SDK).
+- `S3Client`: PUT / HEAD / LIST / DELETE and multipart upload over hyper + rustls
+  with retries and an idle timeout.  It connects directly (no proxy support).
+- `sync_to_s3`: concurrent sync of `<output>/<owner>/json/`; an object is skipped
+  only when its stored SHA-256 digest (keyed HMAC for encrypted uploads) and size
+  match; guarded `--s3-delete-stale`.
+- `encrypt`: AES-256-GCM, wire format `[12-byte nonce | ciphertext | 16-byte tag]`.
 
 ### `github-backup-tui`
 
-Full-screen terminal user interface built with [Ratatui](https://ratatui.rs) 0.30.
+The Ratatui terminal interface (`--tui`).  It drives the same `BackupEngine`
+through an event channel and does not embed its own backup logic.  See the
+[Interactive TUI guide](https://tomtom215.github.io/github-backup-rust/tui.html).
 
-- `run_tui(InitialConfig) -> ExitCode` — public entry point; owns the terminal
-- Five screens: Dashboard, Configure, Running, Results, Verify
-- `App` state machine: `Screen` enum drives per-screen rendering and key dispatch
-- `ConfigState` — mirrors all 50+ `BackupOptions` fields; converts to `BackupOptions`
-  via `to_backup_config()`; validates on launch
-- `TuiTracingLayer` — intercepts all `tracing` events and routes them to the log
-  panel as structured `BackupEvent::LogLine` messages, replacing the default stderr
-  logger while the TUI is active
-- `event_loop` races terminal input against the `ProgressRx` channel at 60 Hz (16 ms
-  tick) using `tokio::select!` over a backup cancellation oneshot
-- `run_backup_task` + `run_verify_task` — spawned as Tokio tasks; completion reported
-  via `ProgressTx = UnboundedSender<BackupEvent>`
-
-### `github-backup` (CLI binary)
-
-Orchestrates all crates.  Key source files:
+### `github-backup` (binary)
 
 | File | Responsibility |
 |------|----------------|
-| `main.rs` | Entry point; arg parsing, credential resolution, backup orchestration |
-| `cli/args.rs` | 50+ clap flags including `--restore`, `--decrypt`, `--restore-yes` |
-| `post_process.rs` | Mirror push, S3 sync, retention, diff, Prometheus metrics; typed `PostProcessError` |
-| `restore.rs` | `--restore` mode: re-creates labels, milestones, and issues via GitHub API; supports `--dry-run` and `--restore-yes` confirmation gate |
-| `report.rs` | JSON summary report generation |
+| `main.rs` | argument parsing, config merge, mode dispatch, credential resolution |
+| `cli/` | the clap `Args`, the config-file merge rules, the `--clone-type` parser |
+| `run.rs` | the backup run: engine, post-processing, reports, exit status (0/1/3, 130/143) |
+| `post_process.rs` | mirror push, S3 sync, diff |
+| `restore.rs` | `--restore` |
+| `report.rs`, `metrics.rs`, `notify.rs` | JSON report, Prometheus textfile, webhook |
+| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt` |
+| `shutdown.rs` | signal handling and the exit watchdog |
+| `ui.rs`, `errors.rs`, `setup.rs`, `lock.rs` | banners, error hints and redaction, tracing setup, the output-directory lock |
 
-Operational flow:
+Flow of a normal run:
 
-1. Parse CLI args (`clap`); merge TOML config file
-2. If `--tui`: hand off to `github_backup_tui::run_tui()` and return
-3. If `--verify`: manifest integrity check and return
-4. If `--decrypt`: AES-256-GCM file decryption and return
-5. Obtain credential (PAT or OAuth device flow)
-6. Run `BackupEngine` (primary backup)
-7. Optional post-processing: manifest, Prometheus metrics, diff, restore, mirror push, S3 sync, retention
+1. Parse the arguments and the optional config file (command line wins for
+   single values; switches are OR-ed, lists unioned).
+2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify` and
+   `--restore` are handled and return before a backup.
+3. Take the output lock, build the client, run `BackupEngine::run`, racing it
+   against `SIGINT` / `SIGTERM`.
+4. Post-processing, each step's failure being **recorded**, not fatal: manifest,
+   diff, mirror push, S3 sync.
+5. Write history, report and metrics, send the webhook, exit with `0` or `3`.
+
+A `--dry-run` stops after step 3's listing: it takes no lock and writes nothing.
 
 ## Data Flow
 
 ```
-GitHub API
-    │
-    ▼
-GitHubClient ──► BackupEngine
-                    │
-                    ├── GitRunner (git clone/fetch)
-                    │       └── GIT_ASKPASS RAII script
-                    │
-                    └── Storage (write JSON/bytes)
-                            └── FsStorage (real filesystem)
+GitHub API ──► GitHubClient ──► BackupEngine ──► Storage (FsStorage)  ──► <output>/<owner>/json
                                     │
-                                    ▼
-                              Local backup
-                             /            \
-                            ▼              ▼
-                     GiteaClient      S3Client
-                    (push mirror)    (S3 sync)
+                                    └──► GitRunner (git) ──────────────► <output>/<owner>/git
+                                                                              │
+                                  local backup ─────┬──► mirror push (git push to Gitea/GitLab)
+                                                    └──► S3 sync (json/ only)
 ```
 
 ## Concurrency Model
 
-Repositories are backed up concurrently using a Tokio semaphore:
-
-```rust
-let sem = Arc::new(Semaphore::new(opts.concurrency)); // default: 4
-
-for repo in repos {
-    let permit = sem.clone().acquire_owned().await?;
-    tokio::spawn(async move {
-        let _permit = permit; // released on drop
-        backup_one_repo(…).await
-    });
-}
-```
-
-`BackupStats` uses `Arc<AtomicU64>` for lock-free counter increments across
-concurrent tasks.
+Repositories are processed as concurrent tasks bounded by a semaphore
+(`--concurrency`, default 4); owner-level data, gists and starred clones run first
+and sequentially.  The API client, storage and git runner are `Send + Sync`.
+`BackupStats` uses atomic counters and a mutex-protected failure list.
 
 ## Credential Security
 
-HTTPS credentials are never embedded in URLs or passed on the command line.
-Instead, a temporary shell script is written to `$TMPDIR` with mode `0700`:
-
-```sh
-#!/bin/sh
-echo 'ghp_xxxxxxxxx'
-```
-
-`GIT_ASKPASS` is set to this script; git calls it to retrieve the password.
-The script is deleted by a RAII guard (`AskpassScript::drop`) immediately after
-the git subprocess exits, even on panic.
+See the [Security page](https://tomtom215.github.io/github-backup-rust/development/security.html).  In short: the token
+reaches `git` only through an environment variable and a credential helper scoped
+to the clone URL's origin; it is never in an argument list, a URL or a file, and
+log and error text is redacted.
 
 ## Dependency Policy
 
-Governed by `deny.toml`:
+`deny.toml` (enforced by `cargo-deny` in CI, in the release workflow and in a
+daily workflow) bans `openssl`, `openssl-sys`, `native-tls` and `reqwest`, allows
+only MIT, Apache-2.0 (also with the LLVM exception), ISC, BSD-3-Clause,
+Unicode-3.0, CC0-1.0 and Zlib, checks RustSec advisories and permits crates.io as
+the only source.  TLS is `rustls` with the operating system's certificate store.
 
-- **Banned**: `openssl`, `openssl-sys`, `reqwest`, `native-tls`
-- **Allowed licenses**: MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0,
-  Zlib
+## Unsafe Code
 
-TLS is handled exclusively by `rustls` with the platform CA bundle via
-`rustls-native-certs`.  Cryptography for S3 SigV4 uses `sha2` + `hmac` from
-the RustCrypto project (no OpenSSL).
-
-## Unsafe Code Policy
-
-The workspace denies `unsafe_op_in_unsafe_fn`.  The only `unsafe` block in
-the codebase is a single FFI call to POSIX `kill(pid, 0)` in
-`crates/github-backup-core/src/lock.rs`, used to detect a stale lock file
-left behind by a crashed previous run.  Linux uses `/proc/<pid>` and avoids
-the FFI entirely.
+The workspace's own source contains no `unsafe`.  `github-backup-core` has
+`#![forbid(unsafe_code)]`; the client, mirror, s3 and types crates have
+`#![deny(unsafe_op_in_unsafe_fn)]`.
 
 ## Testing Strategy
 
 | Layer | Technique |
 |-------|-----------|
-| Unit | `MockBackupClient` + `MemStorage` + `SpyGitRunner` stubs |
-| TUI unit | 74 tests in `github-backup-tui::tests` — state machine logic without a real terminal |
-| Integration | `tempfile` + real filesystem (storage tests, restore dry-run filesystem test) |
-| Property | `proptest` for type round-trip invariants; AES-256-GCM encrypt/decrypt roundtrip + tamper detection |
-| Mutation | `cargo mutants` (runs on `main` branch; report uploaded as CI artefact) |
-| CI | `cargo test --workspace` on ubuntu-latest + macos-latest |
-| Linting | `cargo clippy -D warnings` |
-| Formatting | `cargo fmt --check` |
-| Security | `cargo audit` + `cargo deny` |
-| MSRV | `cargo build` with Rust 1.88 |
+| Types | golden tests against GitHub's own example payloads, `proptest` round trips |
+| Client | local fake HTTP servers: retry, rate limit, redirect, proxy and pagination tests |
+| Core | `MockClient`, `MemStorage` and `SpyGitRunner` stubs; real `git` against local repositories for the git runner |
+| S3 | an in-process fake S3 server that verifies SigV4 independently; AES-GCM round trips and tamper tests |
+| Mirror | real `git push` against local bare repositories with a refusing hook |
+| CLI | argument-parsing and config-merge tests; a binary-level test of the environment handling |
+| CI | `cargo fmt --check`, `clippy -D warnings`, tests on Linux and macOS, an MSRV (1.88) build, rustdoc, the mdBook build with link checking, `cargo audit` and `cargo deny`, and a Docker build with a smoke test |
+| Mutation | `cargo mutants`, started manually (`workflow_dispatch`); not run on every push |

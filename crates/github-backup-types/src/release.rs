@@ -51,6 +51,10 @@ pub struct ReleaseAsset {
     pub state: String,
     /// File size in bytes.
     pub size: u64,
+    /// GitHub's own digest of the file, `"sha256:<hex>"`; `None` for assets
+    /// uploaded before GitHub computed digests (the property is `null` there).
+    #[serde(default)]
+    pub digest: Option<String>,
     /// Download count.
     pub download_count: u64,
     /// API URL to download the asset (requires `Accept: application/octet-stream`).
@@ -89,6 +93,7 @@ mod tests {
                 "content_type": "application/gzip",
                 "state": "uploaded",
                 "size": 4096,
+                "digest": "sha256:0b1d4f5e6a0b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5",
                 "download_count": 10,
                 "url": "https://api.github.com/repos/octocat/Hello-World/releases/assets/2",
                 "browser_download_url": "https://github.com/octocat/Hello-World/releases/download/v1.0.0/app-linux.tar.gz",
@@ -107,5 +112,33 @@ mod tests {
         assert!(!release.draft);
         assert_eq!(release.assets.len(), 1);
         assert_eq!(release.assets[0].name, "app-linux.tar.gz");
+        assert_eq!(
+            release.assets[0].digest.as_deref(),
+            Some("sha256:0b1d4f5e6a0b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5")
+        );
+    }
+
+    #[test]
+    fn release_asset_digest_may_be_null_or_absent() {
+        let base = serde_json::json!({
+            "id": 2,
+            "name": "a.bin",
+            "content_type": "application/octet-stream",
+            "state": "uploaded",
+            "size": 1,
+            "download_count": 0,
+            "url": "https://api.github.com/repos/o/r/releases/assets/2",
+            "browser_download_url": "https://github.com/o/r/releases/download/v1/a.bin",
+            "created_at": "2013-02-27T19:35:32Z",
+            "updated_at": "2013-02-27T19:35:32Z"
+        });
+        let mut with_null = base.clone();
+        with_null["digest"] = serde_json::Value::Null;
+
+        let absent: ReleaseAsset = serde_json::from_value(base).expect("absent digest");
+        let null: ReleaseAsset = serde_json::from_value(with_null).expect("null digest");
+
+        assert!(absent.digest.is_none());
+        assert!(null.digest.is_none());
     }
 }

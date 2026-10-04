@@ -93,6 +93,49 @@ impl RateLimitInfo {
     }
 }
 
+/// How long GitHub asked us to wait after a rate-limit response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RateLimitWait {
+    /// Seconds given by `Retry-After` or derived from `X-RateLimit-Reset`.
+    Explicit(u64),
+    /// A rate limit with no timing hint (secondary limits often have none).
+    Unspecified,
+}
+
+/// Decides whether a response is a rate-limit response, and how long it asks
+/// to wait.
+///
+/// GitHub signals rate limits with 429 *or* 403: a primary limit with
+/// `X-RateLimit-Remaining: 0`, a secondary limit with `Retry-After` or only a
+/// message ("You have exceeded a secondary rate limit").  Treating those 403s
+/// as a plain "forbidden" would make the backup skip a category as "no admin
+/// access" and silently drop data, so they are recognised here; a 403 that is
+/// none of these is a real permission error and returns `None`.
+pub(crate) fn classify(
+    status: u16,
+    headers: &HeaderMap,
+    body: &[u8],
+    now_secs: u64,
+) -> Option<RateLimitWait> {
+    if status != 429 && status != 403 {
+        return None;
+    }
+    let info = RateLimitInfo::from_headers(headers);
+    let exhausted = info.is_some_and(|i| i.is_exhausted());
+    let explicit = RateLimitInfo::retry_after(headers).or_else(|| {
+        info.filter(RateLimitInfo::is_exhausted)
+            .map(|i| i.seconds_until_reset(now_secs))
+    });
+    if let Some(secs) = explicit {
+        return Some(RateLimitWait::Explicit(secs));
+    }
+    let message = String::from_utf8_lossy(body).to_ascii_lowercase();
+    if status == 429 || exhausted || message.contains("rate limit") || message.contains("abuse") {
+        return Some(RateLimitWait::Unspecified);
+    }
+    None
+}
+
 fn parse_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     let value = headers.get(name)?.to_str().ok()?;
     value.trim().parse().ok()
@@ -289,5 +332,47 @@ mod tests {
         };
         // 1 + RESET_BUFFER_SECS
         assert_eq!(info.seconds_until_reset(1000), 1 + RESET_BUFFER_SECS);
+    }
+
+    #[test]
+    fn classify_tells_rate_limits_from_permission_errors() {
+        let none = make_headers(&[]);
+        let exhausted = make_headers(&[
+            ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1030"),
+        ]);
+        let left = make_headers(&[
+            ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-remaining", "10"),
+            ("x-ratelimit-reset", "1030"),
+        ]);
+        let retry = make_headers(&[("retry-after", "7")]);
+        let secondary = br#"{"message":"You have exceeded a secondary rate limit"}"#;
+
+        assert_eq!(
+            classify(429, &none, b"", 1000),
+            Some(RateLimitWait::Unspecified)
+        );
+        assert_eq!(
+            classify(403, &retry, b"", 1000),
+            Some(RateLimitWait::Explicit(7))
+        );
+        assert_eq!(
+            classify(403, &exhausted, b"", 1000),
+            Some(RateLimitWait::Explicit(32))
+        );
+        assert_eq!(
+            classify(403, &none, secondary, 0),
+            Some(RateLimitWait::Unspecified)
+        );
+        // Real permission errors, with and without rate-limit headers.
+        assert_eq!(classify(403, &none, br#"{"message":"Forbidden"}"#, 0), None);
+        assert_eq!(
+            classify(403, &left, br#"{"message":"Not accessible"}"#, 0),
+            None
+        );
+        assert_eq!(classify(404, &exhausted, b"", 0), None);
+        assert_eq!(classify(500, &retry, b"", 0), None);
     }
 }

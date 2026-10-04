@@ -41,10 +41,8 @@ def make_pixels() -> bytes:
 
 
 def _monogram_mask(w: int, h: int) -> bytearray:
-    """Build a binary mask of a "GB" monogram inside a soft-rounded square."""
+    """Build a binary mask of a "GB" monogram: two glyphs side by side."""
     mask = bytearray(w * h)
-    # The two letters live inside a 224×224 box, centred.
-    pad = (w - 224) // 2
     # Block-pixel font: each row of the bitmap is a 14×14-cell glyph.
     # Letter 'G':
     g = [
@@ -80,15 +78,16 @@ def _monogram_mask(w: int, h: int) -> bytearray:
         "11111111111...",
         "1111111111....",
     ]
-    # Render each cell of the glyph as a 14×14 pixel block.
-    cell = 14
+    # Render each cell of the glyph as an 8×8 pixel block (112 px per glyph).
+    cell = 8
+    gap = 16  # clear space between the letters
     rows = len(g)
     cols = len(g[0])
     glyph_w = cols * cell
-    # Position the two letters: G on the left, B on the right.
-    g_x0 = pad
+    # Position the two letters side by side, centred as a pair.
+    g_x0 = (w - (2 * glyph_w + gap)) // 2
     g_y0 = (h - rows * cell) // 2
-    b_x0 = w - pad - glyph_w
+    b_x0 = g_x0 + glyph_w + gap
     b_y0 = g_y0
     for cy in range(rows):
         for cx in range(cols):

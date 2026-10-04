@@ -4,59 +4,77 @@
 
 ### Does it support GitHub Enterprise?
 
-Yes.  Use `--api-url` (or `GITHUB_API_URL`) to point `github-backup` at your
-GitHub Enterprise Server instance.  The API is typically at
-`https://github.example.com/api/v3`:
-
-```bash
-github-backup myorg \
-  --token "$GITHUB_TOKEN" \
-  --api-url https://github.example.com/api/v3 \
-  --output /backup --org --all
-```
-
-Or in the config file:
-
-```toml
-owner   = "myorg"
-api_url = "https://github.example.com/api/v3"
-output  = "/var/backup/github"
-org     = true
-all     = true
-```
+Yes, GitHub Enterprise Server through `--api-url` (or `GITHUB_API_URL`) and,
+when the clone host differs, `--clone-host`.  GHES behaviour has not been
+verified against a real instance; see
+[GitHub Enterprise Server](configuration/github-enterprise.md).  Enterprise
+Cloud uses `https://api.github.com` and needs nothing special.
 
 ### Can I back up a GitHub organisation?
 
-Yes.  Pass `--org` to use the organisation repository listing API:
+Yes.  Pass `--org`:
 
 ```bash
-github-backup my-org --token $GITHUB_TOKEN --output /backup --org --all
+github-backup my-org --output /backup --org --all
 ```
 
-### Will it overwrite existing backups?
+### What is *not* backed up?
 
-- **Git repositories** are updated in-place (`git remote update --prune`), not re-cloned from scratch.  This is fast and incremental.
-- **JSON files** are overwritten on each run with the latest data from the API.
-- **Release assets** are skipped if the file already exists.
+See [What Is Not Restored, or Not Backed Up](restore.md#what-is-not-restored-or-not-backed-up).
+In short: Discussions and Projects (GitHub's REST API has no endpoints for them),
+Actions secrets and variables, code-scanning and Dependabot alerts, issue
+attachments, LFS objects unless `--lfs`, and the contents of starred gists.
 
-### Is it safe to run while a backup is in progress?
+### Does a second run overwrite the first?
 
-Do not run two instances for the same owner simultaneously.  Running two instances concurrently risks corruption of git repositories (concurrent writes to the same `.git/` directory).
+It updates it, and does not lose what the first run captured:
 
-### Can I back up multiple users/orgs into the same output directory?
+- **Git clones** are updated in place with `git fetch`.  A branch or tag
+  deleted on GitHub stays in the clone (unless `--prune`), while a force-pushed
+  branch is overwritten.
+- **`issues.json` and `pulls.json`** are fetched in full and **merged** into the
+  stored file; an item that disappears from GitHub stays in the backup.
+- **Other JSON lists** are rewritten with the current response.
+- **Per-item files** (comments, events, commits, reviews) are re-fetched only for
+  items that changed since the repository's watermark.
+- **Release assets** are kept when complete (size and checksum match).
 
-Yes.  Each owner gets its own subdirectory: `<output>/<owner>/`.
+See [Incremental runs](monitoring.md#incremental-runs-and-the-state-file).
 
-### How do I restore from a mirror clone?
+### Is it safe to run two instances at once?
+
+Not for the same owner, and the tool stops you: an operating-system lock in the
+output directory makes the second run exit with status `1` ("another backup ...
+is already running").  The lock is released automatically when a process ends,
+however it ends.  Different owners (or different `--output` directories) can run
+at the same time.
+
+### Can I back up several users or organisations into the same directory?
+
+Yes.  Each owner gets its own `<output>/<owner>/` directory, and S3 keys include
+the owner as well.
+
+### How do I restore a repository from the backup?
 
 ```bash
 # Clone from the local mirror
 git clone /backup/octocat/git/repos/Hello-World.git ~/restored/Hello-World
 
-# Or push to a new remote
-git -C /backup/octocat/git/repos/Hello-World.git \
-    push --mirror https://github.com/new-owner/Hello-World.git
+# Push to a new, empty GitHub repository: branches and tags, not --mirror
+git -C /backup/octocat/git/repos/Hello-World.git push \
+    https://github.com/new-owner/Hello-World.git \
+    '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
 ```
+
+`git push --mirror` fails against GitHub because a mirror contains
+`refs/pull/*`.  The [Restore Guide](restore.md) has the details.
+
+### What does the exit status mean?
+
+`0` complete, `3` finished but incomplete (something failed; the summary says
+what), `1` could not run, `2` usage error, `130`/`143` interrupted.  Failures
+never stop the other repositories.  See
+[Exit Codes](configuration/cli-reference.md#exit-codes).
 
 ---
 
@@ -64,21 +82,24 @@ git -C /backup/octocat/git/repos/Hello-World.git \
 
 ### What token scopes do I need?
 
-| To back up | Required scope |
-|-----------|---------------|
-| Public repos | None (no token needed for public repos only) |
-| Private repos | `repo` |
-| Gists | `gist` |
-| Org repos | `read:org` |
-| Webhooks | `admin:repo_hook` |
+It depends on the categories; see
+[What each category needs](getting-started/authentication.md#what-each-category-needs).
+For a complete backup of your own account a classic token with `repo`, `gist`,
+`read:org` and `read:packages` is enough.  Public data needs no token.
 
-### My PAT expired.  What happens?
+### My token expired.  What happens?
 
-`github-backup` will fail with an authentication error on the first API call.  Rotate the token in GitHub settings and update your `GITHUB_TOKEN` environment variable or config file.
+GitHub answers 401; the run stops at once (exit status `1`), reports the reason
+and a hint, and writes the report, metrics and a `failure` webhook so monitoring
+sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file).
+`github-backup --doctor` tells you whether the token is accepted.
 
 ### Can I use a GitHub App token?
 
-GitHub App installation tokens work as long as they have the required permissions.  Pass the token via `--token` or `GITHUB_TOKEN`.
+An installation token is accepted as a bearer token, but it cannot call
+`GET /user`, so for a user target the tool cannot tell that the token belongs to
+the account and lists **public** repositories and gists only (it logs a
+warning).  Organisation targets work as far as the app's permissions reach.
 
 ---
 
@@ -86,24 +107,31 @@ GitHub App installation tokens work as long as they have the required permission
 
 ### How long does a full backup take?
 
-It depends on the number of repositories, repository sizes, the volume of
-issues and pull requests, the concurrency setting, network bandwidth, and
-GitHub's API rate limits. The dominant cost is usually `git clone` for new
-repositories. Once a repository has been cloned once, subsequent runs only
-fetch incremental updates, which is significantly faster.
+It depends on the number and size of the repositories, issue and pull-request
+volume, `--concurrency`, bandwidth and GitHub's rate limits.  The first
+`git clone` of each repository usually dominates; later runs only fetch changes.
+A repository with many issues and pull requests costs one list request per 100
+items on every run, plus the per-item requests for the items that changed.
 
-### How do I speed up the backup?
+### How do I speed it up?
 
-1. Increase `--concurrency` (e.g. `--concurrency 16`)
-2. Disable categories you don't need (avoid `--all` if you only want repos)
-3. Use `--clone-type shallow:10` to limit history depth
+1. Raise `--concurrency` (for example 8), as far as the rate limit allows.
+2. Enable only the categories you need instead of `--all`.
+3. Use `--clone-type shallow:10` to limit history (at the cost of a complete
+   backup).
+4. Leave the incremental state alone: do not use `--full` on every run.
 
 ### I'm hitting rate limits.  What should I do?
 
-`github-backup` automatically backs off when it receives a `403` or `429` with rate-limit headers.  If the backoff window is too long, you can:
-- Use a fine-grained PAT with higher rate limits
-- Use GitHub Enterprise or GitHub Enterprise Managed Users which have higher rate limits
-- Reduce `--concurrency` to slow down API consumption
+The tool waits out rate-limit responses (`429`, and `403` with rate-limit
+headers) and retries, up to about an hour per request; see
+[Rate limit](ops-runbook.md#rate-limit).  A token (classic or fine-grained) has
+5 000 requests per hour; tokens of GitHub Apps and OAuth apps owned or approved
+by an Enterprise Cloud organisation get more.  To reduce the load:
+
+- lower `--concurrency` (this slows the consumption, it does not reduce it),
+- enable fewer categories, or split the work with `--include-repos` over several runs,
+- keep the incremental state so per-item requests are skipped.
 
 ---
 
@@ -111,39 +139,49 @@ fetch incremental updates, which is significantly faster.
 
 ### How much disk space do I need?
 
-Highly variable.  For a rough estimate:
-- Each repository: 1 MB (small) to several GB (large)
-- JSON metadata: 1–50 MB per repository depending on issue/PR volume
-
-Run `du -sh /backup/<owner>` after a trial backup to estimate.
+It varies a lot.  Roughly: 1 MB to several GB per repository, and several
+MB per 1 000 issues (the JSON holds GitHub's complete responses).  A mirror
+keeps `refs/pull/*` too.  Measure with `du -sh /backup/<owner>` after a trial
+run; the tool does not check free space.
 
 ### Can I use a network filesystem (NFS, CIFS)?
 
-Bare git repositories require filesystem support for atomic renames and file locking.  NFS v4 and CIFS work in practice but may be slower.  S3 sync is a better option for remote storage.
+The tool relies on atomic renames and on operating-system file locks
+(`flock` / `LockFileEx`).  A network filesystem that does not provide them can
+make runs fail or locks ineffective; this has not been tested.  A local disk is
+the safe choice; for an off-site copy use `--mirror-to` or a file-level tool on
+top of the local backup.
 
 ### Does S3 sync compress the data?
 
-No. Objects are uploaded as-is. JSON metadata files compress well, so if
-storage cost is a concern, configure server-side compression at the bucket
-or object-store layer (or pair S3 sync with at-rest encryption via
-`--encrypt-key`, which still leaves bucket-level compression available).
+No.  Objects are uploaded as they are.  JSON compresses well, so use the
+provider's compression or lifecycle features if cost matters.  Only the JSON
+metadata is uploaded, never the git clones.
 
 ---
 
 ## Errors
 
-### `clone failed: repository not found`
+### `git clone ... failed (exit 128): ... Repository not found`
 
-The repository exists but the token does not have access to it.  For private repos, ensure the token has the `repo` scope.
+The token cannot see the repository (a private repository needs the `repo`
+scope; an organisation with SAML single sign-on needs the token authorised for
+it) or the repository was deleted.  The run continues with the others and ends
+with exit status `3`.
 
-### `hooks: skipping (no admin access)`
+### `skipping hooks (no admin access)`
 
-Webhook backup requires admin/owner access.  If you don't have admin access to the repository, skip `--hooks`.
+`--hooks` (like `--deploy-keys`, `--collaborators` and the protection rules of
+`--branches`) needs admin access.  Without it GitHub answers 403/404, the tool
+logs an `INFO` line and writes no file for that repository.  This is **not**
+counted as a failure, so check for the files if you rely on them.
 
-### `security advisories: skipping (not available)`
+### `skipping security advisories (not available)`
 
-Security advisories are only available for public repositories and repos where the token has sufficient permissions.
+Advisories exist only where the repository has them enabled and the token may
+read them; the same INFO-and-skip rule applies.
 
-### `cannot write report: permission denied`
+### `failed to write report: ...`
 
-The `--report` path is not writable.  Ensure the directory exists and the process has write permissions.
+The `--report` path is not writable (directory missing, permissions).  The
+backup itself is unaffected and the exit status does not change; fix the path.

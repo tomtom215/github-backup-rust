@@ -8,8 +8,9 @@
 #
 #     github-backup --config /path/to/config.toml
 #
-# All keys are optional unless marked REQUIRED.  Command-line flags
-# override values in this file.
+# All keys are optional unless marked REQUIRED.  A command-line value wins
+# over the same option here; a boolean set to `true` in this file cannot be
+# switched off from the command line (edit the file or use another one).
 
 # ── Identity ──────────────────────────────────────────────────────────────
 
@@ -33,7 +34,7 @@
 
 # ── Output ────────────────────────────────────────────────────────────────
 
-# REQUIRED — root directory for all backup artefacts.
+# Root directory for all backup artefacts (default: the current directory).
 # output = "/var/backup/github"
 
 # Maximum number of repositories to back up concurrently (default: 4).
@@ -80,8 +81,8 @@
 # actions = true
 # action_runs = false      # full run history — can be very large
 # environments = true
-# discussions = true
-# projects = true
+# discussions = false      # not functional: GitHub's REST API has no discussions endpoint
+# projects = false         # not functional: classic projects were retired
 # packages = true
 
 # ── Repository filtering (glob patterns, case-insensitive) ────────────────
@@ -91,8 +92,10 @@
 
 # ── Incremental backup ────────────────────────────────────────────────────
 
-# Only fetch issues / PRs updated at or after this ISO 8601 timestamp.
-# Leave unset to inherit the previous run's timestamp automatically.
+# Treat everything updated before this date as already backed up and skip
+# re-fetching the comments, events, commits and reviews of such issues and pull
+# requests (the lists themselves are always fetched in full).  Leave unset to
+# let each repository use its own watermark from the previous run.
 # since = "2025-01-01T00:00:00Z"
 
 # ── Clone behaviour ───────────────────────────────────────────────────────
@@ -100,14 +103,17 @@
 # clone_type = "mirror"    # one of: mirror, bare, full, "shallow:<depth>"
 # prefer_ssh = false       # use SSH URLs (requires ssh-agent)
 # lfs = false              # clone Git LFS objects too
-# no_prune = false         # keep refs deleted upstream
+# prune = false            # true: delete branches and tags that were deleted on GitHub (default: keep them)
 
 # ── Mirror push (Gitea / Codeberg / Forgejo / GitLab) ─────────────────────
 
 # mirror_to = "https://codeberg.org"
 # mirror_token = "..."     # PREFER MIRROR_TOKEN env var
 # mirror_owner = "your-username"
-# mirror_private = false
+# Mirrors are created private.  Set mirror_public = true to create mirrors of
+# repositories that are public on GitHub as public (private ones stay private).
+# mirror_public = false
+# mirror_private = false   # explicit form of the default
 
 # ── S3-compatible storage ─────────────────────────────────────────────────
 

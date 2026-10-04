@@ -3,15 +3,10 @@
 
 //! Unit tests for [`super::Args`].
 
-use clap::Parser;
 use github_backup_types::config::BackupTarget;
 
-use super::Args;
 use crate::cli::clone_type::CliCloneType;
-
-fn parse(args: &[&str]) -> Args {
-    Args::parse_from(args)
-}
+use crate::cli::test_support::{parse, try_parse, try_parse_with_matches};
 
 #[test]
 fn parse_minimal_with_token() {
@@ -63,7 +58,7 @@ fn into_backup_options_individual_flags() {
 
 #[test]
 fn release_assets_requires_releases() {
-    let result = Args::try_parse_from([
+    let result = try_parse(&[
         "github-backup",
         "octocat",
         "--token",
@@ -104,7 +99,30 @@ fn parse_concurrency_and_dry_run() {
 }
 
 #[test]
-fn parse_no_prune() {
+fn pruning_is_off_by_default_and_opt_in() {
+    let off = parse(&["github-backup", "octocat", "--token", "t", "--repositories"]);
+    let (_, _, opts) = off.into_backup_options();
+    assert!(
+        !opts.prune,
+        "a backup keeps refs deleted upstream by default"
+    );
+
+    let on = parse(&[
+        "github-backup",
+        "octocat",
+        "--token",
+        "t",
+        "--repositories",
+        "--prune",
+    ]);
+    let (_, _, opts) = on.into_backup_options();
+    assert!(opts.prune);
+}
+
+/// `--no-prune` is the default now; it is still accepted so existing
+/// scripts keep working, and it cannot be combined with `--prune`.
+#[test]
+fn deprecated_no_prune_is_accepted_and_conflicts_with_prune() {
     let args = parse(&[
         "github-backup",
         "octocat",
@@ -113,9 +131,17 @@ fn parse_no_prune() {
         "--repositories",
         "--no-prune",
     ]);
-    assert!(args.no_prune);
     let (_, _, opts) = args.into_backup_options();
-    assert!(opts.no_prune);
+    assert!(!opts.prune);
+    assert!(try_parse(&[
+        "github-backup",
+        "octocat",
+        "--token",
+        "t",
+        "--prune",
+        "--no-prune",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -213,7 +239,7 @@ fn parse_output_flag() {
 
 #[test]
 fn merge_config_applies_owner_when_cli_has_none() {
-    let mut args = Args::parse_from(["github-backup", "--token", "t", "--repositories"]);
+    let mut args = parse(&["github-backup", "--token", "t", "--repositories"]);
     assert!(args.owner.is_none());
 
     let cfg = github_backup_types::config::ConfigFile {
@@ -265,19 +291,31 @@ fn merge_config_sets_org_from_config() {
 }
 
 #[test]
-fn merge_config_sets_prefer_ssh_and_no_prune() {
+fn merge_config_sets_prefer_ssh_and_prune() {
     let mut args = parse(&["github-backup", "octocat", "--token", "t"]);
     assert!(!args.prefer_ssh);
-    assert!(!args.no_prune);
+    assert!(!args.prune);
 
     let cfg = github_backup_types::config::ConfigFile {
         prefer_ssh: Some(true),
-        no_prune: Some(true),
+        prune: Some(true),
         ..Default::default()
     };
     args.merge_config(&cfg);
     assert!(args.prefer_ssh);
-    assert!(args.no_prune);
+    assert!(args.prune);
+}
+
+/// A config file written for the old default (`no_prune = true`) still loads,
+/// and an explicit `--no-prune` on the command line beats `prune = true`.
+#[test]
+fn old_no_prune_config_key_still_loads_and_cli_no_prune_wins() {
+    let cfg =
+        github_backup_types::config::ConfigFile::from_toml_str("no_prune = true\nprune = true\n")
+            .expect("both keys parse");
+    let mut args = parse(&["github-backup", "octocat", "--token", "t", "--no-prune"]);
+    args.merge_config(&cfg);
+    assert!(!args.prune, "explicit --no-prune beats the file");
 }
 
 #[test]
@@ -339,4 +377,208 @@ fn merge_config_cli_s3_bucket_wins() {
     // CLI wins for both bucket and region.
     assert_eq!(args.s3_bucket.as_deref(), Some("cli-bucket"));
     assert_eq!(args.s3_region.as_deref(), Some("us-west-2"));
+}
+
+// ── Blank option values (Compose / Kubernetes / Unraid pass "" for unset) ────
+
+#[test]
+fn normalize_env_values_drops_blank_and_whitespace_only_values() {
+    let mut args = parse(&["github-backup", "octocat"]);
+    args.token = Some(String::new());
+    args.oauth_client_id = Some("   ".to_string());
+    args.api_url = Some("\n".to_string());
+    args.clone_host = Some("\t".to_string());
+    args.mirror_token = Some(String::new());
+    args.s3_access_key = Some(String::new());
+    args.s3_secret_key = Some(String::new());
+    args.encrypt_key = Some(String::new());
+    args.notify_webhook = Some(String::new());
+
+    args.normalize_env_values();
+
+    assert_eq!(args.token, None);
+    assert_eq!(args.oauth_client_id, None);
+    assert_eq!(args.api_url, None);
+    assert_eq!(args.clone_host, None);
+    assert_eq!(args.mirror_token, None);
+    assert_eq!(args.s3_access_key, None);
+    assert_eq!(args.s3_secret_key, None);
+    assert_eq!(args.encrypt_key, None);
+    assert_eq!(args.notify_webhook, None);
+}
+
+#[test]
+fn normalize_env_values_trims_surrounding_whitespace_but_keeps_the_value() {
+    let mut args = parse(&["github-backup", "octocat"]);
+    args.token = Some("ghp_abc\n".to_string());
+    args.api_url = Some("  https://ghe.example.com/api/v3 ".to_string());
+
+    args.normalize_env_values();
+
+    assert_eq!(args.token.as_deref(), Some("ghp_abc"));
+    assert_eq!(
+        args.api_url.as_deref(),
+        Some("https://ghe.example.com/api/v3")
+    );
+}
+
+#[test]
+fn normalize_env_values_leaves_unset_and_clean_values_alone() {
+    let mut args = parse(&["github-backup", "octocat", "--token", "ghp_clean"]);
+    args.normalize_env_values();
+    assert_eq!(args.token.as_deref(), Some("ghp_clean"));
+    assert_eq!(args.api_url, None);
+}
+
+// ── Flag dependencies that apply to the command line only ────────────────────
+
+fn dependency_error(argv: &[&str]) -> Option<String> {
+    let (args, matches) = try_parse_with_matches(argv).expect("argv must parse");
+    args.check_dependencies(&matches)
+        .err()
+        .map(|e| e.to_string())
+}
+
+#[test]
+fn typed_s3_credentials_without_bucket_are_rejected() {
+    let err = dependency_error(&["github-backup", "octocat", "--s3-access-key", "k"])
+        .expect("must be rejected");
+    assert!(
+        err.contains("--s3-access-key") && err.contains("--s3-bucket"),
+        "{err}"
+    );
+
+    let err = dependency_error(&["github-backup", "octocat", "--s3-secret-key", "s"])
+        .expect("must be rejected");
+    assert!(
+        err.contains("--s3-secret-key") && err.contains("--s3-bucket"),
+        "{err}"
+    );
+}
+
+#[test]
+fn typed_mirror_token_without_destination_is_rejected() {
+    let err = dependency_error(&["github-backup", "octocat", "--mirror-token", "t"])
+        .expect("must be rejected");
+    assert!(
+        err.contains("--mirror-token") && err.contains("--mirror-to"),
+        "{err}"
+    );
+}
+
+#[test]
+fn typed_oauth_client_id_without_device_auth_is_rejected() {
+    let err = dependency_error(&["github-backup", "octocat", "--oauth-client-id", "Iv1.x"])
+        .expect("must be rejected");
+    assert!(
+        err.contains("--oauth-client-id") && err.contains("--device-auth"),
+        "{err}"
+    );
+}
+
+#[test]
+fn typed_flags_with_their_companion_are_accepted() {
+    assert!(dependency_error(&[
+        "github-backup",
+        "octocat",
+        "--s3-bucket",
+        "b",
+        "--s3-access-key",
+        "k",
+        "--s3-secret-key",
+        "s",
+        "--mirror-to",
+        "https://codeberg.org",
+        "--mirror-token",
+        "t",
+        "--device-auth",
+        "--oauth-client-id",
+        "Iv1.x",
+    ])
+    .is_none());
+}
+
+#[test]
+fn credential_not_typed_on_the_command_line_is_ignored_without_its_feature() {
+    // Simulates a value that arrived from the environment (or a config file):
+    // `matches` records no command-line occurrence, so there is nothing to reject.
+    let (mut args, matches) = try_parse_with_matches(&["github-backup", "octocat"]).expect("parse");
+    args.s3_access_key = Some("AKIAEXAMPLE".to_string());
+    args.s3_secret_key = Some("secret".to_string());
+    args.mirror_token = Some("secret".to_string());
+    args.oauth_client_id = Some("Iv1.x".to_string());
+    assert!(args.check_dependencies(&matches).is_ok());
+}
+
+#[test]
+fn typed_credential_is_satisfied_by_a_companion_from_the_config_file() {
+    let (mut args, matches) =
+        try_parse_with_matches(&["github-backup", "octocat", "--s3-access-key", "k"])
+            .expect("parse");
+    assert!(args.check_dependencies(&matches).is_err(), "no bucket yet");
+
+    let cfg = github_backup_types::config::ConfigFile {
+        s3_bucket: Some("from-config".to_string()),
+        ..Default::default()
+    };
+    args.merge_config(&cfg);
+    assert!(args.check_dependencies(&matches).is_ok());
+}
+
+/// Regression (docs audit DA-13): `--all` silently dropped `--clone-starred`
+/// and `--action-runs`, the two opt-in categories it leaves off.
+#[test]
+fn all_still_honours_the_opt_in_categories_asked_for_explicitly() {
+    let args = parse(&[
+        "github-backup",
+        "octocat",
+        "--all",
+        "--clone-starred",
+        "--action-runs",
+    ]);
+    let (_, _, opts) = args.into_backup_options();
+    assert!(
+        opts.clone_starred,
+        "--all --clone-starred must clone starred repos"
+    );
+    assert!(
+        opts.action_runs,
+        "--all --action-runs must fetch workflow runs"
+    );
+    assert!(opts.issues, "--all still enables the rest");
+
+    let plain = parse(&["github-backup", "octocat", "--all"]);
+    let (_, _, opts) = plain.into_backup_options();
+    assert!(
+        !opts.clone_starred && !opts.action_runs,
+        "still opt-in without the flags"
+    );
+}
+
+/// Regression (DA-17): "CLI always overrides config" was false for
+/// `--clone-type mirror`, because mirror is the default and so looked absent.
+#[test]
+fn an_explicit_clone_type_mirror_beats_the_config_file() {
+    use github_backup_types::config::{CloneType, ConfigFile};
+    let cfg = ConfigFile {
+        clone_type: Some(CloneType::Bare),
+        ..Default::default()
+    };
+
+    let (mut explicit, matches) =
+        try_parse_with_matches(&["github-backup", "octocat", "--clone-type", "mirror"])
+            .expect("parse");
+    explicit.merge_config_with(&cfg, &matches);
+    let (_, _, opts) = explicit.into_backup_options();
+    assert_eq!(opts.clone_type, CloneType::Mirror);
+
+    let (mut absent, matches) =
+        try_parse_with_matches(&["github-backup", "octocat"]).expect("parse");
+    absent.merge_config_with(&cfg, &matches);
+    let (_, _, opts) = absent.into_backup_options();
+    assert_eq!(
+        opts.clone_type,
+        CloneType::Bare,
+        "the config applies when the CLI is silent"
+    );
 }

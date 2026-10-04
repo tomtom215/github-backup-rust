@@ -16,17 +16,18 @@
 #
 # ── Profiles ───────────────────────────────────────────────────────────────
 #   (default)  – local filesystem backup, output → ./backups/
-#   doctor     – run --doctor pre-flight checks
+#   doctor     – run the --doctor pre-flight checks only
 #   tui        – interactive full-screen TUI (needs a real terminal)
 #   verify     – verify the integrity of an existing backup
 #   s3         – backup + sync to AWS S3
 #   b2         – backup + sync to Backblaze B2
-#   minio      – backup + sync to self-hosted MinIO (bundled side service)
+#   minio      – backup + sync to a MinIO / S3-compatible server you run
 #   codeberg   – backup + mirror push to Codeberg / Forgejo / Gitea
 #   gitlab     – backup + mirror push to GitLab.com or self-hosted GitLab
 #
 # ── Usage ──────────────────────────────────────────────────────────────────
-#   # First-time pre-flight check (no files written, no API calls billed)
+#   # First-time pre-flight check (git, output directory, network, token;
+#   # one free /rate_limit request, no backup is made)
 #   docker compose --profile doctor run --rm doctor octocat
 #
 #   # Local backup to ./backups/
@@ -41,177 +42,185 @@
 #   # Mirror to Codeberg
 #   docker compose --profile codeberg run --rm backup-codeberg octocat --all
 
-# Shared anchor: every service uses the same base image, volume layout,
-# and minimum security-relevant settings.
-x-image: &image ghcr.io/tomtom215/github-backup-rust:latest
+# Shared anchors.
+#
+# `x-backup` is the common service definition; `x-env` is the common
+# environment.  Every service (including each profile service) merges BOTH,
+# and profile services add keys with `<<: *env` instead of replacing the map.
+# (YAML merge keys are shallow: a bare `environment:` map on a service would
+# silently drop the encryption key, webhook and GHES variables.)
+#
+# Environment values below are deliberately `null` (no `:-` / `-` default):
+# Compose then forwards the variable only when it is set in `.env` or the
+# shell, and omits it otherwise.  Writing `${VAR-}` instead would inject
+# `VAR=""` into the container.  The image entrypoint additionally treats a
+# set-but-empty value (`VAR=` in `.env`) as unset.
+#
+# Secrets are NOT `${VAR:?}`-guarded: Compose interpolates every service,
+# even those in inactive profiles, so one missing optional variable would
+# break unrelated commands.  The binary itself reports a missing token, and
+# leaving GITHUB_TOKEN unset lets you use `--device-auth`.
+#
+# Fixed per-profile flags live in `entrypoint:` (after tini and the wrapper),
+# so `docker compose run --rm SERVICE OWNER --all` *appends* your arguments
+# instead of replacing `command:` and silently dropping `--s3-bucket` etc.
+x-image: &image ghcr.io/tomtom215/github-backup-rust:${GITHUB_BACKUP_TAG:-latest}
 
-x-common: &common
+x-backup: &backup
   image: *image
   # build: .                         # uncomment to build from local checkout
-  # `init: true` lets docker inject tini if for some reason the image's
-  # baked-in tini is not used (e.g. older Docker versions).  Harmless.
-  init: true
+  # No `init: true`: the image already starts tini as PID 1.
+  restart: "no"                      # run-to-completion tool
+  # Numeric uid:gid that owns the backup directory.
+  # Unraid: BACKUP_UID=99 BACKUP_GID=100 (and UMASK=000 if SMB users need write).
+  user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
   volumes:
-    - ./backups:/backup              # where backup output is written
-  environment:
-    GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required — see compose.example.env}
-    GITHUB_API_URL: ${GITHUB_API_URL-}
-    GITHUB_CLONE_HOST: ${GITHUB_CLONE_HOST-}
-    GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID-}
-    BACKUP_NOTIFY_WEBHOOK: ${BACKUP_NOTIFY_WEBHOOK-}
-    BACKUP_ENCRYPT_KEY: ${BACKUP_ENCRYPT_KEY-}
-    GITHUB_BACKUP_RESTORE_YES: ${GITHUB_BACKUP_RESTORE_YES-}
+    - ${BACKUP_DIR:-./backups}:/backup   # where backup output is written
+
+x-env: &env
+  GITHUB_TOKEN:
+  GITHUB_API_URL:
+  GITHUB_CLONE_HOST:
+  GITHUB_OAUTH_CLIENT_ID:
+  BACKUP_NOTIFY_WEBHOOK:
+  BACKUP_ENCRYPT_KEY:
+  GITHUB_BACKUP_RESTORE_YES:
+  UMASK:
+  # HTTPS_PROXY / NO_PROXY are intentionally not forwarded: a host-side
+  # loopback proxy would be unreachable from the container.  Add
+  # `HTTPS_PROXY:` here if the container needs one.
 
 services:
   # ── Local filesystem backup (default profile) ──────────────────────────────
-  # No config.toml is mounted by default so a fresh checkout works
-  # immediately.  Mount one explicitly with:
+  # The image WORKDIR is /backup and the default output directory is ".", so
+  # no `--output` flag is needed.  No config.toml is mounted by default so a
+  # fresh checkout works immediately.  Mount one explicitly with:
   #   docker compose run --rm \
   #     -v $(pwd)/config.toml:/etc/github-backup/config.toml:ro \
-  #     backup --config /etc/github-backup/config.toml
+  #     backup octocat --config /etc/github-backup/config.toml
   backup:
-    <<: *common
-    command:
-      - "--output"
-      - "/backup"
+    <<: *backup
+    environment:
+      <<: *env
 
   # ── --doctor pre-flight check ──────────────────────────────────────────────
   # Confirms git, network, token, and TLS before scheduling a real run.
   doctor:
-    <<: *common
+    <<: *backup
     profiles: [doctor]
-    command:
-      - "--output"
-      - "/backup"
-      - "--doctor"
+    entrypoint: [/sbin/tini, --, /usr/local/bin/docker-entrypoint.sh, --doctor]
+    environment:
+      <<: *env
 
   # ── Interactive TUI ────────────────────────────────────────────────────────
   # Allocates a TTY so ratatui can render.  Use `docker compose run --rm tui`,
   # not `up`, so the foreground TTY attaches correctly.
   tui:
-    <<: *common
+    <<: *backup
     profiles: [tui]
     tty: true
     stdin_open: true
-    command:
-      - "--output"
-      - "/backup"
-      - "--tui"
+    entrypoint: [/sbin/tini, --, /usr/local/bin/docker-entrypoint.sh, --tui]
+    environment:
+      <<: *env
 
   # ── Verify an existing backup ──────────────────────────────────────────────
   verify:
-    <<: *common
+    <<: *backup
     profiles: [verify]
-    command:
-      - "--output"
-      - "/backup"
-      - "--verify"
+    entrypoint: [/sbin/tini, --, /usr/local/bin/docker-entrypoint.sh, --verify]
+    environment:
+      <<: *env
 
   # ── AWS S3 metadata sync ───────────────────────────────────────────────────
   backup-s3:
-    <<: *common
+    <<: *backup
     profiles: [s3]
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
-      BACKUP_ENCRYPT_KEY: ${BACKUP_ENCRYPT_KEY-}
-    command:
-      - "--output"
-      - "/backup"
-      - "--s3-bucket"
+    entrypoint:
+      - /sbin/tini
+      - --
+      - /usr/local/bin/docker-entrypoint.sh
+      - --s3-bucket
       - "${S3_BUCKET:-my-github-backup-bucket}"
-      - "--s3-region"
+      - --s3-region
       - "${S3_REGION:-us-east-1}"
+    environment:
+      <<: *env
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
 
   # ── Backblaze B2 (S3-compatible) ───────────────────────────────────────────
   backup-b2:
-    <<: *common
+    <<: *backup
     profiles: [b2]
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
-      AWS_ACCESS_KEY_ID: ${B2_KEY_ID:?B2_KEY_ID is required}
-      AWS_SECRET_ACCESS_KEY: ${B2_APP_KEY:?B2_APP_KEY is required}
-    command:
-      - "--output"
-      - "/backup"
-      - "--s3-bucket"
+    entrypoint:
+      - /sbin/tini
+      - --
+      - /usr/local/bin/docker-entrypoint.sh
+      - --s3-bucket
       - "${B2_BUCKET:-my-b2-bucket}"
-      - "--s3-region"
+      - --s3-region
       - "${B2_REGION:-us-west-004}"
-      - "--s3-endpoint"
+      - --s3-endpoint
       - "https://s3.${B2_REGION:-us-west-004}.backblazeb2.com"
-
-  # ── MinIO (self-hosted S3-compatible) ──────────────────────────────────────
-  minio:
-    profiles: [minio]
-    image: minio/minio:latest
-    volumes:
-      - minio-data:/data
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      <<: *env
+      AWS_ACCESS_KEY_ID: ${B2_KEY_ID-}
+      AWS_SECRET_ACCESS_KEY: ${B2_APP_KEY-}
 
+  # ── MinIO / other self-hosted S3-compatible endpoint ───────────────────────
+  # This file no longer bundles a MinIO server: the `minio/minio` image is no
+  # longer published on Docker Hub.  Point MINIO_ENDPOINT at any S3-compatible
+  # server you run (MinIO, Garage, SeaweedFS, ...) and create MINIO_BUCKET
+  # there first - the tool does not create buckets.
   backup-minio:
-    <<: *common
+    <<: *backup
     profiles: [minio]
-    depends_on:
-      minio:
-        condition: service_healthy
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command:
-      - "--output"
-      - "/backup"
-      - "--s3-bucket"
+    entrypoint:
+      - /sbin/tini
+      - --
+      - /usr/local/bin/docker-entrypoint.sh
+      - --s3-bucket
       - "${MINIO_BUCKET:-github-backup}"
-      - "--s3-region"
-      - "us-east-1"
-      - "--s3-endpoint"
-      - "http://minio:9000"
+      - --s3-region
+      - "${MINIO_REGION:-us-east-1}"
+      - --s3-endpoint
+      - "${MINIO_ENDPOINT:-http://minio.internal:9000}"
+    environment:
+      <<: *env
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER-}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD-}
 
   # ── Codeberg / Forgejo / Gitea mirror ──────────────────────────────────────
   backup-codeberg:
-    <<: *common
+    <<: *backup
     profiles: [codeberg]
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
-      MIRROR_TOKEN: ${MIRROR_TOKEN:?MIRROR_TOKEN is required}
-    command:
-      - "--output"
-      - "/backup"
-      - "--mirror-to"
+    entrypoint:
+      - /sbin/tini
+      - --
+      - /usr/local/bin/docker-entrypoint.sh
+      - --mirror-to
       - "${MIRROR_URL:-https://codeberg.org}"
-      - "--mirror-owner"
-      - "${MIRROR_OWNER:?MIRROR_OWNER is required}"
+      - --mirror-owner
+      - "${MIRROR_OWNER:-}"
+    environment:
+      <<: *env
+      MIRROR_TOKEN:
 
   # ── GitLab mirror ──────────────────────────────────────────────────────────
   backup-gitlab:
-    <<: *common
+    <<: *backup
     profiles: [gitlab]
-    environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
-      MIRROR_TOKEN: ${GITLAB_TOKEN:?GITLAB_TOKEN is required}
-    command:
-      - "--output"
-      - "/backup"
-      - "--mirror-to"
+    entrypoint:
+      - /sbin/tini
+      - --
+      - /usr/local/bin/docker-entrypoint.sh
+      - --mirror-to
       - "${GITLAB_URL:-https://gitlab.com}"
-      - "--mirror-type"
-      - "gitlab"
-      - "--mirror-owner"
-      - "${GITLAB_NAMESPACE:?GITLAB_NAMESPACE is required}"
-
-volumes:
-  minio-data:
+      - --mirror-type
+      - gitlab
+      - --mirror-owner
+      - "${GITLAB_NAMESPACE:-}"
+    environment:
+      <<: *env
+      MIRROR_TOKEN: ${GITLAB_TOKEN-}

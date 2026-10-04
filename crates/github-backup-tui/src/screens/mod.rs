@@ -8,4 +8,5 @@ pub mod configure;
 pub mod dashboard;
 pub mod results;
 pub mod running;
+pub mod util;
 pub mod verify;

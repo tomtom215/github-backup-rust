@@ -1,6 +1,9 @@
 # CLI Reference
 
-Complete reference for all `github-backup` command-line flags.
+Reference for every `github-backup` command-line flag.  `github-backup --help`
+is the authoritative list for the binary you have installed; this page is
+checked against it, and the **Env var** and **Default** columns are taken from
+it.
 
 ## Synopsis
 
@@ -9,314 +12,327 @@ github-backup [OPTIONS] [OWNER]
 github-backup [OWNER] --tui
 github-backup --config <FILE> [OPTIONS]
 github-backup --completions <SHELL>
+github-backup --print-config-template
 ```
+
+`--completions <SHELL>` is not listed by `--help` (it is handled before the
+normal argument parsing); `--help` and `--version` (`-h`, `-V`) behave as
+usual.
 
 ## Arguments
 
 | Argument | Description |
 |---------|-------------|
-| `[OWNER]` | GitHub username or organisation name. May be omitted when supplied via `--config`. |
+| `[OWNER]` | GitHub username or organisation name.  May be omitted when `--config` supplies `owner`.  It is used as a directory name under `--output`, so `..`, `/`, `\` and control characters are rejected. |
 
 ## Authentication
 
-| Flag | Env Var | Default | Description |
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `-t, --token <TOKEN>` | `GITHUB_TOKEN` | — | Personal access token (classic or fine-grained) |
-| `--device-auth` | — | `false` | Use GitHub OAuth device flow (interactive) |
-| `--oauth-client-id <ID>` | `GITHUB_OAUTH_CLIENT_ID` | — | OAuth App client ID (required with `--device-auth`) |
-| `--oauth-scopes <SCOPES>` | — | `repo gist read:org` | OAuth scopes (space-separated) |
+| `-t, --token <TOKEN>` | `GITHUB_TOKEN` | none | Personal access token (classic or fine-grained).  Prefer the variable: a command-line value is visible in `ps`. |
+| `--device-auth` | none | `false` | Use the GitHub OAuth device flow (interactive).  Needs `--oauth-client-id`. |
+| `--oauth-client-id <CLIENT_ID>` | `GITHUB_OAUTH_CLIENT_ID` | none | OAuth App client ID.  The variable is ignored unless `--device-auth` is given; the flag without `--device-auth` is an error. |
+| `--oauth-scopes <SCOPES>` | none | `repo gist read:org` | Scopes requested by the device flow (space-separated).  These do **not** cover every category (for example `--packages` needs `read:packages`); see [Authentication](../getting-started/authentication.md). |
+
+With no credential at all the tool runs unauthenticated (public data, 60
+requests per hour).  It refuses to start, with exit status `1`, when one of
+`--private`, `--hooks`, `--deploy-keys`, `--collaborators`, `--org-members`,
+`--org-teams`, `--actions`, `--action-runs`, `--packages`, `--discussions` or
+`--projects` is given explicitly.  That check does not look inside `--all`: an
+anonymous `--all` starts, and everything that needs a token fails or comes back
+empty.
 
 ## GitHub Enterprise Server
 
-| Flag | Env Var | Default | Description |
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--api-url <URL>` | `GITHUB_API_URL` | `https://api.github.com` | Override the GitHub API base URL for GitHub Enterprise Server |
-| `--clone-host <HOST>` | `GITHUB_CLONE_HOST` | *(from API)* | Override the hostname used in git clone URLs |
+| `--api-url <URL>` | `GITHUB_API_URL` | `https://api.github.com` | API base URL.  Must be `https://`. |
+| `--clone-host <HOST>` | `GITHUB_CLONE_HOST` | from the API | Replace the hostname in every clone URL. |
 
-For GHES instances the API is typically at `https://github.example.com/api/v3`.
-
-```bash
-# Back up a GitHub Enterprise Server instance
-github-backup myorg \
-  --token $GITHUB_TOKEN \
-  --api-url https://github.example.com/api/v3 \
-  --output /backup --org --all
-
-# Split API / clone hostnames (separate load balancers)
-github-backup myorg \
-  --token $GITHUB_TOKEN \
-  --api-url https://github-api.example.com/api/v3 \
-  --clone-host github-git.example.com \
-  --output /backup --org --repositories
-```
+See [GitHub Enterprise Server](github-enterprise.md).
 
 ## Configuration
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-c, --config <FILE>` | — | Path to TOML config file; CLI flags override config values |
+| `-c, --config <FILE>` | none | TOML config file.  Values in the file are defaults; see [Config File](config-file.md#precedence) for exactly how the command line and the file combine. |
+| `--print-config-template` | `false` | Print an annotated config template and exit.  Needs no owner or token. |
 
 ## Output
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o, --output <DIR>` | `.` | Root directory for backup artefacts |
-| `--report <FILE>` | — | Write a JSON summary report to this path |
+| `-o, --output <DIR>` | `.` | Root directory for everything the tool writes. |
+| `--report <FILE>` | none | Write a JSON summary after the run (also after a failed run).  See [Monitoring](../monitoring.md). |
 
 ## Target Type
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--org` | `false` | Treat OWNER as a GitHub organisation |
+| `--org` | `false` | Treat OWNER as an organisation. |
 
-## Broad Selectors
+## Broad Selector
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Enable all backup categories (conflicts with individual category flags) |
+| `--all` | Enable every category listed in `--help` for `--all` (see [The `--all` flag](../backup-categories.md#the---all-flag)).  Conflicts with the individual category flags on the command line, but not with `--forks`, `--private`, `--action-runs`, `--clone-starred`, `--lfs` and the other behaviour flags, which are honoured next to `--all`. |
 
 ## Repository Options
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--repositories` | — | `false` | Clone/mirror repositories |
-| `--forks` | `-F` | `false` | Include forked repositories |
-| `--private` | `-P` | `false` | Include private repositories |
-| `--prefer-ssh` | — | `false` | Use SSH URLs instead of HTTPS |
-| `--clone-type <TYPE>` | — | `mirror` | Clone mode: `mirror`, `bare`, `full`, `shallow:<n>` |
-| `--lfs` | — | `false` | Enable Git LFS |
-| `--no-prune` | — | `false` | Skip pruning deleted remote refs |
+| `--repositories` | | `false` | Clone or update repositories. |
+| `--forks` | `-F` | `false` | Include forks. |
+| `--private` | `-P` | `false` | Include private repositories.  For a user target this needs a token that belongs to that user; see [Private repositories](../backup-categories.md#private-repositories). |
+| `--prefer-ssh` | | `false` | Clone over SSH instead of HTTPS (no token is used; git needs working SSH keys). |
+| `--clone-type <TYPE>` | | `mirror` | `mirror`, `bare`, `full` or `shallow:<depth>`; see [Clone types](../backup-categories.md#clone-types-explained). |
+| `--lfs` | | `false` | Also fetch Git LFS objects (`git lfs fetch --all`) after the mirror update.  Needs `git-lfs` installed; overrides `--clone-type`. |
+| `--prune` | | `false` | Delete branches and tags from the clone when they were deleted on GitHub.  Without it they are kept; force-pushed branches are overwritten either way. |
+| `--no-prune` | | | Deprecated and ignored: not pruning is the default.  Cannot be combined with `--prune`. |
 
-## Issue Options
+## Issue and Pull Request Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--issues` | `false` | Back up issue metadata |
-| `--issue-comments` | `false` | Back up issue comment threads |
-| `--issue-events` | `false` | Back up issue timeline events |
-
-## Pull Request Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--pulls` | `false` | Back up pull request metadata |
-| `--pull-comments` | `false` | Back up PR review comments |
-| `--pull-commits` | `false` | Back up PR commit lists |
-| `--pull-reviews` | `false` | Back up PR reviews |
+| Flag | Description |
+|------|-------------|
+| `--issues` | Issue list.  Pull requests appear in it too. |
+| `--issue-comments` | Comments of every issue **and pull request**. |
+| `--issue-events` | Events of every issue **and pull request**. |
+| `--pulls` | Pull request list. |
+| `--pull-comments` | Inline review comments, per pull request. |
+| `--pull-commits` | Commit list, per pull request (GitHub returns at most 250). |
+| `--pull-reviews` | Reviews, per pull request. |
 
 ## Repository Metadata
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--labels` | `false` | Back up repository labels |
-| `--milestones` | `false` | Back up repository milestones |
-| `--releases` | `false` | Back up release metadata |
-| `--release-assets` | `false` | Download release binary assets (requires `--releases`) |
-| `--hooks` | `false` | Back up webhook configurations (requires admin token) |
-| `--security-advisories` | `false` | Back up published security advisories |
-| `--wikis` | `false` | Clone repository wikis |
-| `--topics` | `false` | Back up repository topics (tags) |
-| `--branches` | `false` | Back up branch list and protection status |
-| `--deploy-keys` | `false` | Back up deploy keys (requires admin access) |
-| `--collaborators` | `false` | Back up collaborator list with permissions (requires admin access) |
+| Flag | Description |
+|------|-------------|
+| `--labels` | Labels. |
+| `--milestones` | Milestones. |
+| `--releases` | Release metadata. |
+| `--release-assets` | Download release assets.  Requires `--releases`. |
+| `--hooks` | Webhook configurations (admin access). |
+| `--security-advisories` | Published security advisories. |
+| `--wikis` | Clone wikis. |
+| `--topics` | Topics. |
+| `--branches` | Branch list and, for protected branches, the protection rules (admin access). |
+| `--deploy-keys` | Deploy keys (admin access). |
+| `--collaborators` | Collaborators with permissions (admin access). |
 
-## GitHub Actions
+## GitHub Actions and Environments
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--actions` | `false` | Back up Actions workflow metadata (id, name, path, state, badge URL) |
-| `--action-runs` | `false` | Back up workflow run history (requires `--actions`; can be very large) |
+| Flag | Description |
+|------|-------------|
+| `--actions` | Workflow metadata (`workflows.json`). |
+| `--action-runs` | Run history per workflow.  Requires `--actions`; can be very large; not part of `--all`. |
+| `--environments` | Deployment environments with protection rules. |
 
-## Deployment Environments
+## Discussions, Classic Projects, Packages
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--environments` | `false` | Back up deployment environment configs (protection rules, branch policies) |
-
-## Discussions, Classic Projects, and Packages
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--discussions` | `false` | Back up GitHub Discussions threads and their comments |
-| `--projects` | `false` | Back up Classic Projects (v1) and their column structure |
-| `--packages` | `false` | Back up GitHub Packages metadata for the target user (requires `read:packages`) |
+| Flag | Description |
+|------|-------------|
+| `--discussions` | **Not functional.**  GitHub has no REST endpoint for Discussions; nothing is saved and a warning is logged.  Still part of `--all`. |
+| `--projects` | **Not functional.**  Classic Projects are gone from GitHub's REST API; nothing is saved and a warning is logged.  Still part of `--all`. |
+| `--packages` | Package metadata of the target user (needs `read:packages`). |
 
 ## Organisation Data
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--org-members` | `false` | Back up organisation member list (requires `--org`) |
-| `--org-teams` | `false` | Back up organisation team list (requires `--org`) |
+| Flag | Description |
+|------|-------------|
+| `--org-members` | Member list (organisation targets only; ignored for users). |
+| `--org-teams` | Team list (organisation targets only; ignored for users). |
 
-## User / Org Data
+## User and Organisation Data
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--starred` | `false` | Back up starred repositories |
-| `--clone-starred` | `false` | Clone every starred repository as a bare mirror (durable queue, opt-in) |
-| `--watched` | `false` | Back up watched repositories |
-| `--followers` | `false` | Back up follower list |
-| `--following` | `false` | Back up following list |
-| `--gists` | `false` | Back up owned gists |
-| `--starred-gists` | `false` | Back up starred gists |
+| Flag | Description |
+|------|-------------|
+| `--starred` | Starred repositories as a JSON list. |
+| `--clone-starred` | Clone every starred repository as a bare mirror through a durable queue.  Not part of `--all`, but honoured next to it. |
+| `--watched` | Watched repositories. |
+| `--followers` | Followers. |
+| `--following` | Accounts followed. |
+| `--gists` | Clone gists owned by the target. |
+| `--starred-gists` | Metadata of the gists starred by the **authenticated user** (not cloned). |
 
 ## Repository Filters
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--include-repos <PATTERN>` | *(all)* | Only back up repos matching glob (repeat or comma-separate) |
-| `--exclude-repos <PATTERN>` | *(none)* | Exclude repos matching glob (takes precedence over `--include-repos`) |
+| `--include-repos <PATTERN>` | all | Only repositories whose **name** matches (repeat the flag or separate with commas). |
+| `--exclude-repos <PATTERN>` | none | Skip repositories whose name matches; wins over `--include-repos`. |
 
-Pattern syntax: `*` matches any sequence, `?` matches one character. Matching is case-insensitive.
+Patterns match the repository name only (not `owner/name`): `*` matches any
+sequence, `?` one character, case-insensitively.  There is no pattern for
+"archived" repositories; `*archived*` matches names that contain the word.
 
 ```bash
-# Only repos whose name starts with "rust-"
-github-backup octocat --token $TOKEN --output /backup --repositories \
-  --include-repos "rust-*"
-
-# All repos except archived ones
-github-backup octocat --token $TOKEN --output /backup --repositories \
-  --exclude-repos "*archived*,*deprecated*"
+github-backup octocat --output /backup --repositories --include-repos "rust-*"
+github-backup octocat --output /backup --repositories --exclude-repos "*-old,*-fork"
 ```
 
-## Incremental Filter
+## Incremental Behaviour
+
+Issue and pull request **lists are always fetched in full** and merged into
+`issues.json` / `pulls.json`; a run never shrinks them.  What is incremental
+is the per-item data (comments, events, commits, reviews): a repository's own
+watermark from the previous clean run decides which items can be skipped.  See
+[Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--since <DATETIME>` | — | Only fetch issues/PRs updated at or after this ISO 8601 timestamp |
+| `--since <DATE>` | none | Expert override: treat everything updated before DATE as already backed up.  Accepts `2024-01-01` (midnight UTC) or an RFC 3339 timestamp with any offset.  Never written to the state file. |
+| `--full` | `false` | Ignore all watermarks and fetch every per-item file again.  Conflicts with `--since`. |
 
-```bash
-# Incremental: only issues/PRs updated since 2026-01-01
-github-backup octocat --token $TOKEN --output /backup \
-  --issues --pulls --since "2026-01-01T00:00:00Z"
-```
+## Push Mirror Options
 
-## Push-Mirror Options
-
-| Flag | Env Var | Default | Description |
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--mirror-to <URL>` | — | — | Mirror destination base URL (e.g. `https://codeberg.org` or `https://gitlab.com`) |
-| `--mirror-type <TYPE>` | — | `gitea` | `gitea` (Gitea / Codeberg / Forgejo) or `gitlab` |
-| `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | — | API token for the mirror destination |
-| `--mirror-owner <OWNER>` | — | Same as OWNER | Username, org, or namespace at the mirror destination |
-| `--mirror-private` | — | `false` | Create repositories as private at the destination |
+| `--mirror-to <URL>` | none | none | Base URL of the destination (`https://codeberg.org`, `https://gitlab.com`, ...). |
+| `--mirror-type <TYPE>` | none | `gitea` | `gitea` (Gitea, Codeberg, Forgejo) or `gitlab`. |
+| `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | none | API token for the destination.  The variable is ignored unless `--mirror-to` is given. |
+| `--mirror-owner <OWNER>` | none | OWNER | User or organisation/namespace at the destination. |
+| `--mirror-private` | none | `false` | Create every destination repository as private.  This is the default; the flag states it explicitly.  Cannot be combined with `--mirror-public`. |
+| `--mirror-public` | none | `false` | Create mirrors of repositories that are public on GitHub as public.  A private source, or one whose visibility is unknown, is still mirrored privately.  Cannot be combined with `--mirror-private`. |
 
-## S3 Storage Options
+See [Mirroring](../mirroring.md).
 
-| Flag | Env Var | Default | Description |
+## S3 Options
+
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--s3-bucket <BUCKET>` | — | — | S3 bucket name |
-| `--s3-region <REGION>` | — | `us-east-1` | AWS region |
-| `--s3-prefix <PREFIX>` | — | *(empty)* | Object key prefix |
-| `--s3-endpoint <URL>` | — | — | Custom S3-compatible endpoint |
-| `--s3-access-key <KEY>` | `AWS_ACCESS_KEY_ID` | — | AWS access key ID |
-| `--s3-secret-key <SECRET>` | `AWS_SECRET_ACCESS_KEY` | — | AWS secret access key |
-| `--s3-include-assets` | — | `false` | Upload binary release assets to S3 |
-| `--s3-delete-stale` | — | `false` | Delete S3 objects no longer in the local backup (use with caution) |
+| `--s3-bucket <BUCKET>` | none | none | Bucket (must exist).  Enables S3 sync of the **JSON metadata**; clones are not uploaded. |
+| `--s3-region <REGION>` | none | `us-east-1` | Region. |
+| `--s3-prefix <PREFIX>` | none | empty | Key prefix; objects are stored as `<prefix>/<owner>/json/<path>`. |
+| `--s3-endpoint <URL>` | none | AWS | Custom endpoint with scheme (B2, MinIO, R2, ...). |
+| `--s3-access-key <KEY>` | `AWS_ACCESS_KEY_ID` | none | Access key ID.  The variable is ignored unless `--s3-bucket` is given. |
+| `--s3-secret-key <SECRET>` | `AWS_SECRET_ACCESS_KEY` | none | Secret access key.  Same rule. |
+| `--s3-session-token <TOKEN>` | `AWS_SESSION_TOKEN` | none | Session token for temporary credentials.  Same rule. |
+| `--s3-include-assets` | none | `false` | Also upload release assets. |
+| `--s3-delete-stale` | none | `false` | Delete remote objects whose local file is gone (guarded; see [S3](../storage/s3.md#deleting-stale-objects---s3-delete-stale)). |
 
 ## At-Rest Encryption
 
-| Flag | Env Var | Default | Description |
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--encrypt-key <HEX_KEY>` | `BACKUP_ENCRYPT_KEY` | *(none)* | 64-hex-char AES-256-GCM key for at-rest encryption before S3 upload |
-| `--decrypt` | — | `false` | Decrypt a single file produced by `--encrypt-key` and exit |
-| `--decrypt-input <FILE>` | — | — | Path to the encrypted input file (with `--decrypt`) |
-| `--decrypt-output <FILE>` | — | — | Path to write the decrypted plaintext (with `--decrypt`) |
+| `--encrypt-key <HEX_KEY>` | `BACKUP_ENCRYPT_KEY` | none | 64 hexadecimal characters (32 bytes): encrypt files with AES-256-GCM before the S3 upload.  Applies to S3 only. |
+| `--decrypt` | none | `false` | Decrypt one file and exit.  Needs the key (`--encrypt-key` or `BACKUP_ENCRYPT_KEY`), no OWNER and no network. |
+| `--decrypt-input <FILE>` | none | none | Encrypted input (with `--decrypt`). |
+| `--decrypt-output <FILE>` | none | none | Plaintext output (with `--decrypt`). |
 
 ## Restore
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--restore` | `false` | Re-create labels, milestones, and issues from the backup in a target organisation |
-| `--restore-target-org <ORG>` | *(source owner)* | Target organisation for `--restore` |
-| `--restore-yes` | `false` | Skip the interactive confirmation prompt (required in non-interactive environments) |
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--restore` | none | `false` | Re-create labels, milestones and issues from the **local backup** in another organisation.  Makes no backup first and does not contact the source. |
+| `--restore-target-org <ORG>` | none | OWNER | Organisation to restore into.  The repositories must already exist there. |
+| `--restore-yes` | `GITHUB_BACKUP_RESTORE_YES=1` | `false` | Confirm without the interactive prompt (required when stdin is not a terminal). |
 
-See the [Restore guide](../restore.md) for usage details.
+See the [Restore guide](../restore.md).
 
-## Manifest & Verify
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--manifest` | `false` | Write a SHA-256 hash manifest after the backup completes |
-| `--verify` | `false` | Verify an existing manifest instead of running a backup |
-
-## Retention
+## Manifest and Verify
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--keep-last <N>` | — | Keep only the N most recent dated snapshot directories under `--output` |
-| `--max-age-days <DAYS>` | — | Delete dated snapshot directories older than this many days |
+| `--manifest` | `false` | After the run, write `json/backup_manifest.json` with the SHA-256 of every data file under `json/` (not the history, state, checkpoint and lock files, which change on every run). |
+| `--verify` | `false` | Check the manifest of an existing backup and exit.  Needs OWNER (and `--output` unless the backup is in the current directory); no network.  Covers the files under `json/` only, not the git clones.  Conflicts with `--all`. |
 
 ## Monitoring
 
-| Flag | Env Var | Default | Description |
+| Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--prometheus-metrics <FILE>` | — | — | Write Prometheus textfile-format metrics to this path |
-| `--diff-with <PREV_JSON_DIR>` | — | — | Compare the current backup with a previous backup directory |
-| `--notify-webhook <URL>` | `BACKUP_NOTIFY_WEBHOOK` | — | POST a JSON status payload to this URL after the backup |
-| `--history-size <N>` | — | `20` | Maximum number of entries kept in `backup_history.json` |
+| `--prometheus-metrics <FILE>` | none | none | Write node_exporter textfile metrics (also after a failed run). |
+| `--notify-webhook <URL>` | `BACKUP_NOTIFY_WEBHOOK` | none | POST a JSON status (`success`, `partial` or `failure`) after the run. |
+| `--diff-with <PREV_JSON_DIR>` | none | none | After the run, log how the repository list differs from a previous backup's `<owner>/json` directory (repository names only). |
+| `--history-size <N>` | none | `20` | Entries kept in `json/backup_history.json`. |
 
 ## Execution Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--concurrency <N>` | `4` | Max repositories backed up in parallel (config file can set this; CLI always wins) |
-| `--dry-run` | `false` | Log actions without writing files or running git |
+| `--concurrency <N>` | `4` | Repositories processed in parallel. |
+| `--dry-run` | `false` | List what would be backed up; write nothing.  See below. |
+
+### What `--dry-run` does
+
+A dry run fetches the repository list (read-only API calls) and logs which
+repositories it would back up.  It writes **nothing**: no files or directories
+(not even the lock), no state, report, manifest, metrics, history, no webhook,
+no S3 upload and no mirror push, and it runs no `git`.  Owner-level data and
+gists are skipped.  With `--restore` it makes no API call at all.
+
+## Deprecated
+
+| Flag | Description |
+|------|-------------|
+| `--keep-last <N>` | **Ignored.**  A warning is logged after a real run. |
+| `--max-age-days <DAYS>` | **Ignored.**  A warning is logged after a real run. |
+
+The tool keeps one continuously updated backup per owner under
+`<output>/<owner>/`; it never deletes snapshot directories.  Rotate or expire
+copies with a tool built for it (restic, borg, ZFS or LVM snapshots, a
+lifecycle rule on the bucket).  `github-backup --help` still describes the two
+flags as if they pruned directories; they do not.
 
 ## Logging
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--quiet` | `-q` | `false` | Suppress all non-error output |
-| `--verbose` | `-v` | 0 | Increase verbosity (`-v` = debug, `-vv` = trace) |
+| `--quiet` | `-q` | `false` | Errors only; also hides the plan and summary banners. |
+| `--verbose` | `-v` | 0 | `-v` debug, `-vv` trace.  Neither prints the token. |
 
-## Special Commands
+`RUST_LOG` overrides the level; see [Environment Variables](environment.md#logging).
 
-### Interactive TUI
+## Diagnostics
 
-`--tui` launches the full-screen Ratatui interface instead of running
-non-interactively.  Any flags passed alongside `--tui` are pre-loaded into
-the Configure screen.
+| Flag | Description |
+|------|-------------|
+| `--doctor` | Run the pre-flight checks and exit (details below). |
+| `--check` | `--doctor` plus the resolved configuration (owner, output, API URL, concurrency and the scopes `--list-scopes` would print). |
+| `--list-scopes` | Print the classic OAuth scopes recommended for the flags given and exit. |
 
-```bash
-# Launch with pre-seeded owner and token
-github-backup octocat --token "$GITHUB_TOKEN" --tui
+`--doctor` runs, in order: the `git` binary and its version, whether the output
+directory exists or can be created (it is created if missing) and is writable,
+the kind of credential
+(classic, fine-grained, OAuth or app token, judged by its prefix), whether the
+API answers, and whether GitHub accepts the token (`GET /rate_limit`, which
+costs no quota).  A rejected token (HTTP 401 or 403) or an unreachable API is a
+failure; a server without `/rate_limit` is only a warning.  It does **not**
+check free disk space, the token's scopes, S3 access, the mirror destination or
+`git-lfs`.  It exits `0` when no check failed and `1` otherwise.
 
-# Launch with full pre-seed (output dir, API URL, etc.)
-github-backup octocat \
-  --token "$GITHUB_TOKEN" \
-  --output /var/backup/github \
-  --api-url https://github.example.com/api/v3 \
-  --tui
-```
+`--list-scopes` maps each enabled flag to the scopes it would need.  With
+`--all` it prints only `public_repo repo` (it does not expand `--all`), and it
+recommends `user:follow` for `--followers` and `admin:public_key` for
+`--deploy-keys`, which only read data.  For a token covering `--all` use the
+table in [Authentication](../getting-started/authentication.md#what-each-category-needs).
 
-See the [Interactive TUI guide](../tui.md) for screen layouts and the full
-key reference.
+## Interactive TUI
 
-### Shell Completions
+`--tui` starts the full-screen interface instead of a run.  The owner, token,
+output directory and API URL given on the command line pre-fill the form; other
+flags are not read.  See the [Interactive TUI guide](../tui.md).
 
-`--completions <SHELL>` prints a completion script and exits immediately — no token or network access required.
+## Shell Completions
 
-Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
-
-```bash
-# Quick one-liner — pipe directly into your shell's completion directory
-github-backup --completions bash >> ~/.bash_completion
-github-backup --completions zsh > ~/.zfunc/_github-backup
-github-backup --completions fish > ~/.config/fish/completions/github-backup.fish
-github-backup --completions powershell >> $PROFILE
-github-backup --completions elvish > ~/.config/elvish/lib/github-backup.elv
-```
-
-See the [Installation guide](../getting-started/installation.md#shell-completions) for per-shell setup details (Zsh `fpath`, Elvish `rc.elv`, etc.).
+`--completions <SHELL>` prints a completion script and exits without a token or
+network access.  Supported shells: `bash`, `zsh`, `fish`, `powershell`,
+`elvish`.  Per-shell setup is in [Installation](../getting-started/installation.md#shell-completions).
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success |
-| `1` | Failure (authentication error, fatal API error, etc.) |
+| `0` | Everything that was asked for succeeded. |
+| `1` | The run could not be carried out: bad configuration or arguments that the tool detects itself, rejected credentials, the repository list could not be fetched, another run holds the lock, the disk is full, a failed `--verify`, `--doctor` or `--decrypt`, or a restore that could not start. |
+| `2` | Usage error reported by the argument parser (unknown flag, missing value, conflicting flags). |
+| `3` | The run finished but something could not be backed up: a repository, an issue list, an S3 upload, a mirror push, the manifest.  The backup is **incomplete**.  Re-running retries only what failed.  `--restore` also exits `3` when some items could not be restored. |
+| `130` / `143` | Interrupted by `SIGINT` / `SIGTERM`. |
+| `64` | Container entrypoint only: refused a malformed `UMASK`, `BACKUP_MODE` or `BACKUP_FLAGS`. |
 
-Per-repository errors are non-fatal: they are logged as warnings and the backup
-continues.  A `1` exit code indicates that the entire backup failed to start
-or that a post-processing step (S3 sync, mirror push) failed.
+Failures never stop the rest of the run: a repository that cannot be cloned
+does not prevent its issues or the other repositories from being backed up.
+Each failure is recorded once and shows up in the log, the summary banner, the
+`--report` file (`failure_count`, `failures[]`), the metrics
+(`github_backup_failures`, `github_backup_success`), `backup_history.json` and
+the webhook (`"status": "partial"`); they cannot disagree with the exit code.
+A failure of the notification itself (webhook, report or metrics file that
+cannot be written) is logged but does not change the exit code.

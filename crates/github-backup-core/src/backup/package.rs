@@ -44,7 +44,7 @@ pub async fn backup_packages(
     json_dir: &Path,
     storage: &impl Storage,
 ) -> Result<u64, CoreError> {
-    if !opts.packages {
+    if !opts.packages || opts.dry_run {
         return Ok(0);
     }
 
@@ -149,7 +149,7 @@ mod tests {
             html_url: format!("https://github.com/users/octocat/packages/{package_type}/{name}"),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
-            owner: make_user(),
+            owner: Some(make_user()),
             repository: Some(PackageRepository {
                 name: "my-repo".to_string(),
                 full_name: "octocat/my-repo".to_string(),
@@ -162,7 +162,9 @@ mod tests {
         PackageVersion {
             id,
             name: name.to_string(),
-            html_url: format!("https://github.com/users/octocat/packages/npm/my-pkg/versions/{id}"),
+            html_url: Some(format!(
+                "https://github.com/users/octocat/packages/npm/my-pkg/versions/{id}"
+            )),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             metadata: None,
@@ -234,5 +236,23 @@ mod tests {
             0,
             "empty package list should produce no files"
         );
+    }
+
+    /// A dry run writes nothing: the e2e harness found package metadata being
+    /// saved by `--dry-run`.
+    #[tokio::test]
+    async fn dry_run_writes_no_package_files() {
+        let client = crate::backup::mock_client::MockBackupClient::new();
+        let storage = crate::storage::test_support::MemStorage::default();
+        let opts = BackupOptions {
+            packages: true,
+            dry_run: true,
+            ..Default::default()
+        };
+        let n = backup_packages(&client, "octocat", &opts, Path::new("/json"), &storage)
+            .await
+            .expect("dry run");
+        assert_eq!(n, 0);
+        assert_eq!(storage.len(), 0);
     }
 }

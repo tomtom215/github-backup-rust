@@ -6,7 +6,7 @@
 //! Covers organisation member lists and team rosters. Only meaningful when
 //! the backup target is an organisation.
 
-use github_backup_types::{Team, User};
+use github_backup_types::{Page, Team, User};
 
 use crate::error::ClientError;
 
@@ -20,7 +20,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_org_members(&self, org: &str) -> Result<Vec<User>, ClientError> {
+    pub async fn list_org_members(&self, org: &str) -> Result<Page<User>, ClientError> {
         let api = self.api();
         let url = format!("{api}/orgs/{org}/members?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
@@ -33,7 +33,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_org_teams(&self, org: &str) -> Result<Vec<Team>, ClientError> {
+    pub async fn list_org_teams(&self, org: &str) -> Result<Page<Team>, ClientError> {
         let api = self.api();
         let url = format!("{api}/orgs/{org}/teams?per_page={PER_PAGE}");
         self.get_all_pages(&url).await

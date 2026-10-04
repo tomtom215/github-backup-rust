@@ -1,49 +1,72 @@
 # github-backup
 
-**github-backup** is a GitHub backup tool written in Rust. It backs up
-repositories, issues, pull requests, releases, gists, wikis, and relationship
-data for any GitHub user or organisation. The TLS stack is `rustls` (no
-OpenSSL), the S3 client is a pure-Rust SigV4 implementation (no AWS SDK), and
-an optional full-screen TUI is available via `--tui`.
+**github-backup** is a GitHub backup tool written in Rust.  It backs up the
+repositories, issues, pull requests, releases, gists, wikis and relationship
+data of a GitHub user or organisation to a local directory, optionally copies the
+JSON metadata to S3-compatible storage and the git data to another git host.  TLS
+is `rustls` (no OpenSSL), the S3 client is a pure-Rust SigV4 implementation (no
+AWS SDK), and an optional full-screen TUI is available with `--tui`.
+
+> **Documentation version.**  These pages describe the current development
+> branch (`main`).  The latest release, v0.3.2, predates many of the behaviours
+> described here (exit status `3`, per-repository incremental state, lossless
+> JSON, `--doctor`, restore changes, and more); the `Unreleased` section of the
+> [changelog](development/changelog.md) lists them.  See
+> [Installation](getting-started/installation.md) for how to get a matching build.
 
 ## Feature Highlights
 
 | Feature | Details |
 |---------|---------|
-| Repository backup | Mirror, bare, full, or shallow clone |
-| Issue & PR backup | Full JSON: metadata, comments, reviews, events |
-| Release backup | Metadata + optional binary asset download |
-| Gist backup | Owned and starred gists |
-| Wiki backup | Repository wiki clones |
-| Topics & branches | Repository topics and branch list with protection status |
-| Deploy keys & collaborators | Per-repository key and permission metadata |
-| GitHub Actions | Workflow metadata + optional run history (`--actions`, `--action-runs`) |
-| Environments | Deployment environments with protection rules (`--environments`) |
-| Discussions / Projects / Packages | `--discussions`, `--projects`, `--packages` |
-| User / org data | Starred, watched, followers, following, org members & teams |
-| Repo filters | `--include-repos` / `--exclude-repos` glob patterns |
-| Incremental | `--since` to limit issues/PR fetching by date |
-| S3 sync | AWS S3, Backblaze B2, MinIO, Cloudflare R2, Spaces, Wasabi |
-| At-rest encryption | AES-256-GCM before S3 upload (`--encrypt-key`) |
-| Git mirroring | Push to Gitea / Codeberg / Forgejo or GitLab |
-| Restore | Re-create labels, milestones, and issues in a target org |
-| Authentication | Personal access token, OAuth device flow, or anonymous |
-| GitHub Enterprise | `--api-url` + `--clone-host` for GHES instances |
-| Config file | TOML config file with CLI override |
-| Concurrency | Configurable parallel repository backup |
-| Dry-run | Preview what would be backed up |
-| JSON report | Machine-readable summary with counters and timestamps |
+| Repositories | Mirror, bare, full or shallow clones, kept up to date with `git fetch`; optional Git LFS objects |
+| Issues and pull requests | The lists, comments, events, commits and reviews, saved as GitHub's complete JSON responses |
+| Releases | Metadata and, optionally, the assets (streamed, size and checksum verified) |
+| Gists and wikis | Owned gists and repository wikis cloned; starred gists as metadata |
+| Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, security advisories, Actions workflows, runs and environments, package metadata |
+| User and organisation data | Starred, watched, followers, following, organisation members and teams; optional clone of every starred repository |
+| Private data | A user's own private repositories and secret gists are included when the token belongs to that user |
+| Filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
+| Incremental runs | A watermark per repository; lists are always fetched in full and merged, so a run never loses data; `--full` forces a complete refresh |
+| Honest outcome | Failures never stop the rest of the run; exit status `3` means "finished but incomplete"; report, metrics, webhook and history agree |
+| S3 sync | The JSON metadata (not the clones) to AWS S3, Backblaze B2, MinIO, Cloudflare R2, Spaces or Wasabi, with content-digest skipping |
+| At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |
+| Push mirrors | Branches and tags to Gitea, Forgejo, Codeberg or GitLab; repositories created private by default; never overwrites a repository it did not create |
+| Restore | Labels, milestones and issues back into an organisation, from the local backup (`--restore`) |
+| Authentication | Personal access token, OAuth device flow, or anonymous (public data only) |
+| GitHub Enterprise Server | `--api-url` and `--clone-host` |
+| Config file | TOML; see [precedence](configuration/config-file.md#precedence) for how it combines with the command line |
+| Monitoring | JSON report, Prometheus textfile metrics, webhook, run history |
+| Safety | `--dry-run` writes nothing; OS file locks (no stale locks); atomic writes; atomic clones |
 | Interactive TUI | Full-screen terminal interface with live progress (`--tui`) |
-| Docker | Multi-stage Alpine image |
+| Containers | Alpine-based multi-arch image, Compose profiles, Unraid template |
+
+## What It Does Not Back Up
+
+- **Discussions and Projects**: GitHub's REST API has no endpoints for them
+  (`--discussions` and `--projects` are accepted but do nothing).
+- Actions secrets and variables, code-scanning and Dependabot alerts, rulesets,
+  issue attachments, commit comments and statuses.
+- **Git LFS objects** unless you pass `--lfs` (requires `git-lfs`).
+- Repository **clones are not uploaded to S3**, only the JSON metadata.
+- It cannot see what the token cannot see: other users' private data, or
+  categories the token lacks permission for (a 403/404 is skipped with an `INFO`
+  line and is not counted as a failure).
+- Pull requests, comments and reactions cannot be restored; `--restore` handles
+  labels, milestones and issues only.
+
+See [What Is Not Restored, or Not Backed Up](restore.md#what-is-not-restored-or-not-backed-up).
 
 ## Design Principles
 
-- **No OpenSSL, no reqwest, no AWS SDK** — TLS via `rustls`, HTTP via `hyper`
-- **`unsafe` is restricted to a single FFI call** (`kill(2)` for stale-lock detection); the workspace denies `unsafe_op_in_unsafe_fn`
-- **Trait-based design** — `Storage`, `GitRunner`, and `BackupClient` traits enable unit tests without network or filesystem
-- **RAII credential cleanup** — `GIT_ASKPASS` scripts are removed even on panic
-- **Rate-limit aware** — automatic backoff on GitHub API rate limits
-- **Pure-Rust SigV4** — AWS Signature V4 built from `sha2` + `hmac`
+- **No OpenSSL, no reqwest, no AWS SDK**: TLS via `rustls`, HTTP via `hyper`.
+- **No `unsafe` in the workspace's own source.**
+- **Trait-based**: `BackupClient`, `Storage` and `GitRunner` make the engine
+  testable without network or filesystem.
+- **Credentials stay out of argument lists, URLs and files**: git receives the
+  token through an environment variable and a host-scoped credential helper.
+- **Rate-limit aware**: rate-limit responses are waited out and retried.
+- **A backup that is incomplete says so**: see
+  [Monitoring](monitoring.md).
 
 ## Quick Links
 

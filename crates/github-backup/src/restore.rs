@@ -25,13 +25,21 @@
 //! `pull_request` field) are **skipped** — their content lives in the PR
 //! itself and cannot be meaningfully re-created via the issues API.
 //!
-//! # Non-destructive
+//! # Non-destructive and repeatable
 //!
 //! The restore operation is **additive only**.  It never deletes or modifies
-//! existing labels, milestones, or issues in the target.  If a resource
-//! already exists (HTTP 422 "already exists"), it is silently skipped.
+//! existing labels, milestones, or issues in the target.  A label or milestone
+//! that already exists (HTTP 422) is skipped.  Every restored issue carries a
+//! hidden marker naming its source (`octocat/repo#12`); a repeated restore
+//! finds the markers in the target and skips those issues, so running it twice
+//! does not duplicate anything.  The target repositories must already exist —
+//! restore does not create repositories.
 //!
 //! # Usage
+//!
+//! `--restore` is a mode of its own: it reads the **local backup** and does not
+//! contact the source account, so it works even if that account or repository
+//! has been deleted.
 //!
 //! ```text
 //! github-backup octocat --token ghp_xxx --output /backup \
@@ -62,10 +70,18 @@ pub struct RestoreStats {
     pub milestones_errored: usize,
     /// Issues successfully created.
     pub issues_created: usize,
-    /// Issues skipped (pull requests embedded in the issues list).
+    /// Issues skipped (pull requests, or already restored by an earlier run).
     pub issues_skipped: usize,
     /// Issues that failed with an unexpected error.
     pub issues_errored: usize,
+}
+
+impl RestoreStats {
+    /// Total number of resources that could not be restored.
+    #[must_use]
+    pub fn errored(&self) -> usize {
+        self.labels_errored + self.milestones_errored + self.issues_errored
+    }
 }
 
 impl std::fmt::Display for RestoreStats {
@@ -74,7 +90,7 @@ impl std::fmt::Display for RestoreStats {
             f,
             "labels: {} created, {} skipped, {} errored | \
              milestones: {} created, {} skipped, {} errored | \
-             issues: {} created, {} skipped (PRs), {} errored",
+             issues: {} created, {} skipped (PRs or already restored), {} errored",
             self.labels_created,
             self.labels_skipped,
             self.labels_errored,
@@ -88,6 +104,43 @@ impl std::fmt::Display for RestoreStats {
     }
 }
 
+/// Prefix of the hidden marker appended to every restored issue.
+const MARKER_PREFIX: &str = "<!-- github-backup-restore:";
+
+/// The hidden marker identifying the source of a restored issue.
+fn marker(source_owner: &str, repo: &str, number: u64) -> String {
+    format!("{MARKER_PREFIX}{source_owner}/{repo}#{number} -->")
+}
+
+/// The body a restored issue gets: the original text, then a visible note on
+/// where it came from (author and date are lost otherwise), then the marker.
+fn restored_body(issue: &Issue, source_owner: &str, repo: &str) -> String {
+    let original = issue.body.as_deref().unwrap_or("").trim_end();
+    format!(
+        "{original}\n\n---\n_Restored by github-backup from {source_owner}/{repo}#{number} \
+         (opened by @{author} on {created})._\n{marker}",
+        number = issue.number,
+        author = issue.user.as_ref().map_or("ghost", |u| u.login.as_str()),
+        created = issue.created_at,
+        marker = marker(source_owner, repo, issue.number),
+    )
+}
+
+/// Every marker found in `bodies`.
+fn markers_in<'a>(bodies: impl Iterator<Item = &'a str>) -> std::collections::HashSet<String> {
+    let mut found = std::collections::HashSet::new();
+    for body in bodies {
+        let mut rest = body;
+        while let Some(start) = rest.find(MARKER_PREFIX) {
+            let tail = &rest[start..];
+            let Some(end) = tail.find("-->") else { break };
+            found.insert(tail[..end + 3].to_string());
+            rest = &tail[end + 3..];
+        }
+    }
+    found
+}
+
 /// Runs the restore operation.
 ///
 /// Reads backed-up JSON from the `source_owner` backup directory and recreates
@@ -99,15 +152,15 @@ impl std::fmt::Display for RestoreStats {
 /// # Errors
 ///
 /// Returns a string error if the backup directory cannot be read.  Per-repo
-/// or per-resource errors are logged as warnings and counted in
-/// [`RestoreStats`] rather than aborting the restore.
+/// or per-resource errors are logged as warnings and counted in the returned
+/// [`RestoreStats`] (see [`RestoreStats::errored`]) rather than aborting.
 pub async fn run_restore(
     client: &GitHubClient,
     output: &OutputConfig,
     source_owner: &str,
     target_org: &str,
     dry_run: bool,
-) -> Result<(), String> {
+) -> Result<RestoreStats, String> {
     if dry_run {
         info!(
             source_owner,
@@ -126,7 +179,10 @@ pub async fn run_restore(
             dir = %repos_meta_dir.display(),
             "no repos metadata directory found; nothing to restore"
         );
-        return Ok(());
+        return Err(format!(
+            "no backup of '{source_owner}' found under {}: nothing to restore",
+            repos_meta_dir.display()
+        ));
     }
 
     let repo_entries = std::fs::read_dir(&repos_meta_dir)
@@ -144,7 +200,15 @@ pub async fn run_restore(
         }
 
         let meta_dir = entry.path();
-        let stats = restore_repo(client, &meta_dir, target_org, &repo_name, dry_run).await;
+        let stats = restore_repo(
+            client,
+            &meta_dir,
+            source_owner,
+            target_org,
+            &repo_name,
+            dry_run,
+        )
+        .await;
 
         total.labels_created += stats.labels_created;
         total.labels_skipped += stats.labels_skipped;
@@ -158,7 +222,7 @@ pub async fn run_restore(
     }
 
     info!(%total, "restore complete");
-    Ok(())
+    Ok(total)
 }
 
 /// Restores labels, milestones, and issues for a single repository.
@@ -168,6 +232,7 @@ pub async fn run_restore(
 async fn restore_repo(
     client: &GitHubClient,
     meta_dir: &Path,
+    source_owner: &str,
     target_org: &str,
     repo_name: &str,
     dry_run: bool,
@@ -287,6 +352,7 @@ async fn restore_repo(
     if issues_path.exists() {
         match load_json::<Vec<Issue>>(&issues_path) {
             Ok(issues) => {
+                let mut continue_to_end = false;
                 let real_issues: Vec<&Issue> =
                     issues.iter().filter(|i| !i.is_pull_request()).collect();
                 info!(
@@ -297,7 +363,37 @@ async fn restore_repo(
                     "restoring issues"
                 );
                 stats.issues_skipped += issues.len() - real_issues.len();
+
+                // Issues restored by an earlier run carry a marker; skip them.
+                let already: std::collections::HashSet<String> = if dry_run {
+                    Default::default()
+                } else {
+                    match client.list_issues(target_org, repo_name, None).await {
+                        Ok(page) => {
+                            let items = page.into_items();
+                            markers_in(items.iter().filter_map(|i| i.typed().body.as_deref()))
+                        }
+                        Err(e) => {
+                            warn!(
+                                repo = %repo_name,
+                                error = %e,
+                                "cannot list issues in the target repository (does it exist? \
+                                 restore does not create repositories); skipping its issues"
+                            );
+                            stats.issues_errored += real_issues.len();
+                            continue_to_end = true;
+                            Default::default()
+                        }
+                    }
+                };
                 for issue in real_issues {
+                    if continue_to_end {
+                        break;
+                    }
+                    if already.contains(&marker(source_owner, repo_name, issue.number)) {
+                        stats.issues_skipped += 1;
+                        continue;
+                    }
                     if dry_run {
                         info!(
                             repo = %repo_name,
@@ -315,7 +411,7 @@ async fn restore_repo(
                             target_org,
                             repo_name,
                             &issue.title,
-                            issue.body.as_deref(),
+                            Some(&restored_body(issue, source_owner, repo_name)),
                             &label_names,
                         )
                         .await
@@ -352,6 +448,54 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+/// Prints a restore warning banner and, when interactive, asks for explicit
+/// confirmation.
+///
+/// Returns `true` if the user confirmed.  Confirmation can come from any of:
+/// - The `--restore-yes` CLI flag.
+/// - The `GITHUB_BACKUP_RESTORE_YES=1` environment variable (handy for CI
+///   pipelines where adding a flag is awkward).
+/// - Typing `yes` on a TTY.
+///
+/// Returns `false` if the user declined, stdin is not a TTY, or any of the
+/// above failed.  The non-TTY error message explicitly tells the user *both*
+/// escape hatches so they don't have to dig through `--help`.
+pub(crate) fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
+    if restore_yes {
+        return true;
+    }
+    if std::env::var("GITHUB_BACKUP_RESTORE_YES").as_deref() == Ok("1") {
+        info!("GITHUB_BACKUP_RESTORE_YES=1 — proceeding with restore");
+        return true;
+    }
+
+    eprintln!();
+    eprintln!("╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║         WARNING: RESTORE WILL MODIFY GITHUB DATA            ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════╝");
+    eprintln!("  Target : {target_org}");
+    eprintln!("  This will CREATE labels, milestones, and issues in the target");
+    eprintln!("  organisation.  This action cannot be automatically undone.");
+    eprintln!();
+
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        eprintln!("  stdin is not a TTY — to confirm non-interactively, either:");
+        eprintln!("    • re-run with --restore-yes, or");
+        eprintln!("    • export GITHUB_BACKUP_RESTORE_YES=1");
+        eprintln!();
+        return false;
+    }
+
+    eprint!("  Type 'yes' to continue: ");
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    eprintln!();
+    input.trim() == "yes"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,7 +519,7 @@ mod tests {
         assert!(s.contains("1 errored"));
         assert!(s.contains("milestones: 3 created"));
         assert!(s.contains("issues: 10 created"));
-        assert!(s.contains("4 skipped (PRs)"));
+        assert!(s.contains("4 skipped (PRs or already restored)"));
     }
 
     #[test]
@@ -472,7 +616,15 @@ mod tests {
         let cred = Credential::Token("ghp_test".to_string());
         let client = GitHubClient::new(cred).expect("construct client");
 
-        let stats = restore_repo(&client, meta_dir, "target-org", "my-repo", true).await;
+        let stats = restore_repo(
+            &client,
+            meta_dir,
+            "source-owner",
+            "target-org",
+            "my-repo",
+            true,
+        )
+        .await;
 
         // In dry-run: every label and milestone is "created" (logged, not sent).
         assert_eq!(stats.labels_created, 2, "dry-run should count both labels");
@@ -487,5 +639,56 @@ mod tests {
         );
         assert_eq!(stats.issues_skipped, 1, "PR stub should be skipped");
         assert_eq!(stats.issues_errored, 0);
+    }
+
+    fn sample_issue() -> Issue {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "number": 12, "title": "Bug", "body": "It breaks.\n", "state": "open",
+            "user": {"id": 1, "login": "alice", "type": "User", "avatar_url": "", "html_url": ""},
+            "labels": [], "assignees": [], "milestone": null, "comments": 0,
+            "created_at": "2024-03-04T05:06:07Z", "updated_at": "2024-03-04T05:06:07Z",
+            "closed_at": null, "html_url": "https://github.com/o/r/issues/12"
+        }))
+        .expect("issue")
+    }
+
+    #[test]
+    fn a_restored_body_keeps_the_original_text_names_the_source_and_carries_a_marker() {
+        let body = restored_body(&sample_issue(), "octocat", "repo");
+        assert!(body.starts_with("It breaks."), "{body}");
+        assert!(body.contains("octocat/repo#12"), "{body}");
+        assert!(body.contains("@alice"), "{body}");
+        assert!(body.contains("2024-03-04T05:06:07Z"), "{body}");
+        assert!(body.ends_with(&marker("octocat", "repo", 12)), "{body}");
+    }
+
+    /// The idempotency contract: what restore writes, a later restore finds.
+    #[test]
+    fn markers_written_by_restore_are_found_again_and_only_those() {
+        let a = restored_body(&sample_issue(), "octocat", "repo");
+        let found =
+            markers_in([a.as_str(), "unrelated body", "<!-- some other comment -->"].into_iter());
+        assert!(found.contains(&marker("octocat", "repo", 12)));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(!found.contains(&marker("octocat", "repo", 13)));
+        assert!(!found.contains(&marker("other", "repo", 12)));
+    }
+
+    #[test]
+    fn several_markers_in_one_body_and_unterminated_ones_are_handled() {
+        let two = format!("{} text {}", marker("o", "r", 1), marker("o", "r", 2));
+        assert_eq!(markers_in([two.as_str()].into_iter()).len(), 2);
+        assert!(markers_in(["<!-- github-backup-restore:o/r#1"].into_iter()).is_empty());
+    }
+
+    #[test]
+    fn errored_sums_every_resource_kind() {
+        let stats = RestoreStats {
+            labels_errored: 1,
+            milestones_errored: 2,
+            issues_errored: 3,
+            ..Default::default()
+        };
+        assert_eq!(stats.errored(), 6);
     }
 }

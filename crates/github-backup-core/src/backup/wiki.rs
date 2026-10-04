@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use github_backup_types::{config::BackupOptions, Repository};
 
@@ -20,13 +20,14 @@ use crate::{
 /// GitHub wiki URLs follow the pattern
 /// `https://github.com/<owner>/<repo>.wiki.git`. This function attempts to
 /// clone only when the repository has `has_wiki == true`; GitHub will return
-/// a 128 error code when the wiki has no content, which is treated as a
-/// non-fatal warning rather than an error.
+/// `Repository not found` when the wiki has no content, which is skipped
+/// quietly.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::GitFailed`] only for unexpected git failures; a wiki
-/// that exists but has no commits is silently skipped.
+/// Returns the git error for every other failure — rejected credentials, DNS or
+/// TLS problems, ownership errors — so it is reported rather than mistaken for
+/// "no wiki".
 pub async fn backup_wiki(
     repo: &Repository,
     opts: &BackupOptions,
@@ -49,12 +50,25 @@ pub async fn backup_wiki(
     let dest = wikis_dir.join(format!("{}.wiki.git", repo.name));
 
     info!(repo = %repo.full_name, dest = %dest.display(), "cloning wiki");
+    let had_backup = dest.exists();
 
-    match git.mirror_clone(wiki_url, &dest, clone_opts) {
+    match git.mirror_clone(wiki_url, &dest, clone_opts).await {
         Ok(()) => Ok(()),
-        Err(CoreError::GitFailed { code: 128, .. }) => {
-            // Code 128 is returned when the wiki exists but is empty.
-            info!(repo = %repo.full_name, "wiki is empty or has no commits, skipping");
+        // `has_wiki` is true by default, so most repositories answer "Repository
+        // not found" for a wiki nobody created.  That is not a failure — but a
+        // bare exit code 128 is also how git reports rejected credentials, DNS
+        // and ownership errors, which must not be hidden as "no wiki".
+        Err(e) if e.is_remote_missing() => {
+            if had_backup {
+                // The wiki was backed up before and is gone (deleted, or access
+                // revoked).  The earlier copy is kept; say so loudly.
+                warn!(
+                    repo = %repo.full_name,
+                    "wiki no longer exists upstream; keeping the copy from an earlier backup"
+                );
+            } else {
+                info!(repo = %repo.full_name, "repository has no wiki content, skipping");
+            }
             Ok(())
         }
         Err(e) => Err(e),
@@ -87,13 +101,13 @@ mod tests {
             description: None,
             clone_url: "https://github.com/octocat/Hello-World.git".to_string(),
             ssh_url: "git@github.com:octocat/Hello-World.git".to_string(),
-            default_branch: "main".to_string(),
+            default_branch: Some("main".to_string()),
             size: 0,
             has_issues: true,
             has_wiki,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: Some("2024-01-01T00:00:00Z".to_string()),
             pushed_at: None,
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             html_url: "https://github.com/octocat/Hello-World".to_string(),
         }
     }
@@ -168,5 +182,49 @@ mod tests {
         .expect("wiki backup");
 
         assert_eq!(git.recorded_calls().len(), 0);
+    }
+
+    async fn wiki_with(stderr: &str) -> Result<(), CoreError> {
+        use crate::git::spy::SpyFailure;
+        let opts = BackupOptions {
+            wikis: true,
+            ..Default::default()
+        };
+        let git = SpyGitRunner::default().failing_when_url_contains(
+            ".wiki.git",
+            SpyFailure::Git {
+                code: 128,
+                stderr: stderr.to_string(),
+            },
+        );
+        backup_wiki(
+            &make_repo(true),
+            &opts,
+            &PathBuf::from("/backup/git/wikis"),
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_wiki_that_was_never_created_is_not_a_failure() {
+        wiki_with("remote: Repository not found.\nfatal: repository 'https://github.com/o/r.wiki.git/' not found")
+            .await
+            .expect("no wiki is normal");
+    }
+
+    /// Regression: any exit code 128 used to be reported as "empty wiki",
+    /// hiding rejected credentials and network failures.
+    #[tokio::test]
+    async fn exit_128_for_other_reasons_is_still_an_error() {
+        for stderr in [
+            "fatal: Authentication failed for 'https://github.com/o/r.wiki.git/'",
+            "fatal: unable to access 'https://github.com/o/r.wiki.git/': Could not resolve host: github.com",
+            "fatal: detected dubious ownership in repository at '/backup/r.wiki.git'",
+        ] {
+            let err = wiki_with(stderr).await.expect_err(stderr);
+            assert!(matches!(err, CoreError::GitFailed { code: 128, .. }), "{err:?}");
+        }
     }
 }

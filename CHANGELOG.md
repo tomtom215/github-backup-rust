@@ -9,220 +9,267 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (Unraid)
+Changes on `main` since v0.3.2 (2026-04-12).  Nothing here is in a published
+release yet; `github-backup --version` prints `0.3.2` for both until the version
+is bumped.
 
-- **Community Applications template** at `unraid/github-backup.xml`
-  authored against the **Unraid v7.2.x DockerMan schema** and the
-  current (2026) CA submission guidelines.  Surfaces every important
-  option as a WebUI form field: `GITHUB_TOKEN` (masked), output
-  volume, `GITHUB_OWNER`, run-mode dropdown (`--all`, `--doctor`,
-  `--check`, `--list-scopes`, `--verify`, `--tui`,
-  `--print-config-template`), free-form `BACKUP_FLAGS`, GHES URL
-  overrides, OAuth client ID, AES-256-GCM encryption key (also
-  masked), webhook URL, `RUST_LOG`, and `HTTPS_PROXY`.  Advanced
-  fields hidden behind the "Advanced View" toggle.
-- **`docker/entrypoint.sh` wrapper** keeps the existing CLI / Compose
-  / Kubernetes invocation contract (positional argv passed through
-  verbatim) while *also* reconstructing argv from env vars when none
-  are supplied — the workflow Unraid CA uses.  Whitelists
-  `BACKUP_MODE`, rejects shell metacharacters in `BACKUP_FLAGS`, and
-  refuses unknown mode tokens with a clear error.
-- **`unraid/ca_profile.xml`** developer profile picked up by CA so
-  the "by tomtom215" link on the template lands on the project repo.
-- **`unraid/README.md`** walks through installation, first-run
-  diagnostic, scheduled-backup pattern via the User Scripts plugin,
-  restore, verify, local testing, and the CA submission flow.
-- **`unraid/icon.png`** placeholder 256×256 PNG (regeneratable via
-  `unraid/make_icon.py`, stdlib-only).
-- **Dockerfile updated** to install the new entrypoint wrapper and
-  use it (`ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]`).
-  Existing `docker run … github-backup OWNER --all` invocations are
-  unaffected.
+### Breaking changes and upgrade notes
 
-### Added (Docker / Compose)
-
-- **`.dockerignore`** prunes `target/`, `.git/`, `.env`, editor /
-  IDE clutter, and local backups from the build context.  Previously
-  every `docker build` uploaded the entire workspace (often several
-  GiB) to the daemon, making the build slow by minutes.
-- **OCI image labels** baked into the Dockerfile
-  (`org.opencontainers.image.source`, `…title`, `…description`,
-  `…licenses`, `…vendor`, `…base.name`).  Registries, Dependabot, and
-  Renovate use these to link back to the source repository.
-- **Tini as PID 1** in the runtime image so `docker stop` /
-  Kubernetes pod eviction delivers SIGTERM cleanly to the backup
-  process — which writes its checkpoint, releases its lock, and
-  exits with the conventional 143 code instead of being SIGKILLed.
-- **`VOLUME ["/backup"]`** declaration so `docker inspect` shows
-  exactly where output lands; the existing non-root `backup` user
-  (now pinned to UID/GID 1000 for predictable bind-mount semantics)
-  already owns that directory.
-- **`--profile doctor`** Compose service runs the pre-flight check
-  inside the image: confirms git, network, TLS, and the token before
-  the first scheduled cron run.
-- **`--profile tui`** Compose service with `tty: true` +
-  `stdin_open: true` so ratatui renders correctly under Compose.
-- **`--profile verify`** Compose service for SHA-256 manifest checks.
-- **`--profile gitlab`** Compose service for GitLab.com / self-hosted
-  GitLab mirror push (matching the existing `codeberg` profile).
-- **`init: true`** on every backup service as a belt-and-braces
-  injection of Docker's bundled tini in case the image's own tini is
-  bypassed on older Docker versions.
-
-### Changed (Docker / Compose)
-
-- **`config.toml` is no longer auto-mounted** by the default
-  Compose service.  Previously the bind mount `./config.toml` failed
-  on a fresh checkout because the file did not exist.  Mount it
-  explicitly when you need it:
-  `docker compose run --rm -v $PWD/config.toml:/etc/github-backup/config.toml:ro backup --config /etc/github-backup/config.toml`
-- **Every Compose service propagates the full env-var set** —
-  `GITHUB_API_URL`, `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`,
-  `BACKUP_NOTIFY_WEBHOOK`, `BACKUP_ENCRYPT_KEY`,
-  `GITHUB_BACKUP_RESTORE_YES`.  All optional; unset values are
-  forwarded as empty strings which clap ignores.
-- **`compose.example.env` is fully annotated** and documents every
-  variable, including the new restore-confirmation env var, the
-  optional GHES variables, and the AES-256-GCM encryption key.
-- **`DOCKER.md` rewritten** with a profile matrix, a pre-flight
-  workflow, a Kubernetes CronJob example, and `--doctor` /
-  `--check` / `--list-scopes` troubleshooting recipes.
-
-### Changed (binary)
-
-- **`NO_COLOR` now follows the no-color.org spec literally**: the
-  variable must be **set and non-empty** to disable ANSI.  An empty
-  value (a common pattern for declaring "pass through" variables in
-  Dockerfiles and systemd unit files) no longer accidentally
-  suppresses colour.  Affects both `init_tracing` and the
-  banner-rendering helpers.
+- **Exit status `3` is new.**  A run that finishes but could not back up
+  everything now exits `3` (it used to exit `0` and report success).  Scripts and
+  unit files that treated every non-zero status as "could not run" need no change
+  (a systemd unit simply fails); scripts that only checked for `1` should accept
+  `3` as "incomplete".  The other statuses are `0` ok, `1` fatal, `2` usage,
+  `130`/`143` interrupted.
+- **Saved JSON is GitHub's complete response**, with GitHub's key order, instead
+  of a typed subset.  Files are roughly four times larger and now contain
+  properties that were dropped before (reactions, `node_id`, `_links`, review
+  comment anchors, merge commit SHAs, ...).  Pull requests also get
+  `issue_comments/<n>.json` and `issue_events/<n>.json`.
+- **S3 object keys now include the owner**: `<prefix>/<owner>/json/<path>` (they
+  were `<prefix>/<path>`).  The first run after upgrading uploads everything again
+  under the new keys; the old objects are **not** removed (`--s3-delete-stale`
+  only looks under the new `<prefix>/<owner>/json/` root), so delete them yourself
+  once you no longer need them.  Objects are now skipped by SHA-256 digest plus
+  size instead of size alone; an object without a stored digest is uploaded once
+  more.  With `--encrypt-key` the digest is keyed, so changing the key re-uploads
+  everything.
+- **`--mirror-to` pushes branches and tags only** (`git push --prune` with
+  explicit refspecs, no `--mirror`), creates every repository **private** unless
+  `--mirror-public` is given **and** the source is known to be public (a private
+  source is never published), and **refuses to push into an existing repository
+  that it did not create** (unless that repository is empty).  Gitea repositories
+  for an organisation owner are created through the organisation endpoint.
+  Working-tree clones (`--clone-type full`) are not pushed.
+- **Git clones keep what GitHub deleted.** Updates no longer prune: a branch or tag
+  deleted on GitHub stays in the clone (force-pushed branches are still
+  overwritten).  Pass `--prune` (config key `prune`) for the old behaviour.
+  `--no-prune` and the config key `no_prune` are still accepted and ignored; they
+  cannot be combined with `--prune`.  If a deleted branch `foo` is replaced by
+  `foo/bar`, git cannot hold both: that update prunes once, logs a warning and
+  continues.  The TUI's "No Prune" toggle became "Prune deleted refs".
+- **`--restore` is restore-only**: it no longer runs a backup first and works from
+  the local backup.  It asks for confirmation first, skips issues it restored
+  before, and exits `3` when items could not be restored.  Target repositories must
+  exist.
+- **`--keep-last` and `--max-age-days` are deprecated and ignored** (a warning is
+  logged).  They deleted directories by name pattern and could not work with the
+  tool's own layout.  Rotate copies with your backup tool.
+- **`--since` changed meaning.**  Issue and pull request lists are always fetched
+  in full and merged into the stored files; `--since DATE` (now also `YYYY-MM-DD`)
+  is an expert override that is never stored.  v0.3.2 applied the previous run's
+  timestamp automatically and could overwrite `issues.json` with only the changed
+  issues.  `backup_state.json` now holds a watermark per repository; an old file
+  only costs one full fetch.
+- **`--lfs` is now a mirror clone plus `git lfs fetch --all`** (it used to run
+  `git lfs clone`, which created a non-bare checkout named `<repo>.git` whose refs
+  never updated, and it overrode `--clone-type`).  Delete and re-clone existing
+  `--lfs` repositories to get a proper mirror.
+- **Report, metrics, webhook and history gained fields**: see Added.  `success` in
+  the report now means "no failures" (it meant `repos_errored == 0`).
+- **Linux release binaries are static musl builds**; the v0.3.2 x86_64 binary was
+  glibc-linked and needed glibc 2.39 or newer.
 
 ### Added
 
-- **`--doctor` self-diagnostic** runs every prerequisite check (git
-  binary + version, output writability, credential type, network
-  reachability of the configured API host, system TLS roots) and
-  prints a colour-coded pass/fail report. Exit status is `0` when
-  every blocking check passes, `1` otherwise. The fastest way to
-  confirm a fresh install will succeed before scheduling cron / CI.
-- **`--check` configuration-validation mode** is a superset of
-  `--doctor` that additionally echoes the resolved configuration
-  (owner, output, api_url, concurrency, computed OAuth scope set).
-  Performs no backup work and writes no files.
-- **`--list-scopes`** prints exactly which OAuth scopes the current
-  flag set needs, formatted as a copy-paste-able list for
-  https://github.com/settings/tokens/new. Replaces the "guess and
-  iterate" workflow new users typically follow.
-- **Friendly quickstart** is now printed when `github-backup` is run
-  with no arguments at all, in place of the old one-line error.
-  Walks the user through token creation, env export, and a working
-  command line. Detects ANSI / NO_COLOR.
-- **Pre-run plan banner** previews owner, output, concurrency,
-  enabled categories, and — when a backup-history file exists — an
-  ETA based on the last successful run. Skipped under `--quiet` so
-  cron / journald output stays machine-friendly.
-- **End-of-run summary banner** with colour/icon-coded pass/warn/fail
-  status, repo/issue/PR counters, and a formatted elapsed time. When
-  zero repositories were processed, an inline hint suggests checking
-  the OWNER spelling, scope, and category flags.
-- **Inline examples** in `--help` via clap's `after_help`: complete,
-  copy-paste-able invocations for the six most common scenarios
-  (full user backup, TUI, doctor, scopes, check, Codeberg mirror).
-- **`--print-config-template`** (from the previous unreleased entry)
-  remains. The template is unit-tested to parse and to keep flagging
-  every REQUIRED field.
+- `--prune` and `--mirror-public` (and the config keys `prune`, `mirror_public`); see the
+  upgrade notes above for what they change.
+- **Failure isolation and honest reporting.**  Every repository and every category
+  is an isolated step; a failure is recorded (scope, step, message) and the rest of
+  the run continues.  Only credentials rejected (401), an exhausted rate-limit
+  budget, a full disk and cancellation stop a run.  The summary banner, the
+  `--report` JSON (`schema_version`, `finished_at`, `failure_count`, `failures[]`),
+  the Prometheus metrics (`github_backup_failures`, `github_backup_success`,
+  `github_backup_last_run_timestamp_seconds`; `..._last_success_timestamp_seconds`
+  is carried over from the previous file when a run fails), the run history
+  (`failures`, and failed runs are recorded too) and the webhook (`status`
+  `success`/`partial`/`failure`, `failure_count`, `failed[]`) all read the same
+  list.  A run that fails early still writes report, metrics, history and webhook.
+  S3 upload failures, mirror push failures and a manifest that cannot be written
+  count as failures.
+- **Per-repository incremental watermarks** (`backup_state.json`): per-item files
+  (issue and pull request comments, events, commits, reviews) are re-fetched only
+  for items changed since the watermark, which advances only for repositories whose
+  every step succeeded and is trusted only for the categories it was recorded with.
+  **`--full`** ignores watermarks.
+- **`repos.json`** is written (only the repositories the options include, merged
+  with earlier listings) and used by `--diff-with`, which now actually compares
+  repository names.
+- **A user's own private repositories and secret gists** are listed (through
+  `GET /user/repos` and `GET /gists`) when the token belongs to the owner; before
+  they were silently missing.
+- **Lossless JSON** via `Raw<T>`/`Page<T>`; an element the typed model cannot read
+  is written verbatim and logged instead of aborting the list; nullable API fields
+  are modelled as `Option`; golden tests use GitHub's own example payloads.
+- **Release assets are streamed**, verified against the size and `sha256:` digest
+  GitHub reports, written through a `.part` file, and skipped on later runs only
+  when complete; the `Authorization` header is never sent to another origin on a
+  redirect and an HTTPS to HTTP redirect is refused.
+- **`--doctor`, `--check`, `--list-scopes`, `--print-config-template`**.  `--doctor`
+  checks the `git` binary, the output directory, the kind of credential, API
+  reachability (through the real client: API URL validation, proxy, CA bundle) and
+  that GitHub accepts the token (`GET /rate_limit`); it does not check scopes or
+  free space.  `--check` adds the resolved configuration.  `--list-scopes` prints
+  suggested classic scopes (it does not expand `--all`).
+- **Friendly quickstart** when run without arguments, a pre-run plan banner and an
+  end-of-run summary banner (which lists what failed), `--help` examples, actionable
+  hints for common errors, and token-format recognition in `--doctor`.
+- **`GITHUB_BACKUP_RESTORE_YES=1`** as an alternative to `--restore-yes`; restored
+  issues carry the original author and date and a hidden source marker so a repeated
+  restore does not duplicate them.
+- **Proxy support**: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` (hosts,
+  domains, ports, IPs, CIDR blocks); HTTP proxies only.  Shared by the API client,
+  release downloads, the webhook and `--doctor`.  S3 and the mirror APIs do not use
+  a proxy.
+- **S3**: `--s3-session-token` / `AWS_SESSION_TOKEN`, credential validation before
+  the first request, content-digest skipping, retries with back-off and an idle
+  timeout (a request is abandoned only when no data moved for 60 s), a guarded `--s3-delete-stale` (nothing is deleted after a failed
+  run, an unreadable or empty local tree, or a failed upload; only under
+  `<prefix>/<owner>/json/`), and an in-process SigV4-verifying fake S3 server in the
+  tests.
+- **Mirror**: a destination-side marker (`GitHub mirror of <owner>/<repo>`) and
+  per-repository failure reporting.
+- **Checkpoint resume is limited to 6 hours** after an interrupted run's last
+  activity; `--clone-starred` mirrors are refreshed on every pass and earlier
+  failures are retried automatically.
+- **`--all` honours explicit `--clone-starred` and `--action-runs`**; a config
+  file accepts `clone_type = "shallow:3"` (and `{ shallow = 3 }`); a
+  `--clone-type` on the command line beats the config file.
+- **`--decrypt` needs no OWNER.**
+- **Docker, Compose and Unraid**: see Packaging below.
 
 ### Changed
 
-- **GitHub token format is now validated** at the doctor / check
-  level: classic PAT (`ghp_`), fine-grained PAT (`github_pat_`),
-  OAuth (`gho_`), and server-to-server (`ghu_` / `ghs_` / `ghr_`)
-  are recognised explicitly. Unknown-prefix tokens emit a warning
-  but are not rejected (custom GHES installations sometimes use
-  bespoke prefixes).
-- **`git` binary detection runs at doctor-time** with a
-  platform-specific install hint (`brew install git` on macOS,
-  package-manager string on Linux, `winget install Git.Git` on
-  Windows). Saves new users from a several-minutes-in stall.
-- **Error messages now include an actionable hint** when the raw
-  error text matches a well-known failure pattern: 401 (token
-  rejected), 403 (missing scope, with a pointer to `--list-scopes`),
-  404 (wrong target), rate-limit exhaustion, git-missing, network
-  unreachable, TLS, disk-full. Hints are emitted as a second `error!`
-  line tagged `hint:`.
+- **Rate limits** (403 or 429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a
+  rate-limit message) are waited out and retried (up to 6 times, about an hour in
+  total per request, at least a minute and doubling when GitHub gives no hint)
+  instead of being treated as "no access" and skipped; GET requests retry
+  500/502/503/504, dropped connections, timeouts and stalled bodies three times.
+- **Git subprocesses**: a **stall** timeout (600 s without output; was a 600 s
+  wall-clock limit) with `--progress`, no pipe deadlock for large outputs, async
+  runner on the blocking pool, process-group kill on cancellation, `git fetch --all
+  --prune` instead of `git remote update --prune` (pruning has since become opt-in,
+  see above), bare clones update with explicit
+  refspecs (they never advanced before), fresh clones go to a staging directory and
+  are renamed when complete.  Git runs with stdin closed, `GIT_TERMINAL_PROMPT=0`
+  and `LC_ALL=C`.
+- **Cancellation** (`SIGINT`/`SIGTERM`) abandons in-flight API requests (also the
+  repository listing), kills git and releases the lock; exit `130`/`143` within a few seconds, with an exit
+  watchdog behind it.
+- **Locking** is an operating-system lock (`flock`/`LockFileEx`) in the output
+  directory and in `<owner>/json/`, released by the kernel when the process dies; the
+  lock files stay on disk.
+- **`--dry-run` writes nothing**: no lock, state, report, manifest, metrics, history,
+  webhook, S3 upload or mirror push; no git, no owner data and no gists.
+- **Manifest and `--verify`** ignore the history, state, checkpoint and lock files.
+- **`NO_COLOR`** follows no-color.org literally (set and non-empty disables ANSI).
+- **Report and Prometheus files** are written atomically (temporary file and rename);
+  a response body is capped at 16 MiB.
+- **Empty environment variables are treated as unset**, and whitespace around
+  option values is trimmed.
+- **Dependencies** updated to clear five RustSec advisories (rustls, h2, lru,
+  anyhow, crossbeam-epoch).
+- **`main.rs` was split** into focused modules (`run`, `modes`, `setup`, `ui`,
+  `metrics`, `notify`, `errors`, `shutdown`).
+- **TUI**: failures are reported honestly, the terminal is restored on every exit
+  (including a closed terminal), small screens and narrow layouts fit, and a
+  cancelled run shows no misleading counters.
+
+### Fixed
+
+- The CLI exited with a usage error whenever `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `MIRROR_TOKEN` or `GITHUB_OAUTH_CLIENT_ID` existed in the
+  environment, even empty (every Compose, Unraid and Kubernetes launcher); the
+  dependency rules now apply to flags typed on the command line only.
+- Incremental runs lost data: the automatic `--since` overwrote `issues.json` with
+  only the changed issues (see Breaking changes), and a dry run advanced the same
+  state.
+- A killed run could leave a half-initialised clone that later fetches treated as
+  complete; a stale lock from PID reuse blocked runs in containers.
+- `SIGTERM` during a slow call or a long clone could leave the process running until
+  it was killed.
+- Repository names, release tags, asset names and gist ids from the API can no
+  longer place files outside the output tree; an unsafe repository name is a recorded
+  failure.
+- A wiki that vanished upstream keeps its copy and logs a warning instead of
+  failing; "exit 128" is only treated as "no wiki" when git says the repository was
+  not found.
+- Pull requests were missing their conversation comments and events (they share
+  the issue number space).
+- `--discussions` and `--projects` called REST routes that do not exist and logged
+  "feature not enabled" for every repository; they now log one clear warning per run
+  (the flags still back up nothing; GitHub offers Discussions through GraphQL only and
+  Classic Projects are retired).
+- Webhook URLs are logged as `scheme://host` only.
+- Docker and Compose: see Packaging below.
+
+### Removed
+
+- The `GIT_ASKPASS` script and the PID-file lock (and with it the workspace's only
+  `unsafe` block).
+- The effect of `--keep-last` and `--max-age-days` (deprecated, see above).
+- Compose: the bundled `minio/minio` service and the default `config.toml` bind
+  mount.
 
 ### Security
 
-- **Token redaction in error bodies**: any string the binary is
-  about to display via `error!()` is now passed through
-  `redact_secrets()`, which replaces every recognised GitHub token
-  prefix with `<prefix>_<redacted>`. Defence in depth — the rest of
-  the codebase already takes care to keep tokens out of error
-  strings, but a misbehaving proxy that echoes a request URL could
-  in principle still surface a token in `--verbose` output. This
-  scrubber catches the last hop.
+- **Git credentials** travel in an environment variable of the git child plus an
+  inline credential helper bound to the clone URL's origin (after resetting
+  `credential.helper`): never in an argument list, never on disk, never offered to
+  another host, never persisted by a configured helper.  Mirror pushes use the same
+  mechanism.  Commands in an existing repository trust exactly that path through
+  `-c safe.directory=<path>`.
+- Failure messages, logs and reports are scrubbed of tokens and URL credentials.
+- Release-asset downloads never forward the credential across origins.
+- Mirrors are private by default (`--mirror-public` opts public sources in) and never
+  overwrite a repository the tool did not create.
+- S3: keyed (HMAC) content digests for encrypted uploads so the bucket learns no
+  unkeyed hash of the plaintext; delete-stale guarded as described above; credentials
+  validated and kept out of `Debug` output.
+- `github-backup-core` is `#![forbid(unsafe_code)]`.
+- Dependencies updated past five open advisories.
+- **Token redaction** in error output (`<prefix>_<redacted>`), and the credential
+  type's `Debug` output no longer prints the token.
 
-### Added (previous unreleased entry below)
+### Packaging, CI and release
 
-- **`--print-config-template`** flag prints an annotated TOML configuration
-  template to stdout and exits, so new operators can bootstrap a working
-  config without hunting through documentation. The template is bundled
-  with the binary and unit-tested to remain parseable and to document
-  every required field.
-- **`GITHUB_BACKUP_RESTORE_YES=1`** environment variable is now accepted
-  as an alternative to `--restore-yes`, so CI pipelines that cannot easily
-  add flags can still authorise non-interactive restore. Non-interactive
-  mode now prints both escape hatches in its rejection message.
-- **`NO_COLOR` / `CLICOLOR_FORCE`** are now honoured by the log
-  formatter, following the standard observability conventions. The
-  default is "ANSI on TTY, off otherwise" so logs piped to files stay
-  plain UTF-8.
-- **Owner-name validation** rejects path-traversal payloads (`..`, `/`,
-  `\`, NUL, control characters) before any directories are created. The
-  authoritative validation still belongs to GitHub's API — this is a
-  defense-in-depth net for typos and accidental shell-injection.
-- **Up-front writability probe** on the output directory: a tiny marker
-  file is created and removed at lock-acquire time so a read-only mount
-  or permissions issue is surfaced immediately, not after hundreds of
-  API calls.
+- **Release:** Linux binaries are static musl builds made by the Dockerfile's
+  `export` stage (native on x86_64 and aarch64, no `cross`), checked with `file` and
+  `ldd` and run with `--version` before upload; `--locked` everywhere; a pinned
+  toolchain; a tag must point at a commit on `main`.  Each of the five binaries gets a
+  signed GitHub build-provenance attestation (`actions/attest`; the checksum files,
+  `SHA256SUMS.txt` and the container images are not attested; no SBOM).  CI builds and
+  smoke-tests the Docker image; Dependabot and a daily advisory audit were added.
+- **Image:** `alpine:3.23` runtime with `git`, `git-lfs`, `openssh-client`,
+  `ca-certificates` and `tini`; numeric `USER 1000:1000` (uid 99 has a passwd entry
+  for Unraid); `safe.directory` trusts `/backup` only; allow-list `.dockerignore`;
+  `UMASK` support; the dependency layer compiles third-party crates.
+- **Entrypoint wrapper** (`docker/entrypoint.sh`): arguments pass through verbatim;
+  without arguments it builds them from `GITHUB_OWNER`, `BACKUP_MODE` and
+  `BACKUP_FLAGS`; empty optional variables are dropped; shell metacharacters in
+  `BACKUP_FLAGS` and `BACKUP_MODE` are refused (exit 64).
+- **Compose:** profiles `doctor`, `tui`, `verify`, `s3`, `b2`, `minio` (an S3 server
+  you run), `codeberg` and `gitlab`; every service inherits the full base
+  environment (the B2/MinIO profiles previously uploaded unencrypted even with
+  `BACKUP_ENCRYPT_KEY` set); fixed flags live in `entrypoint:` so `run SERVICE OWNER
+  --all` keeps them; empty variables are no longer injected.
+- **Unraid:** Community Applications template with every important option as a form
+  field, runs as 99:100, no `--rm` (so `docker start` works for scheduled runs),
+  corrected `Category` and `Support`, `ca_profile.xml` in the repository root.
+  The template's first entry claimed it matched binary v0.3.2; the run modes
+  `--doctor`, `--check`, `--list-scopes`, `--print-config-template` and the
+  entrypoint wrapper are not in the v0.3.2 image.
 
-### Changed
+### Documentation
 
-- **HTTP retries** now apply exponential back-off **with jitter**
-  (0–999 ms drawn from a deterministic clock-seeded PRNG, no extra
-  dependency) so many concurrent workers do not retry in lock-step on a
-  shared rate-limit bucket.
-- **Back-off caps**: every rate-limit and 5xx retry is now clamped at
-  five minutes (`MAX_BACKOFF_SECS`). A pathological `Retry-After` or
-  `X-RateLimit-Reset` header can no longer pause a backup for hours.
-- **Response body limits**: every JSON API response is capped at 16 MiB
-  (`MAX_RESPONSE_BYTES`). Binary release-asset downloads remain
-  unbounded as before.
-- **OAuth device-flow polling** is deadline-aware: the sleep before
-  each poll is clamped to the remaining session lifetime so an
-  expiry is surfaced immediately as `OAuthExpired` instead of a vague
-  network timeout. A heart-beat log line every 60 s reports
-  `seconds_remaining` so the operator knows the session is still
-  alive.
-- **Report and Prometheus textfile writes are now atomic**
-  (`tmp` + `rename`). The node_exporter textfile collector or any other
-  consumer can no longer scrape a half-written file when the backup
-  process is interrupted mid-write.
-- **Anonymous-credential UX**: when no token / device-auth is supplied
-  but the requested categories require admin/private scope, the run is
-  refused up-front with an actionable error rather than failing
-  silently inside the engine.
-- **Refactored** the GET/POST retry logic in the HTTP client into a
-  single shared `execute_with_retry` helper, removing ~100 lines of
-  duplicated code while preserving the existing semantics.
-
-### Security
-
-- **`Credential::Debug` now redacts the token value** — previously the
-  auto-derived `Debug` impl would have leaked the literal token through
-  any `tracing::debug!("{cred:?}")` call. The `GitHubClient::Debug`
-  impl was already redacting at the wrapping level; this closes the
-  inner gap.
+The documentation was rewritten against the code (every statement checked by
+running the binary or reading the source): CLI reference and exit codes, config
+precedence, incremental runs and the state file, monitoring (report, metrics,
+webhook), restore, S3 and encryption, mirroring, Docker and Unraid, security,
+troubleshooting and the operations runbook.  Duplicated pages were merged (`DOCKER.md`,
+`ARCHITECTURE.md` and `CONTRIBUTING.md` are now the single sources of their book
+pages).  The README and the book describe `main`; a version note says how that
+differs from v0.3.2.
 
 ---
 
@@ -245,7 +292,10 @@ existing configurations and command-line flags are unchanged.
     1. Pre-built binary from the GitHub Releases page (five targets:
        Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64),
        each with a `.sha256` checksum and SLSA Level 2 build
-       provenance attestation.
+       provenance attestation (**correction added later:** this was wrong
+       for the binaries.  The attestation step of the v0.3.2 workflow covered
+       only the `.crate` archives, which were uploaded as workflow artifacts and
+       not published; the v0.3.2 release binaries have no attestation).
     2. Multi-arch container image from GHCR
        (`ghcr.io/tomtom215/github-backup-rust:<tag>`), wired up with
        a Docker Compose file at the repo root that supports local,
@@ -295,7 +345,9 @@ existing configurations and command-line flags are unchanged.
 
 - **SLSA Level 2 build provenance attestations** for every pre-built
   binary produced by the release pipeline, verifiable with
-  `gh attestation verify`.
+  `gh attestation verify` (**correction added later:** not true of the
+  release binaries; see the note under *Changed* above.  Attestation of the
+  binaries starts with the first release after v0.3.2).
 - **Mutation-testing configuration** (`.cargo/mutants.toml`): curated
   exclude list for generated / panic-only / `#[cfg(...)]`-gated code
   paths so `cargo mutants` produces actionable survivors only. A

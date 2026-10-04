@@ -3,13 +3,13 @@
 
 //! Post-processing steps that run after the primary backup completes.
 //!
-//! This module encapsulates the four optional post-processing phases:
+//! This module encapsulates the optional post-processing phases:
 //!
-//! 1. **Prometheus metrics** — write backup counters in text exposition format.
-//! 2. **Diff** — compare the current backup to a previous snapshot directory.
-//! 3. **Mirror push** — push every cloned repository to a Gitea or GitLab instance.
-//! 4. **S3 sync** — upload backup artefacts to an S3-compatible object store.
-//! 5. **Retention** — delete old snapshot directories matching `YYYY-MM-DD*`.
+//! 1. **Diff** — compare the current backup to a previous snapshot directory.
+//! 2. **Mirror push** — push every cloned repository to a Gitea or GitLab instance.
+//! 3. **S3 sync** — upload backup artefacts to an S3-compatible object store.
+//!
+//! (Prometheus metrics live in `metrics`.)
 
 use thiserror::Error;
 use tracing::{info, warn};
@@ -21,7 +21,11 @@ use github_backup_mirror::{
     runner::push_mirrors,
     GitLabClient, GiteaClient,
 };
-use github_backup_s3::{config::S3Config, sync::sync_to_s3, S3Client};
+use github_backup_s3::{
+    config::S3Config,
+    sync::{sync_to_s3, SyncOptions, SyncReport},
+    S3Client,
+};
 use github_backup_types::config::OutputConfig;
 
 use crate::cli::Args;
@@ -35,9 +39,6 @@ pub enum PostProcessError {
     /// An S3 sync operation failed.
     #[error("S3 sync failed: {0}")]
     S3(String),
-    /// The retention policy application failed.
-    #[error("retention policy failed: {0}")]
-    Retention(String),
 }
 
 /// Mirror destination — either a Gitea-compatible host or a GitLab instance.
@@ -67,6 +68,40 @@ pub async fn run_mirror_push_dest(
     }
 }
 
+/// Names of the repositories the backup's `repos.json` lists as public.
+///
+/// Mirrors are created private unless the source is known to be public, so a
+/// missing or unreadable listing means "everything private", never the reverse.
+fn public_repo_names(repos_json: &std::path::Path) -> std::collections::HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(repos_json) else {
+        return Default::default();
+    };
+    let Ok(serde_json::Value::Array(repos)) = serde_json::from_str(&text) else {
+        return Default::default();
+    };
+    repos
+        .iter()
+        .filter(|r| r.get("private").and_then(serde_json::Value::as_bool) == Some(false))
+        .filter_map(|r| r.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Turns the per-repository results of a mirror push into the run's outcome:
+/// any failed repository makes the push an error (the CLI maps it to a
+/// non-zero exit status), with every failure named.
+fn mirror_outcome(stats: &github_backup_mirror::runner::MirrorStats) -> Result<(), String> {
+    if stats.errored == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{} of {} repositories failed to push: {}",
+        stats.errored,
+        stats.errored + stats.pushed,
+        stats.failures.join("; ")
+    ))
+}
+
 /// Pushes repositories to a Gitea-compatible destination.
 async fn run_mirror_push_gitea(
     config: &GiteaConfig,
@@ -82,9 +117,16 @@ async fn run_mirror_push_gitea(
     }
 
     let description_prefix = format!("GitHub mirror of {owner}/");
-    let stats = push_mirrors(&client, config, &repos_dir, &description_prefix)
-        .await
-        .map_err(|e| e.to_string())?;
+    let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
+    let stats = push_mirrors(
+        &client,
+        config,
+        &repos_dir,
+        &description_prefix,
+        &public_repos,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     info!(
         pushed = stats.pushed,
@@ -92,14 +134,7 @@ async fn run_mirror_push_gitea(
         "Gitea mirror push complete"
     );
 
-    if stats.errored > 0 {
-        warn!(
-            errored = stats.errored,
-            "some repositories failed to push to Gitea mirror"
-        );
-    }
-
-    Ok(())
+    mirror_outcome(&stats)
 }
 
 /// Pushes repositories to a GitLab destination.
@@ -117,9 +152,16 @@ async fn run_mirror_push_gitlab(
     }
 
     let description_prefix = format!("GitHub mirror of {owner}/");
-    let stats = push_mirrors_gitlab(&client, config, &repos_dir, &description_prefix)
-        .await
-        .map_err(|e| e.to_string())?;
+    let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
+    let stats = push_mirrors_gitlab(
+        &client,
+        config,
+        &repos_dir,
+        &description_prefix,
+        &public_repos,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     info!(
         pushed = stats.pushed,
@@ -127,26 +169,101 @@ async fn run_mirror_push_gitlab(
         "GitLab mirror push complete"
     );
 
-    if stats.errored > 0 {
-        warn!(
-            errored = stats.errored,
-            "some repositories failed to push to GitLab mirror"
-        );
-    }
-
-    Ok(())
+    mirror_outcome(&stats)
 }
 
-/// Syncs the local backup JSON metadata (and optionally binary assets) to S3.
+/// Options for [`run_s3_sync_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct S3RunOptions<'a> {
+    /// Also upload release assets.
+    pub include_assets: bool,
+    /// Encrypt every file with this AES-256 key.
+    pub encrypt_key: Option<&'a [u8; 32]>,
+    /// Delete remote objects whose local file is gone (`--s3-delete-stale`).
+    pub delete_stale: bool,
+    /// Master switch for deletion.  Pass `false` when the backup run had
+    /// failures: an incomplete local copy must never remove a good remote one.
+    pub allow_delete: bool,
+    /// `--dry-run`: list what would be uploaded or deleted, write nothing.
+    pub dry_run: bool,
+}
+
+/// Syncs the local JSON metadata (and optionally release assets) to S3 and
+/// returns the full [`SyncReport`].
 ///
-/// When `encrypt_key` is `Some`, every file is encrypted with AES-256-GCM
-/// before upload.  The key must be a 32-byte slice derived from the
-/// `--encrypt-key` hex string.
+/// Objects are stored as `<prefix>/<owner>/json/<relative path>`.  Unchanged
+/// files are detected by a content digest stored with each object.
 ///
 /// # Errors
 ///
-/// Returns [`PostProcessError::S3`] if the S3 client fails to initialise or a
-/// sync error is encountered.
+/// Returns [`PostProcessError::S3`] if the settings are unusable (for
+/// example missing credentials), the client cannot be created, **or any
+/// upload, listing or deletion failed**.  The message names the failed keys,
+/// the HTTP status, the S3 error code and a hint.
+pub async fn run_s3_sync_with(
+    config: &S3Config,
+    output: &OutputConfig,
+    owner: &str,
+    options: &S3RunOptions<'_>,
+) -> Result<SyncReport, PostProcessError> {
+    check_s3_config(config).map_err(PostProcessError::S3)?;
+    let client =
+        S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(s3_error_text(&e)))?;
+    let backup_root = output.owner_json_dir(owner);
+
+    if !backup_root.exists() {
+        warn!(dir = %backup_root.display(), "backup directory does not exist; skipping S3 sync");
+        return Ok(SyncReport::default());
+    }
+
+    info!("S3 sync uploads the JSON metadata (and release assets with --s3-include-assets); repository clones are not uploaded");
+    let key_root = format!("{owner}/json");
+    let sync_options = SyncOptions::new(&backup_root, &key_root)
+        .include_binary_assets(options.include_assets)
+        .encrypt_key(options.encrypt_key)
+        .delete_stale(options.delete_stale)
+        .allow_delete(options.allow_delete)
+        .dry_run(options.dry_run);
+    let report = sync_to_s3(&client, config, &sync_options)
+        .await
+        .map_err(|e| PostProcessError::S3(s3_error_text(&e)))?;
+
+    if report.dry_run {
+        info!(
+            would_upload = report.would_upload.len(),
+            skipped = report.stats.skipped,
+            would_delete = report.would_delete.len(),
+            "S3 dry run complete (nothing was written)"
+        );
+    } else {
+        info!(
+            uploaded = report.stats.uploaded,
+            skipped = report.stats.skipped,
+            errored = report.stats.errored,
+            deleted = report.stats.deleted,
+            "S3 sync complete"
+        );
+    }
+    if let Some(reason) = &report.deletion_skipped {
+        warn!(reason = %reason, "--s3-delete-stale did nothing");
+    }
+    if report.is_success() {
+        Ok(report)
+    } else {
+        Err(PostProcessError::S3(summarize_failures(&report)))
+    }
+}
+
+/// Syncs the local backup JSON metadata (and optionally release assets) to S3.
+///
+/// Convenience form of [`run_s3_sync_with`] for a real (non-dry) run with
+/// deletion allowed.
+///
+/// # Errors
+///
+/// Returns [`PostProcessError::S3`] on any failure, including a single failed
+/// upload or deletion.
+#[cfg(test)]
 pub async fn run_s3_sync(
     config: &S3Config,
     output: &OutputConfig,
@@ -155,41 +272,57 @@ pub async fn run_s3_sync(
     encrypt_key: Option<&[u8; 32]>,
     delete_stale: bool,
 ) -> Result<(), PostProcessError> {
-    let client = S3Client::new(config.clone()).map_err(|e| PostProcessError::S3(e.to_string()))?;
-    let backup_root = output.owner_json_dir(owner);
-
-    if !backup_root.exists() {
-        warn!(dir = %backup_root.display(), "backup directory does not exist; skipping S3 sync");
-        return Ok(());
-    }
-
-    let stats = sync_to_s3(
-        &client,
+    run_s3_sync_with(
         config,
-        &backup_root,
-        include_assets,
-        encrypt_key,
-        delete_stale,
+        output,
+        owner,
+        &S3RunOptions {
+            include_assets,
+            encrypt_key,
+            delete_stale,
+            allow_delete: true,
+            dry_run: false,
+        },
     )
     .await
-    .map_err(|e| PostProcessError::S3(e.to_string()))?;
+    .map(drop)
+}
 
-    info!(
-        uploaded = stats.uploaded,
-        skipped = stats.skipped,
-        errored = stats.errored,
-        deleted = stats.deleted,
-        "S3 sync complete"
-    );
-
-    if stats.errored > 0 {
-        warn!(errored = stats.errored, "some files failed to upload to S3");
+/// Renders an [`S3Error`](github_backup_s3::S3Error) with its hint.
+fn s3_error_text(error: &github_backup_s3::S3Error) -> String {
+    match error.hint() {
+        Some(hint) => format!("{error} (hint: {hint})"),
+        None => error.to_string(),
     }
-    if stats.deleted > 0 {
-        info!(deleted = stats.deleted, "stale S3 objects removed");
-    }
+}
 
-    Ok(())
+/// One-paragraph description of everything that failed in `report`.
+fn summarize_failures(report: &SyncReport) -> String {
+    const SHOWN: usize = 5;
+    let mut text = match &report.aborted {
+        Some(reason) => format!(
+            "aborted: {reason}; {} file(s) were not attempted",
+            report.not_attempted
+        ),
+        None => format!(
+            "{} operation(s) failed ({})",
+            report.failures.len(),
+            report.stats
+        ),
+    };
+    for failure in report.failures.iter().take(SHOWN) {
+        text.push_str(&format!("; {failure}"));
+    }
+    if report.failures.len() > SHOWN {
+        text.push_str(&format!("; and {} more", report.failures.len() - SHOWN));
+    }
+    text
+}
+
+/// Whether every mirror is forced private: unless `--mirror-public` was given,
+/// and always when `--mirror-private` was (a config file may set both).
+fn mirror_forced_private(args: &Args) -> bool {
+    args.mirror_private || !args.mirror_public
 }
 
 /// Builds a [`MirrorDest`] from CLI args, or returns `None` if no mirror
@@ -208,38 +341,74 @@ pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
             base_url,
             token,
             namespace: owner,
-            private: args.mirror_private,
+            private: mirror_forced_private(args),
         })),
         _ => Some(MirrorDest::Gitea(GiteaConfig {
             base_url,
             token,
             owner,
-            private: args.mirror_private,
+            private: mirror_forced_private(args),
         })),
     }
 }
 
 /// Builds an [`S3Config`] from CLI args, or returns `None` if no S3 bucket
 /// is configured.
+///
+/// Blank values (an empty `AWS_SESSION_TOKEN` forwarded by a container
+/// launcher, for instance) count as unset.  Missing credentials are *not*
+/// rejected here; [`check_s3_config`] (called by [`run_s3_sync_with`]) does
+/// that with an actionable message.
 #[must_use]
 pub fn build_s3_config(args: &Args) -> Option<S3Config> {
     let bucket = args.s3_bucket.clone()?;
     let region = args
         .s3_region
         .clone()
+        .filter(|r| !r.trim().is_empty())
         .unwrap_or_else(|| "us-east-1".to_string());
     let prefix = args.s3_prefix.clone().unwrap_or_default();
     let access_key_id = args.s3_access_key.clone().unwrap_or_default();
     let secret_access_key = args.s3_secret_key.clone().unwrap_or_default();
+    let session_token = args
+        .s3_session_token
+        .clone()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
 
     Some(S3Config {
         bucket,
         region,
         prefix,
-        endpoint: args.s3_endpoint.clone(),
+        endpoint: args.s3_endpoint.clone().filter(|e| !e.trim().is_empty()),
         access_key_id,
         secret_access_key,
+        session_token,
     })
+}
+
+/// Validates an [`S3Config`] before any request is made.
+///
+/// # Errors
+///
+/// Returns a message that says which setting is missing or malformed and how
+/// to supply it.
+pub fn check_s3_config(config: &S3Config) -> Result<(), String> {
+    let missing_key = config.access_key_id.trim().is_empty();
+    let missing_secret = config.secret_access_key.trim().is_empty();
+    if missing_key || missing_secret {
+        let what = match (missing_key, missing_secret) {
+            (true, true) => "an access key id and a secret access key",
+            (true, false) => "an access key id",
+            _ => "a secret access key",
+        };
+        return Err(format!(
+            "--s3-bucket is set but {what} is missing; provide AWS_ACCESS_KEY_ID and \
+             AWS_SECRET_ACCESS_KEY (environment variables are safer than flags), or \
+             --s3-access-key / --s3-secret-key, or s3_access_key / s3_secret_key in the config file"
+        ));
+    }
+    config.validate().map_err(|e| s3_error_text(&e))
 }
 
 /// Decodes a hex-encoded 32-byte AES-256 key from the `--encrypt-key` string.
@@ -247,9 +416,10 @@ pub fn build_s3_config(args: &Args) -> Option<S3Config> {
 /// Returns `None` if no key is set, or `Err` if the string is not exactly
 /// 64 hex characters that decode to 32 bytes.
 ///
-/// The returned key bytes are wrapped in [`Zeroizing`] so that they are
-/// securely erased from memory when dropped, preventing the key from
-/// lingering in process memory.
+/// The returned key bytes are wrapped in [`Zeroizing`], so that buffer is
+/// overwritten when dropped.  This does not reach copies the process cannot
+/// control: the hex string held by the argument parser, the environment and
+/// the command line.  Error messages never contain any character of the key.
 ///
 /// # Errors
 ///
@@ -260,105 +430,33 @@ pub fn decode_encrypt_key(hex_key: Option<&str>) -> Result<Option<Zeroizing<[u8;
     };
     if hex.len() != 64 {
         return Err(format!(
-            "--encrypt-key must be exactly 64 hex characters (32 bytes); got {} chars",
+            "--encrypt-key must be exactly 64 hex characters (32 bytes); got {} bytes",
             hex.len()
         ));
     }
-    let mut key = Zeroizing::new([0u8; 32]);
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let byte_str = std::str::from_utf8(chunk)
-            .map_err(|_| "--encrypt-key contains non-UTF-8 characters".to_string())?;
-        key[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|_| format!("--encrypt-key contains non-hex character in '{byte_str}'"))?;
-    }
-    Ok(Some(key))
-}
-
-/// Writes Prometheus-format metrics to `path`.
-///
-/// # Errors
-///
-/// Returns a string error on directory creation or file write failure.
-pub fn write_prometheus_metrics(
-    path: &std::path::Path,
-    owner: &str,
-    stats: &github_backup_core::BackupStats,
-    started_at_unix: u64,
-) -> Result<(), String> {
-    let mut out = String::new();
-    let label = format!("owner=\"{owner}\"");
-
-    out.push_str(&format!(
-        "# HELP github_backup_repos_backed_up Number of repositories backed up\n\
-         # TYPE github_backup_repos_backed_up gauge\n\
-         github_backup_repos_backed_up{{{label}}} {}\n",
-        stats.repos_backed_up()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_repos_discovered Number of repositories discovered\n\
-         # TYPE github_backup_repos_discovered gauge\n\
-         github_backup_repos_discovered{{{label}}} {}\n",
-        stats.repos_discovered()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_repos_errored Repositories with backup errors\n\
-         # TYPE github_backup_repos_errored gauge\n\
-         github_backup_repos_errored{{{label}}} {}\n",
-        stats.repos_errored()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_issues_fetched Total issues fetched\n\
-         # TYPE github_backup_issues_fetched counter\n\
-         github_backup_issues_fetched{{{label}}} {}\n",
-        stats.issues_fetched()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_prs_fetched Total pull requests fetched\n\
-         # TYPE github_backup_prs_fetched counter\n\
-         github_backup_prs_fetched{{{label}}} {}\n",
-        stats.prs_fetched()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_duration_seconds Duration of the last backup run in seconds\n\
-         # TYPE github_backup_duration_seconds gauge\n\
-         github_backup_duration_seconds{{{label}}} {:.3}\n",
-        stats.elapsed_secs()
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_last_success_timestamp_seconds Unix timestamp of the last successful backup start\n\
-         # TYPE github_backup_last_success_timestamp_seconds gauge\n\
-         github_backup_last_success_timestamp_seconds{{{label}}} {started_at_unix}\n"
-    ));
-    out.push_str(&format!(
-        "# HELP github_backup_success Whether the last backup succeeded (1 = success, 0 = failure)\n\
-         # TYPE github_backup_success gauge\n\
-         github_backup_success{{{label}}} {}\n",
-        if stats.repos_errored() == 0 { 1 } else { 0 }
-    ));
-
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
         }
     }
-    // Atomic rename: node_exporter's textfile collector polls this path
-    // every ~15 s; we must never expose a half-written file or the scrape
-    // will fail with a "key without value" error.
-    write_textfile_atomic(path, out.as_bytes())
-}
-
-/// Writes `bytes` to `path` via a sibling `*.tmp` + rename.  See the comment
-/// in [`write_prometheus_metrics`] for rationale.
-fn write_textfile_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp")),
-        None => path.with_extension("tmp"),
-    };
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write metrics tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename metrics tmp: {e}")
-    })
+    let mut key = Zeroizing::new([0u8; 32]);
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let (hi, lo) = (nibble(pair[0]), nibble(pair[1]));
+        match (hi, lo) {
+            (Some(hi), Some(lo)) => key[i] = hi * 16 + lo,
+            _ => {
+                return Err(format!(
+                    "--encrypt-key must contain only the hex digits 0-9 and a-f \
+                     (a different character was found near position {})",
+                    i * 2 + 1
+                ))
+            }
+        }
+    }
+    Ok(Some(key))
 }
 
 /// Compares two backup JSON directories and returns a human-readable summary.
@@ -422,91 +520,99 @@ pub fn read_repo_names(path: &std::path::Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Applies the retention policy by deleting old snapshot directories.
-///
-/// Snapshots are detected as date-stamped directories matching `YYYY-MM-DD*`
-/// directly under `output_root`.  Both `keep_last` and `max_age_days` can be
-/// combined; whichever deletes more snapshots wins.
-///
-/// # Errors
-///
-/// Returns [`PostProcessError::Retention`] if the output directory cannot be
-/// read or a snapshot directory cannot be deleted.
-pub fn apply_retention(
-    output_root: &std::path::Path,
-    keep_last: Option<usize>,
-    max_age_days: Option<u64>,
-) -> Result<(), PostProcessError> {
-    let entries = std::fs::read_dir(output_root)
-        .map_err(|e| PostProcessError::Retention(format!("read output dir: {e}")))?;
-
-    let mut snapshots: Vec<std::path::PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            // Match YYYY-MM-DD prefix
-            if name.len() >= 10 && name.as_bytes()[4] == b'-' && name.as_bytes()[7] == b'-' {
-                Some(e.path())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    snapshots.sort();
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut to_delete: std::collections::HashSet<std::path::PathBuf> = Default::default();
-
-    if let Some(keep) = keep_last {
-        if snapshots.len() > keep {
-            let delete_count = snapshots.len() - keep;
-            for path in snapshots.iter().take(delete_count) {
-                to_delete.insert(path.clone());
-            }
-        }
-    }
-
-    if let Some(max_age) = max_age_days {
-        let cutoff_secs = now_secs.saturating_sub(max_age * 86_400);
-        for path in &snapshots {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if let Ok(modified) = meta.modified() {
-                    let mod_secs = modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(u64::MAX);
-                    if mod_secs < cutoff_secs {
-                        to_delete.insert(path.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    for path in &to_delete {
-        info!(path = %path.display(), "applying retention: deleting old snapshot");
-        std::fs::remove_dir_all(path).map_err(|e| {
-            PostProcessError::Retention(format!("delete snapshot {}: {e}", path.display()))
-        })?;
-    }
-
-    if !to_delete.is_empty() {
-        info!(deleted = to_delete.len(), "retention policy applied");
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn forced_private(extra: &[&str]) -> bool {
+        let mut argv = vec![
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--mirror-to",
+            "https://codeberg.example",
+        ];
+        argv.extend(extra);
+        let args = crate::cli::test_support::parse(&argv);
+        match build_mirror_dest(&args).expect("a destination") {
+            MirrorDest::Gitea(c) => c.private,
+            MirrorDest::GitLab(c) => c.private,
+        }
+    }
+
+    /// Mirrors are private unless `--mirror-public` is given; and even then the
+    /// runner only publishes repositories known to be public (`wants_private`).
+    #[test]
+    fn mirrors_are_forced_private_unless_mirror_public_is_given() {
+        assert!(forced_private(&[]), "default");
+        assert!(forced_private(&["--mirror-private"]), "explicit");
+        assert!(!forced_private(&["--mirror-public"]), "opt-in");
+    }
+
+    #[test]
+    fn mirror_public_and_mirror_private_cannot_be_combined_on_the_command_line() {
+        assert!(crate::cli::test_support::try_parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-public",
+            "--mirror-private",
+        ])
+        .is_err());
+    }
+
+    /// A config file that (wrongly) sets both resolves to private.
+    #[test]
+    fn a_config_that_sets_both_means_private() {
+        let mut args = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+        ]);
+        let cfg = github_backup_types::config::ConfigFile::from_toml_str(
+            "mirror_public = true\nmirror_private = true\n",
+        )
+        .expect("parses");
+        args.merge_config(&cfg);
+        assert!(build_mirror_dest(&args).is_some());
+        assert!(mirror_forced_private(&args), "private wins");
+    }
+
+    /// The command line beats the file: `--mirror-private` ignores
+    /// `mirror_public = true`, and `--mirror-public` ignores `mirror_private`.
+    #[test]
+    fn the_command_line_beats_the_config_file_for_mirror_visibility() {
+        let cfg = github_backup_types::config::ConfigFile::from_toml_str(
+            "mirror_public = true\nmirror_private = true\n",
+        )
+        .expect("parses");
+        let mut private = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-private",
+        ]);
+        private.merge_config(&cfg);
+        assert!(!private.mirror_public);
+        assert!(mirror_forced_private(&private));
+
+        let mut public = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-public",
+        ]);
+        public.merge_config(&cfg);
+        assert!(!public.mirror_private);
+        assert!(!mirror_forced_private(&public));
+    }
 
     #[test]
     fn decode_encrypt_key_none_returns_none() {
@@ -533,6 +639,128 @@ mod tests {
     }
 
     #[test]
+    fn decode_encrypt_key_accepts_upper_case() {
+        let hex = "AB".repeat(32);
+        assert!(decode_encrypt_key(Some(&hex))
+            .unwrap()
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0xab));
+    }
+
+    #[test]
+    fn decode_encrypt_key_rejects_plus_and_whitespace_signs() {
+        let hex = format!("+a{}", "aa".repeat(31));
+        assert!(decode_encrypt_key(Some(&hex)).is_err());
+        let hex = format!("-a{}", "aa".repeat(31));
+        assert!(decode_encrypt_key(Some(&hex)).is_err());
+    }
+
+    #[test]
+    fn decode_encrypt_key_errors_never_echo_key_characters() {
+        // Distinct marker characters at known positions.
+        let mut hex = "0123456789abcdef".repeat(4);
+        hex.replace_range(20..22, "Zq");
+        let err = decode_encrypt_key(Some(&hex)).unwrap_err();
+        for fragment in ["Zq", "Z", "q", "0123", "abcdef", &hex] {
+            assert!(!err.contains(fragment), "{err:?} leaks {fragment:?}");
+        }
+        let short = decode_encrypt_key(Some("deadbeefSECRET")).unwrap_err();
+        assert!(
+            !short.contains("deadbeef") && !short.contains("SECRET"),
+            "{short}"
+        );
+    }
+
+    fn s3_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["github-backup", "octocat", "--s3-bucket", "b"];
+        argv.extend_from_slice(extra);
+        crate::cli::test_support::parse(&argv)
+    }
+
+    #[test]
+    fn build_s3_config_none_without_bucket() {
+        let args = crate::cli::test_support::parse(&["github-backup", "octocat"]);
+        assert!(build_s3_config(&args).is_none());
+    }
+
+    #[test]
+    fn build_s3_config_carries_session_token_and_trims_blanks() {
+        let args = s3_args(&["--s3-session-token", "  TOK  "]);
+        assert_eq!(
+            build_s3_config(&args).unwrap().session_token.as_deref(),
+            Some("TOK")
+        );
+        let args = s3_args(&["--s3-session-token", "   "]);
+        assert!(build_s3_config(&args).unwrap().session_token.is_none());
+    }
+
+    #[test]
+    fn check_s3_config_explains_missing_credentials() {
+        let args = s3_args(&[]);
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(
+            err.contains("AWS_ACCESS_KEY_ID") && err.contains("secret access key"),
+            "{err}"
+        );
+        let args = s3_args(&["--s3-access-key", "AK"]);
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(err.contains("a secret access key is missing"), "{err}");
+        let args = s3_args(&["--s3-access-key", "AK", "--s3-secret-key", "SK"]);
+        check_s3_config(&build_s3_config(&args).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn check_s3_config_rejects_bucket_urls() {
+        let mut args = s3_args(&["--s3-access-key", "AK", "--s3-secret-key", "SK"]);
+        args.s3_bucket = Some("s3://my-bucket".to_string());
+        let err = check_s3_config(&build_s3_config(&args).unwrap()).unwrap_err();
+        assert!(err.contains("bucket"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_s3_sync_without_credentials_is_an_error_before_any_request() {
+        let dir = tempdir().unwrap();
+        let output = OutputConfig::new(dir.path());
+        fs::create_dir_all(output.owner_json_dir("octocat")).unwrap();
+        let args = s3_args(&["--s3-endpoint", "http://127.0.0.1:9"]);
+        let cfg = build_s3_config(&args).unwrap();
+        let err = run_s3_sync(&cfg, &output, "octocat", false, None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("AWS_ACCESS_KEY_ID"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_s3_sync_reports_a_failed_upload_as_an_error() {
+        // Nothing listens on port 9: every upload fails, so the run must
+        // return Err (the CLI turns that into a non-zero exit).
+        let dir = tempdir().unwrap();
+        let output = OutputConfig::new(dir.path());
+        let json = output.owner_json_dir("octocat");
+        fs::create_dir_all(&json).unwrap();
+        fs::write(json.join("a.json"), b"{}").unwrap();
+        let args = s3_args(&[
+            "--s3-endpoint",
+            "http://127.0.0.1:9",
+            "--s3-access-key",
+            "AK",
+            "--s3-secret-key",
+            "SK",
+        ]);
+        let cfg = build_s3_config(&args).unwrap();
+        let err = run_s3_sync(&cfg, &output, "octocat", false, None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("octocat/json/a.json") || err.contains("aborted"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn run_diff_empty_dirs_summary() {
         let dir1 = tempdir().unwrap();
         let dir2 = tempdir().unwrap();
@@ -541,28 +769,63 @@ mod tests {
     }
 
     #[test]
-    fn apply_retention_no_snapshots_is_ok() {
-        let dir = tempdir().unwrap();
-        // Create a non-snapshot directory — should be left untouched.
-        fs::create_dir(dir.path().join("config")).unwrap();
-        apply_retention(dir.path(), Some(5), None).unwrap();
-        assert!(dir.path().join("config").exists());
+    fn run_diff_reports_what_the_engine_writes_to_repos_json() {
+        // The engine writes `repos.json` as an array of repository objects.
+        let prev = tempdir().unwrap();
+        let curr = tempdir().unwrap();
+        fs::write(
+            prev.path().join("repos.json"),
+            r#"[{"id":1,"name":"kept"},{"id":2,"name":"gone"}]"#,
+        )
+        .unwrap();
+        fs::write(
+            curr.path().join("repos.json"),
+            r#"[{"id":1,"name":"kept"},{"id":3,"name":"new"}]"#,
+        )
+        .unwrap();
+        let summary = run_diff(prev.path(), curr.path()).unwrap();
+        assert!(summary.contains("1 added, 1 removed"), "{summary}");
+        assert!(summary.contains("added:   new"), "{summary}");
+        assert!(summary.contains("removed: gone"), "{summary}");
     }
 
     #[test]
-    fn apply_retention_deletes_oldest_when_over_limit() {
+    fn only_repositories_listed_as_public_are_public() {
         let dir = tempdir().unwrap();
-        for name in &["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"] {
-            fs::create_dir(dir.path().join(name)).unwrap();
-        }
-        apply_retention(dir.path(), Some(2), None).unwrap();
-        let remaining: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().into_string().unwrap())
-            .collect();
-        assert_eq!(remaining.len(), 2, "should keep only 2 snapshots");
-        assert!(remaining.contains(&"2025-03-01".to_string()));
-        assert!(remaining.contains(&"2025-04-01".to_string()));
+        let path = dir.path().join("repos.json");
+        fs::write(
+            &path,
+            r#"[{"name":"open","private":false},{"name":"secret","private":true},{"name":"odd"}]"#,
+        )
+        .unwrap();
+        let public = public_repo_names(&path);
+        assert!(public.contains("open"));
+        assert!(!public.contains("secret"));
+        assert!(!public.contains("odd"), "unknown visibility is not public");
+    }
+
+    #[test]
+    fn missing_or_corrupt_listing_means_nothing_is_public() {
+        let dir = tempdir().unwrap();
+        assert!(public_repo_names(&dir.path().join("absent.json")).is_empty());
+        let bad = dir.path().join("bad.json");
+        fs::write(&bad, "not json").unwrap();
+        assert!(public_repo_names(&bad).is_empty());
+    }
+
+    #[test]
+    fn a_failed_repository_makes_the_mirror_push_an_error() {
+        let ok = github_backup_mirror::runner::MirrorStats {
+            pushed: 2,
+            ..Default::default()
+        };
+        assert!(mirror_outcome(&ok).is_ok());
+        let bad = github_backup_mirror::runner::MirrorStats {
+            pushed: 1,
+            errored: 1,
+            failures: vec!["r2: boom".to_owned()],
+        };
+        let err = mirror_outcome(&bad).expect_err("must fail");
+        assert!(err.contains("1 of 2") && err.contains("r2: boom"), "{err}");
     }
 }

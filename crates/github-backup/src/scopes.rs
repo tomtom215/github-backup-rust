@@ -10,98 +10,105 @@
 
 use std::collections::BTreeSet;
 
+use github_backup_types::config::{BackupOptions, BackupTarget};
+
 use crate::cli::Args;
 
-/// Computes the set of OAuth scopes recommended for the categories
-/// enabled in `args`.
+/// Computes the set of classic OAuth scopes recommended for the categories
+/// enabled in `args`, **after** `--all` and the config file have been applied
+/// (the individual flags of `args` do not say what `--all` turned on).
 ///
-/// Returns a sorted, deduplicated list using GitHub's classic scope
-/// names (`repo`, `read:org`, …).  Fine-grained PATs use a different
-/// permission model — when those are in use, the operator should
-/// match the printed scopes to the equivalent fine-grained
-/// permissions (the GitHub docs map them one-to-one).
+/// Returns a sorted, deduplicated list.  The mapping follows GitHub's REST
+/// documentation for each endpoint; it has not been exercised against live
+/// GitHub, and fine-grained tokens use a different permission model, so treat
+/// it as a starting point and run `--doctor` with the token you create.
 #[must_use]
 pub fn recommended_scopes(args: &Args) -> Vec<&'static str> {
-    let mut set: BTreeSet<&'static str> = BTreeSet::new();
-
-    // Anything touching repositories at all benefits from at least the
-    // public `public_repo` scope.  We only widen to `repo` (full) if the
-    // user has explicitly asked for private data, which is the common
-    // case for a complete backup.
-    let touches_public_repos = args.all
-        || args.repositories
-        || args.issues
-        || args.issue_comments
-        || args.issue_events
-        || args.pulls
-        || args.pull_comments
-        || args.pull_commits
-        || args.pull_reviews
-        || args.labels
-        || args.milestones
-        || args.releases
-        || args.release_assets
-        || args.wikis
-        || args.topics
-        || args.branches
-        || args.starred
-        || args.clone_starred
-        || args.watched
-        || args.security_advisories;
-
-    if touches_public_repos {
-        set.insert("public_repo");
+    // `into_backup_options` consumes its receiver and needs an owner.
+    let mut resolved = args.clone();
+    if resolved.owner.is_none() {
+        resolved.owner = Some(String::new());
     }
-
-    if args.private || args.all {
-        // `repo` supersedes `public_repo` but we keep both so the user
-        // recognises what we asked for; GitHub UI ignores the redundancy.
-        set.insert("repo");
-    }
-
-    if args.org
-        || args.org_members
-        || args.org_teams
-        || matches!(
-            args.mirror_type.as_str(),
-            "gitea-org" | "gitlab-group" | "org"
-        )
-    {
-        set.insert("read:org");
-    }
-
-    if args.hooks {
-        // Webhook endpoints are admin-scoped.
-        set.insert("admin:repo_hook");
-    }
-
-    if args.deploy_keys {
-        set.insert("admin:public_key");
-    }
-
-    if args.gists || args.starred_gists {
-        set.insert("gist");
-    }
-
-    if args.followers || args.following {
-        set.insert("user:follow");
-    }
-
-    if args.packages {
-        set.insert("read:packages");
-    }
-
-    if args.discussions {
-        // Discussions require repo read in classic mode.
-        set.insert("repo");
-    }
-
+    let (_, _, opts) = resolved.into_backup_options();
+    let mut set = scopes_for(&opts);
     if args.restore {
         // The restore flow writes to GitHub.
         set.insert("repo");
     }
+    if matches!(
+        args.mirror_type.as_str(),
+        "gitea-org" | "gitlab-group" | "org"
+    ) {
+        set.insert("read:org");
+    }
+    finish(set)
+}
 
+/// Removes `public_repo` when `repo` (which includes it) is present.
+fn finish(mut set: BTreeSet<&'static str>) -> Vec<&'static str> {
+    if set.contains("repo") {
+        set.remove("public_repo");
+    }
     set.into_iter().collect()
+}
+
+fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
+    let mut set: BTreeSet<&'static str> = BTreeSet::new();
+
+    // Reading public repositories and their issues, pull requests, releases
+    // and so on needs no scope at all, but `public_repo` is the narrowest
+    // scope that also lifts the unauthenticated rate limit and is what a
+    // public-only token is created with.
+    let touches_repos = opts.repositories
+        || opts.issues
+        || opts.issue_comments
+        || opts.issue_events
+        || opts.pulls
+        || opts.pull_comments
+        || opts.pull_commits
+        || opts.pull_reviews
+        || opts.labels
+        || opts.milestones
+        || opts.releases
+        || opts.release_assets
+        || opts.wikis
+        || opts.topics
+        || opts.branches
+        || opts.starred
+        || opts.clone_starred
+        || opts.watched
+        || opts.security_advisories
+        || opts.actions
+        || opts.action_runs;
+    if touches_repos {
+        set.insert("public_repo");
+    }
+
+    // Private repositories, and the categories that need admin access to a
+    // repository (deploy keys, collaborators, environments), need `repo`.
+    if opts.private || opts.deploy_keys || opts.collaborators || opts.environments {
+        set.insert("repo");
+    }
+
+    if opts.hooks {
+        // Webhook endpoints are admin-scoped.
+        set.insert("admin:repo_hook");
+    }
+
+    if matches!(opts.target, BackupTarget::Org) || opts.org_members || opts.org_teams {
+        set.insert("read:org");
+    }
+
+    if opts.gists || opts.starred_gists {
+        set.insert("gist");
+    }
+
+    if opts.packages {
+        set.insert("read:packages");
+    }
+
+    // Followers and following are public data: no scope.
+    set
 }
 
 /// Renders the recommended scopes as a copy-pasteable hint suitable for
@@ -139,13 +146,13 @@ pub fn render_recommendation(args: &Args) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::test_support::parse;
     use crate::cli::Args;
-    use clap::Parser;
 
     fn args(extra: &[&str]) -> Args {
         let mut argv = vec!["github-backup", "octocat", "--token", "ghp_x"];
         argv.extend(extra);
-        Args::parse_from(argv)
+        parse(&argv)
     }
 
     #[test]
@@ -155,10 +162,9 @@ mod tests {
     }
 
     #[test]
-    fn private_flag_widens_to_repo() {
+    fn private_flag_widens_to_repo_and_drops_the_redundant_public_repo() {
         let a = args(&["--repositories", "--private"]);
-        let s = recommended_scopes(&a);
-        assert!(s.contains(&"repo"));
+        assert_eq!(recommended_scopes(&a), vec!["repo"]);
     }
 
     #[test]
@@ -174,10 +180,13 @@ mod tests {
         assert!(recommended_scopes(&a).contains(&"admin:repo_hook"));
     }
 
+    /// `admin:public_key` is for a user's SSH/GPG keys, not a repository's
+    /// deploy keys (which need access to the repository: `repo`).
     #[test]
-    fn deploy_keys_require_admin_public_key() {
-        let a = args(&["--deploy-keys", "--repositories"]);
-        assert!(recommended_scopes(&a).contains(&"admin:public_key"));
+    fn deploy_keys_need_repo_not_admin_public_key() {
+        let s = recommended_scopes(&args(&["--deploy-keys", "--repositories"]));
+        assert!(s.contains(&"repo"), "{s:?}");
+        assert!(!s.contains(&"admin:public_key"), "{s:?}");
     }
 
     #[test]
@@ -186,10 +195,12 @@ mod tests {
         assert!(recommended_scopes(&a).contains(&"gist"));
     }
 
+    /// `user:follow` lets a token *follow* people; reading followers needs
+    /// nothing, and asking for it over-grants.
     #[test]
-    fn followers_require_user_follow() {
-        let a = args(&["--followers"]);
-        assert!(recommended_scopes(&a).contains(&"user:follow"));
+    fn followers_need_no_scope() {
+        let s = recommended_scopes(&args(&["--followers", "--following"]));
+        assert!(s.is_empty(), "{s:?}");
     }
 
     #[test]
@@ -198,11 +209,25 @@ mod tests {
         assert!(recommended_scopes(&a).contains(&"read:packages"));
     }
 
+    /// Regression (docs audit): `--all` printed only `public_repo repo`,
+    /// because the per-category flags of `args` are false when `--all` is used.
     #[test]
-    fn all_flag_includes_repo_and_read_org() {
-        let a = args(&["--all"]);
-        let s = recommended_scopes(&a);
-        assert!(s.contains(&"repo"), "got {s:?}");
+    fn all_flag_includes_everything_it_enables() {
+        let s = recommended_scopes(&args(&["--all"]));
+        for needed in ["repo", "gist", "read:packages", "admin:repo_hook"] {
+            assert!(s.contains(&needed), "--all must recommend {needed}: {s:?}");
+        }
+        assert!(!s.contains(&"public_repo"), "repo supersedes it: {s:?}");
+        assert!(
+            !s.contains(&"user:follow") && !s.contains(&"admin:public_key"),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn all_for_an_organisation_adds_read_org() {
+        let s = recommended_scopes(&args(&["--all", "--org"]));
+        assert!(s.contains(&"read:org"), "{s:?}");
     }
 
     #[test]

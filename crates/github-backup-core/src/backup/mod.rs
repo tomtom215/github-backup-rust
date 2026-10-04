@@ -17,6 +17,7 @@ pub mod gist;
 pub mod hooks;
 pub mod issue;
 pub mod labels;
+pub(crate) mod merge;
 pub mod milestones;
 pub mod package;
 pub mod project;
@@ -34,3 +35,6 @@ pub(crate) mod mock_client;
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod lossless_tests;

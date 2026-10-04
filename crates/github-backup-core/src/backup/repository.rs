@@ -9,7 +9,7 @@ use tracing::info;
 
 use github_backup_types::{
     config::{glob_match, BackupOptions, CloneType},
-    Repository,
+    Raw, Repository,
 };
 
 use url::Url;
@@ -23,11 +23,14 @@ use crate::{
 /// Backs up a single repository by writing its metadata JSON and performing a
 /// git clone (using the mode selected by `opts.clone_type`).
 ///
+/// `info.json` holds the repository object exactly as the API returned it
+/// (all ~90 properties), not just the typed fields.
+///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from storage writes or git operations.
 pub async fn backup_repository(
-    repo: &Repository,
+    repo: &Raw<Repository>,
     opts: &BackupOptions,
     repos_dir: &Path,
     meta_dir: &Path,
@@ -53,7 +56,7 @@ pub async fn backup_repository(
 
     // Clone / update the repository using the configured clone strategy.
     if opts.repositories {
-        clone_repo(repo, opts, repos_dir, git, clone_opts)?;
+        clone_repo(repo, opts, repos_dir, git, clone_opts).await?;
     }
 
     Ok(())
@@ -90,7 +93,7 @@ pub(crate) fn rewrite_host(url: &str, new_host: &str) -> String {
 
 /// Performs the git clone / update for a repository, dispatching on
 /// [`BackupOptions::clone_type`] and [`BackupOptions::lfs`].
-fn clone_repo(
+async fn clone_repo(
     repo: &Repository,
     opts: &BackupOptions,
     repos_dir: &Path,
@@ -115,27 +118,28 @@ fn clone_repo(
     if opts.lfs {
         // LFS cloning is independent of clone_type.
         let dest = repos_dir.join(format!("{}.git", repo.name));
-        return git.lfs_clone(clone_url, &dest, clone_opts);
+        return git.lfs_clone(clone_url, &dest, clone_opts).await;
     }
 
     match &opts.clone_type {
         CloneType::Mirror => {
             let dest = repos_dir.join(format!("{}.git", repo.name));
-            git.mirror_clone(clone_url, &dest, clone_opts)
+            git.mirror_clone(clone_url, &dest, clone_opts).await
         }
         CloneType::Bare => {
             let dest = repos_dir.join(format!("{}.git", repo.name));
-            git.bare_clone(clone_url, &dest, clone_opts)
+            git.bare_clone(clone_url, &dest, clone_opts).await
         }
         CloneType::Full => {
             // Full clones go in a directory without a `.git` suffix so they
             // look like normal working trees.
             let dest = repos_dir.join(&repo.name);
-            git.full_clone(clone_url, &dest, clone_opts)
+            git.full_clone(clone_url, &dest, clone_opts).await
         }
         CloneType::Shallow(depth) => {
             let dest = repos_dir.join(format!("{}.git", repo.name));
             git.shallow_clone(clone_url, &dest, clone_opts, *depth)
+                .await
         }
     }
 }

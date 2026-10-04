@@ -1,0 +1,25 @@
+# Keeps GitHub Actions refs, Cargo dependencies and the Docker base images
+# current.  Cargo updates are grouped so a week's worth of bumps is one PR;
+# security advisories still open their own PRs immediately.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
