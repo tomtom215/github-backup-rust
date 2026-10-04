@@ -180,14 +180,10 @@ fn counters(res: &ResultsState) -> Vec<(&'static str, u64, Style)> {
         theme::OK_STYLE
     };
     vec![
-        (
-            "Repositories discovered",
-            res.repos_discovered,
-            theme::NORMAL,
-        ),
-        ("Repositories backed up", res.repos_backed_up, theme::NORMAL),
-        ("Repositories skipped", res.repos_skipped, theme::NORMAL),
-        ("Repositories failed", res.repos_errored, errored_style),
+        ("Repos discovered", res.repos_discovered, theme::NORMAL),
+        ("Repos backed up", res.repos_backed_up, theme::NORMAL),
+        ("Repos skipped", res.repos_skipped, theme::NORMAL),
+        ("Repos incomplete", res.repos_errored, errored_style),
         ("Gists backed up", res.gists_backed_up, theme::NORMAL),
         ("Issues fetched", res.issues_fetched, theme::NORMAL),
         ("Pull requests fetched", res.prs_fetched, theme::NORMAL),
