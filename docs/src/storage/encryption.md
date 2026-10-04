@@ -117,14 +117,14 @@ produced):
 
 ```bash
 export BACKUP_ENCRYPT_KEY=...   # the key used for the upload
-github-backup OWNER --decrypt \
+github-backup --decrypt \
   --decrypt-input issues.json.enc --decrypt-output issues.json
 ```
 
-> Currently the command line still demands an `OWNER` argument for
-> `--decrypt` (any name works, it is unused). Download objects with your
-> provider's tool first (the tool itself has no download command), then decrypt
-> one file at a time; for many files loop in the shell.
+> `--decrypt` needs neither an `OWNER` nor network access, only the key and the
+> two file paths.  Download objects with your provider's tool first (the tool
+> itself has no download command), then decrypt one file at a time; for many
+> files loop in the shell.
 
 Without the tool, any AES-GCM implementation can do it. **`openssl enc` cannot:**
 it refuses AEAD ciphers ("AEAD ciphers not supported"). With Python and the

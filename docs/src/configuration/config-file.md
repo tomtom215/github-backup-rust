@@ -16,15 +16,26 @@ github-backup -c /etc/github-backup/config.toml
 
 ## Precedence
 
-**CLI flags always override config file values.**
+The file supplies defaults; the command line and the environment are applied
+on top.  The exact rules, because "the command line always wins" is not true
+for every kind of setting:
 
-This means you can define a base configuration in the file and override specific values per-run:
+| Kind of setting | Rule |
+|-----------------|------|
+| Single values (`owner`, `token`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
+| `clone_type` | A `--clone-type` given on the command line wins, including `--clone-type mirror`.  The file applies only when the flag was not given. |
+| Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `no_prune`, `prefer_ssh`, `mirror_private`, `s3_include_assets`) | **Either one turns it on.**  A switch that is `true` in the file cannot be turned off from the command line; set it to `false` (or remove it) in the file instead. |
+| Lists (`include_repos`, `exclude_repos`) | The patterns of the file and of the command line are **combined**. |
 
 ```bash
 # Config: owner = "octocat", concurrency = 4
 # Override concurrency for this run only:
 github-backup --config config.toml --concurrency 16
 ```
+
+A config file that cannot be read or contains an unknown key is an error
+(exit status `1`): every key is checked, so a typo such as `issuez = true` is
+reported instead of silently ignored.
 
 ## Full Config File Example
 
@@ -47,14 +58,14 @@ concurrency = 8
 # org = true
 
 # ── Clone behaviour ────────────────────────────────────────────────────────
-# clone_type = "mirror"  # mirror | bare | full | shallow:<depth>
+# clone_type = "mirror"  # "mirror", "bare", "full", "shallow:<depth>" or { shallow = <depth> }
 # prefer_ssh  = false
 # lfs         = false
 # no_prune    = false
 
 # ── Backup categories ──────────────────────────────────────────────────────
 
-# Enable everything (except clone_starred and action_runs which are opt-in)
+# Enable the categories of `--all` (clone_starred and action_runs stay opt-in)
 # all = true
 
 # Or enable individually:
@@ -94,9 +105,9 @@ actions          = true
 # ── Deployment environments ─────────────────────────────────────────────────
 environments     = true
 
-# ── Discussions, classic projects, packages ────────────────────────────────
-discussions      = true
-projects         = false
+# ── Packages ───────────────────────────────────────────────────────────────
+# (`discussions` and `projects` are accepted but back up nothing: GitHub's
+#  REST API has no endpoint for them.)
 packages         = false  # requires the read:packages OAuth scope
 
 # ── Organisation-specific ───────────────────────────────────────────────────
@@ -107,7 +118,7 @@ org_teams        = false
 # report = "/var/log/github-backup/report.json"
 
 # ── Mirror to Gitea/Codeberg ───────────────────────────────────────────────
-# mirror_to      = "https://codeberg.org"
+# mirror_to      = "https://codeberg.org"   # Gitea-type only: mirror_type cannot be set in the file
 # mirror_token   = "cb_token"         # or use MIRROR_TOKEN env var
 # mirror_owner   = "alice"
 # mirror_private = false
@@ -192,22 +203,22 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `output` | path | `.` | Output root directory |
 | `concurrency` | integer | `4` | Parallel repository backup count |
 | `org` | bool | `false` | Treat owner as an organisation |
-| `report` | path | — | Write JSON summary report to this file |
+| `report` | path | — | Write the JSON summary report to this file |
 
 ### Clone Behaviour
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `clone_type` | string | `mirror` | `mirror`, `bare`, `full`, or `shallow:<depth>` |
+| `clone_type` | string or table | `mirror` | `"mirror"`, `"bare"`, `"full"`, `"shallow:<depth>"` (for example `"shallow:3"`) or the table form `{ shallow = 3 }` |
 | `prefer_ssh` | bool | `false` | Use SSH clone URLs instead of HTTPS |
-| `lfs` | bool | `false` | Enable Git LFS when cloning |
+| `lfs` | bool | `false` | Also fetch Git LFS objects (needs `git-lfs`) |
 | `no_prune` | bool | `false` | Do not prune deleted remote refs |
 
 ### Backup Categories
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `all` | bool | `false` | Enable all categories (excluding opt-in) |
+| `all` | bool | `false` | Enable the categories of `--all` (not `clone_starred`, `action_runs`) |
 | `repositories` | bool | `false` | Clone repositories |
 | `forks` | bool | `false` | Include forks |
 | `private` | bool | `false` | Include private repos |
@@ -236,23 +247,23 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `branches` | bool | `false` | Back up branch list |
 | `deploy_keys` | bool | `false` | Back up deploy keys (admin access required) |
 | `collaborators` | bool | `false` | Back up collaborator list (admin access required) |
-| `org_members` | bool | `false` | Back up org member list |
-| `org_teams` | bool | `false` | Back up org team list |
+| `org_members` | bool | `false` | Back up org member list (organisation targets only) |
+| `org_teams` | bool | `false` | Back up org team list (organisation targets only) |
 | `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
 | `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
 | `environments` | bool | `false` | Back up deployment environment configurations |
-| `discussions` | bool | `false` | Back up GitHub Discussions threads and comments |
-| `projects` | bool | `false` | Back up Classic Projects (v1) |
+| `discussions` | bool | `false` | Accepted, but backs up nothing: GitHub's REST API has no Discussions endpoint |
+| `projects` | bool | `false` | Accepted, but backs up nothing: Classic Projects are no longer in GitHub's REST API |
 | `packages` | bool | `false` | Back up GitHub Packages metadata for the target user |
 | `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
 | `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
-| `since` | string | — | ISO 8601 timestamp: only fetch issues/PRs updated after this |
+| `since` | string | — | Expert override, same as `--since`: a date (`2026-01-01`) or timestamp.  Applied to every run and never stored; leave it unset and the tool tracks its own per-repository watermarks |
 
 ### Mirror Destination
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mirror_to` | string | — | Push mirrors to this Gitea/Codeberg/Forgejo base URL |
+| `mirror_to` | string | — | Push mirrors to this base URL.  The destination type is always Gitea/Codeberg/Forgejo from a config file (`--mirror-type gitlab` has no key) |
 | `mirror_token` | string | — | API token for the mirror host (prefer `MIRROR_TOKEN` env var) |
 | `mirror_owner` | string | — | Owner name at the mirror destination |
 | `mirror_private` | bool | `false` | Create repos as private at the mirror destination |
@@ -261,7 +272,7 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `s3_bucket` | string | — | S3 bucket name (required to enable S3 sync) |
+| `s3_bucket` | string | — | S3 bucket name (setting it enables the S3 sync of the JSON metadata) |
 | `s3_region` | string | `us-east-1` | AWS region (or equivalent for B2/MinIO/R2) |
 | `s3_prefix` | string | `""` | Key prefix for all objects |
 | `s3_endpoint` | string | — | Custom endpoint for S3-compatible services |
@@ -281,16 +292,13 @@ api_url  = "https://github.example.com/api/v3"
 all      = true
 ```
 
-## Incremental Backup Config
+## Incremental Backups
 
-```toml
-owner = "octocat"
-output = "/var/backup/github"
-issues = true
-pulls  = true
-# Only fetch issues/PRs updated after this date (update each run)
-since  = "2026-01-01T00:00:00Z"
-```
+Nothing needs to be configured: every run records a watermark per repository
+in `<output>/<owner>/json/backup_state.json` and the next run uses it (see
+[Incremental runs](../monitoring.md#incremental-runs-and-the-state-file)).  The
+`since` key is only an override and should normally stay unset; a fixed
+`since` date in a file that is used for every run defeats the watermarks.
 
 ## Repository Filter Config
 
@@ -302,6 +310,29 @@ repositories = true
 # Only back up repos whose names start with "rust-" or equal "my-tool"
 include_repos = ["rust-*", "my-tool"]
 
-# But exclude archived repos regardless
-exclude_repos = ["*archived*"]
+# But skip any repo whose name ends in "-archive" (patterns match the repository
+# name only; there is no pattern for GitHub's "archived" flag)
+exclude_repos = ["*-archive"]
 ```
+
+## Options That Cannot Be Set in the File
+
+These flags have no config key and must come from the command line (or, where
+one exists, the environment): `--config`, `--print-config-template`,
+`--doctor`, `--check`, `--list-scopes`, `--device-auth`, `--oauth-client-id`,
+`--oauth-scopes`, `--full`, `--mirror-type`, `--s3-session-token`,
+`--s3-delete-stale`, `--dry-run`, `--manifest`, `--verify`, `--keep-last`,
+`--max-age-days` (deprecated), `--prometheus-metrics`, `--diff-with`,
+`--notify-webhook`, `--history-size`, `--restore`, `--restore-target-org`,
+`--restore-yes`, `--encrypt-key`, `--decrypt`, `--decrypt-input`,
+`--decrypt-output`, `--quiet`, `--verbose` and `--tui`.  A file that tries to
+set one of them is rejected as an unknown key.
+
+## The Template
+
+`github-backup --print-config-template` prints an annotated file that lists all
+63 keys, commented out.  Some of its comments are outdated: it marks `output`
+as required (it defaults to `.`), says that command-line flags always override
+the file (see [Precedence](#precedence)), suggests `discussions = true` and
+`projects = true` (they have no effect) and says that an unset `since` inherits
+the previous run's timestamp (each repository has its own watermark).

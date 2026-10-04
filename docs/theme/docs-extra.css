@@ -1,0 +1,44 @@
+/* Extra styling for the github-backup book.
+
+   Keeps wide tables and long code lines inside the page instead of pushing the
+   whole page sideways on narrow screens. */
+
+/* Wide tables scroll inside their own box. */
+.content main table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Long unbroken inline code (paths, flags) may wrap instead of overflowing. */
+.content main p code,
+.content main li code,
+.content main td code,
+.content main th code {
+    overflow-wrap: anywhere;
+}
+
+/* Code blocks scroll horizontally rather than widening the page. */
+.content main pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.content main pre > code {
+    overflow-x: auto;
+}
+
+/* Long headings and links must not overflow either. */
+.content main h1,
+.content main h2,
+.content main h3,
+.content main a {
+    overflow-wrap: anywhere;
+}
+
+/* Box-drawing directory trees: keep the monospace alignment, allow scrolling. */
+.content main pre code.language-text,
+.content main pre code:not([class]) {
+    white-space: pre;
+}

@@ -14,7 +14,7 @@ Saves a JSON array of every repository the owner has starred:
 json/starred.json
 ```
 
-Each entry is the repository object exactly as GitHub returns it: name, description, owner, visibility, star count, fork count, topics, license, and clone URLs.
+Each entry is the repository object exactly as GitHub returns it (name, description, owner, visibility, star and fork counts, topics, license, clone URLs and everything else GitHub includes).
 
 ---
 
@@ -33,7 +33,7 @@ Repositories are cloned into:
 git/starred/<upstream-owner>/<repo-name>.git
 ```
 
-### Durable Queue & Resume
+### Durable Queue and Refresh
 
 `--clone-starred` uses a durable JSON queue stored at:
 
@@ -41,17 +41,27 @@ git/starred/<upstream-owner>/<repo-name>.git
 json/starred_clone_queue.json
 ```
 
-The queue is written atomically after **every** repository.  If the run is
-interrupted (Ctrl+C, power cut, network loss), simply re-run the same command
-to resume.  Already-cloned repositories are skipped automatically.
+The queue is written atomically after **every** repository, and processed one
+repository at a time.  Two situations:
+
+* **A pass is in progress** (some item is still `pending`, for example because
+  the run was interrupted by Ctrl+C, a power cut or a network loss): re-running
+  the same command **resumes** and leaves the finished items alone.
+* **The previous pass is complete** (nothing is `pending`): the next run starts
+  a **new pass**: every item, including earlier failures, goes back to `pending`
+  with a fresh retry budget, so each run refreshes every starred mirror
+  (`git fetch`) and retries what failed.  A large starred list therefore costs a
+  full pass on every run.
 
 ```bash
-# First run — clones whatever it can, writes progress to the queue
-github-backup octocat --token $GITHUB_TOKEN --output /backup --clone-starred
+# First run: clones whatever it can, writes progress to the queue
+github-backup octocat --output /backup --clone-starred
 
-# Interrupted?  Just re-run the same command — it resumes from where it left off
-github-backup octocat --token $GITHUB_TOKEN --output /backup --clone-starred
+# Interrupted?  Re-run the same command: it resumes where it left off
+github-backup octocat --output /backup --clone-starred
 ```
+
+Newly starred repositories are merged into the queue on every run.
 
 ### Retry & Backoff
 
@@ -64,9 +74,10 @@ Failed clones are retried up to **4 total attempts** with exponential backoff:
 | 3 | 30 s |
 | 4 (last) | 2 min |
 
-After 4 failures the item is marked `"failed"` in the queue and skipped on
-subsequent runs.  To retry a failed item manually, open the queue file and
-change its `"state"` from `"failed"` back to `"pending"`.
+After 4 failures the item is marked `"failed"` in the queue and counted as a
+failure of the run (exit status `3`, `step: "starred clone <owner>/<repo>"` in
+the report).  It is retried automatically in the next pass; there is nothing to
+edit by hand.
 
 ### Progress Logging
 
@@ -79,13 +90,15 @@ INFO starred repo cloned repo="rust-lang/rust" done=42 pending=1505 failed=0 tot
 ### Clone Type
 
 The clone mode follows the same `--clone-type` flag as owned repos (default:
-`mirror`).  Use `--prefer-ssh` to clone via SSH instead of HTTPS.
+`mirror`; `--lfs` is not applied to starred repositories).  Use `--prefer-ssh`
+to clone via SSH instead of HTTPS.
 
 ### Not included in `--all`
 
 `--clone-starred` is deliberately **not** enabled by `--all` because it can
 consume significant disk space and run time for users with hundreds or
-thousands of starred repositories.  Enable it explicitly when needed.
+thousands of starred repositories.  Add it explicitly (`--all --clone-starred`
+works) when needed.  It is skipped in a `--dry-run`.
 
 ## Watched Repositories
 
@@ -133,7 +146,7 @@ json/following.json
 github-backup my-org --org --token $GITHUB_TOKEN --output /backup --org-members
 ```
 
-Saves the public member list of the organisation:
+Saves the member list of the organisation that the token can see (members whose membership is private are listed only to a token that may see them):
 
 ```
 json/org_members.json
@@ -180,7 +193,7 @@ Or simply use `--all` to include everything.
 
 ## Organisation Notes
 
-When using `--org`, all flags are available but some apply only to organisation targets:
+When using `--org`, all flags are available but some apply only to organisation targets.  `--starred`, `--watched`, `--followers` and `--following` call GitHub's `/users/<owner>/...` endpoints with the organisation's name; what GitHub returns for an organisation account has not been verified by the project:
 
 | Flag | User target | Org target |
 |------|-------------|-----------|

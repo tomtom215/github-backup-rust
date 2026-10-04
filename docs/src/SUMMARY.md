@@ -27,7 +27,7 @@
 
 # Mirroring
 
-- [Push to Gitea / Codeberg](mirroring.md)
+- [Push Mirrors (Gitea, GitLab)](mirroring.md)
 
 # Configuration
 

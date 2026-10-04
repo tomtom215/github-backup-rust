@@ -119,4 +119,4 @@ json/repos/<repo>/
 | `--pull-reviews` | 1 per PR |
 | `--issue-comments`, `--issue-events` | 1 per issue **and PR** each |
 
-For repositories with many PRs, `--pull-commits` and `--pull-reviews` generate more API traffic.  Consider rate limit budgets for large organisations.
+The per-item calls are made on the first run and, on later runs, only for issues and pull requests that changed since the repository's watermark (see [Incremental runs](monitoring.md#incremental-runs-and-the-state-file); `--full` repeats all of them).  The listing calls cost one request per 100 items on **every** run.  Consider the rate-limit budget (5 000 requests per hour per token) for large organisations; [Rate limit](ops-runbook.md#rate-limit) explains what happens when it is exhausted.

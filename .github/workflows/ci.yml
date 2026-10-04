@@ -113,7 +113,7 @@ jobs:
       - name: Install mdBook and link checker
         run: |
           cargo install mdbook --version "0.4.40" --locked
-          cargo install mdbook-linkcheck --locked
+          cargo install mdbook-linkcheck --version "0.7.7" --locked
       - run: mdbook build docs
       - uses: actions/upload-artifact@v7
         with:

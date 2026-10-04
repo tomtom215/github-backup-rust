@@ -29,10 +29,11 @@ branch name.
 
 ```
 <output>/
+├── .github-backup.lock                     ← process lock (stays on disk, see below)
 └── <owner>/                                ← GitHub username or org name
     ├── git/                                ← Git repositories
     │   ├── repos/
-    │   │   ├── <repo>.git/                 ← bare mirror clone (default)
+    │   │   ├── <repo>.git/                 ← mirror clone (default); bare, shallow, --lfs too
     │   │   ├── <repo>/                     ← working tree, with --clone-type full
     │   │   └── …
     │   ├── wikis/
@@ -44,6 +45,7 @@ branch name.
     │   └── starred/                        ← --clone-starred
     │       └── <upstream-owner>/<repo>.git/
     └── json/                               ← JSON metadata
+        ├── repos.json                      ← the repositories this backup covers
         ├── starred.json                    ← --starred
         ├── watched.json                    ← --watched
         ├── followers.json                  ← --followers
@@ -53,10 +55,11 @@ branch name.
         ├── packages_<type>.json            ← --packages
         ├── package_versions_<type>_<name>.json
         ├── starred_clone_queue.json        ← --clone-starred progress
-        ├── backup_state.json               ← last successful run
-        ├── backup_history.json             ← recent runs
-        ├── backup_checkpoint.json          ← only while a run is in progress
+        ├── backup_state.json               ← incremental watermarks per repository
+        ├── backup_history.json             ← recent runs (--history-size)
+        ├── backup_checkpoint.json          ← only after an interrupted run
         ├── backup_manifest.json            ← --manifest
+        ├── .backup.lock                    ← engine lock (stays on disk, see below)
         ├── gists/
         │   ├── <gist-id>.json              ← --gists
         │   ├── <gist-id>.starred.json      ← --starred-gists
@@ -92,11 +95,32 @@ branch name.
 ```
 
 `discussions.json`, `discussion_comments_<n>.json`, `projects.json` and
-`project_columns_<id>.json` are **not** produced on github.com: see
-[Discussions and Classic Projects](../backup-categories.md#discussions).
+`project_columns_<id>.json` are **not** produced: GitHub's REST API has no such
+endpoints, see [Discussions and Classic Projects](../backup-categories.md#discussions).
+Repositories that the options exclude (forks without `--forks`, private
+repositories without `--private`, `--include-repos` / `--exclude-repos`) get
+neither a clone nor a metadata directory.
 
-Two lock files, `<output>/.github-backup.lock` and `json/.backup.lock`, exist only
-while a run is active.
+### Bookkeeping files
+
+| File | Meaning |
+|------|---------|
+| `repos.json` | The repositories this backup covers, as GitHub listed them: only the ones the options include, merged with earlier listings so that a repository deleted on GitHub stays recorded.  `--diff-with` compares it between two backups. |
+| `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
+| `backup_history.json` | One entry per run (time, repositories backed up, duration, `success`, `failures`, tool version), newest last, at most `--history-size` entries. |
+| `backup_checkpoint.json` | Which repositories an **interrupted** run had finished.  Removed when a run completes.  A later run resumes from it only if it is less than 6 hours old; an older one is ignored. |
+| `backup_manifest.json` | `--manifest`: SHA-256 of every data file under `json/`, except the history, state, checkpoint and lock files (the git clones are not included). |
+| `starred_clone_queue.json` | `--clone-starred` progress; see [User data](../user-data.md#durable-queue-and-refresh). |
+
+### Lock files
+
+Two lock files serialise runs: `<output>/.github-backup.lock` and
+`<owner>/json/.backup.lock`.  They are operating-system file locks held for
+the duration of the run and released by the kernel when the process ends, however it
+ends (including `kill -9`, an out-of-memory kill or a power cut).  The files
+themselves are **left on disk** and are harmless; there is nothing to clean up
+and no stale-lock state.  A second run on the same owner stops with "another
+backup ... is already running" (exit status `1`).
 
 ## Issue and pull request numbers share one space
 
@@ -119,15 +143,19 @@ issues API lists pull requests too; they carry a `pull_request` property).
 | Path pattern | Clone command | Contents |
 |-------------|---------------|----------|
 | `git/repos/<repo>.git/` | `git clone --mirror` | All refs, all history (default) |
-| `git/repos/<repo>/` | `git clone` | Working tree (`--clone-type full`) |
+| `git/repos/<repo>/` | `git clone` | Working tree (`--clone-type full`); not pushed by `--mirror-to` |
 | `git/wikis/<repo>.wiki.git/` | `git clone --mirror` | Wiki pages as Markdown |
 | `git/gists/<gist-id>.git/` | `git clone --mirror` | Gist file history |
-| `git/starred/<owner>/<repo>.git/` | per `--clone-type` | Starred repositories |
+| `git/starred/<owner>/<repo>.git/` | per `--clone-type` | Starred repositories (`--clone-starred`) |
+
+`--clone-type bare` and `shallow:<n>` also use `<repo>.git`; `--lfs` uses a
+mirror clone plus the LFS objects in the same directory.
 
 ### JSON metadata (`json/`)
 
 | File | Enabled by |
 |------|-----------|
+| `repos.json` | always (see above) |
 | `starred.json` | `--starred` |
 | `watched.json` | `--watched` |
 | `followers.json` | `--followers` |
@@ -168,6 +196,17 @@ when GitHub provides one, its SHA-256 digest; `<file>.sha256` records the
 checksum (`<sha256>  <file>`).  On the next run an asset is skipped only if it
 is complete: its size equals GitHub's and its content matches the digest (or,
 when GitHub has none, the sidecar).  Otherwise it is downloaded again.
+
+## Clones Follow GitHub
+
+A mirror clone is updated with `git fetch --all --prune`, so a branch or tag
+that is deleted on GitHub is deleted from the backup on the next run, and a
+force-pushed branch is overwritten.  The backup is a faithful copy of the
+current state, not an archive of every state; objects that become unreachable
+stay in the repository's object store until `git gc` removes them.  Use
+`--no-prune` to keep deleted refs (force-pushed refs are still updated), and
+snapshot the output directory with a tool such as restic, borg or ZFS if you
+need history.
 
 ## Design Rationale
 
