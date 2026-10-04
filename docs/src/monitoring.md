@@ -1,7 +1,7 @@
 # Monitoring & Reporting
 
 A backup is only as good as your knowledge that it ran.  `github-backup`
-reports every run in five ways, all derived from **one** list of failures so
+reports every run in six ways, all derived from **one** list of failures so
 that they cannot disagree:
 
 | Signal | Where | Enabled by |
