@@ -68,6 +68,17 @@ impl RunControl {
     }
 }
 
+/// One-line rendering for log records: git's stderr spans several lines, which
+/// would break the one-record-per-line shape of the log.  The recorded
+/// [`Failure`](crate::stats::Failure) keeps the original text.
+fn single_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 /// Runs the steps of one scope — a repository, or an owner-level category —
 /// recording failures instead of propagating them.
 #[derive(Debug)]
@@ -133,7 +144,7 @@ impl<'a> Steps<'a> {
     pub(crate) fn record(&mut self, step: &str, message: &str) {
         self.clean = false;
         let message = self.scrub(message);
-        warn!(scope = %self.scope, step, error = %message, "step failed, continuing with the rest");
+        warn!(scope = %self.scope, step, error = %single_line(&message), "step failed, continuing with the rest");
         self.stats
             .record_failure(self.scope.clone(), step, message.clone());
         self.note_first(step, &message);
@@ -143,10 +154,10 @@ impl<'a> Steps<'a> {
         self.clean = false;
         let message = self.scrub(&e.to_string());
         if e.is_fatal() {
-            error!(scope = %self.scope, step, error = %message, "fatal error: stopping the run");
+            error!(scope = %self.scope, step, error = %single_line(&message), "fatal error: stopping the run");
             self.control.set_fatal(e);
         } else {
-            warn!(scope = %self.scope, step, error = %message, "step failed, continuing with the rest");
+            warn!(scope = %self.scope, step, error = %single_line(&message), "step failed, continuing with the rest");
             self.stats
                 .record_failure(self.scope.clone(), step, message.clone());
         }
@@ -160,7 +171,7 @@ impl<'a> Steps<'a> {
 
     fn note_first(&mut self, step: &str, message: &str) {
         if self.first_failure.is_none() {
-            self.first_failure = Some(format!("{step}: {message}"));
+            self.first_failure = Some(format!("{step}: {}", single_line(message)));
         }
     }
 
@@ -309,5 +320,14 @@ mod tests {
         assert!(steps.is_clean());
         assert!(steps.first_failure().is_none());
         assert_eq!(stats.failure_count(), 0);
+    }
+
+    #[test]
+    fn multi_line_messages_become_one_log_line_but_are_recorded_intact() {
+        assert_eq!(
+            single_line("git clone failed\nfatal: boom\n\n hint "),
+            "git clone failed | fatal: boom | hint"
+        );
+        assert_eq!(single_line(""), "");
     }
 }

@@ -557,9 +557,9 @@ where
                     RepoResult::Skipped => task_stats.inc_skipped(),
                     RepoResult::Failed(summary) => {
                         task_stats.inc_errored();
-                        error!(
+                        // The step failure was already logged with its reason.
+                        warn!(
                             repo = %repo.full_name,
-                            error = %summary,
                             "repository backup incomplete, continuing"
                         );
                         if let Some(ref tx) = event_tx {

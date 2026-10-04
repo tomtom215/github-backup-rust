@@ -133,7 +133,9 @@ fn summarise_stderr(bytes: &[u8]) -> String {
     let lines: Vec<&str> = text
         .split(['\n', '\r'])
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !is_progress_line(line))
+        .filter(|line| {
+            !line.is_empty() && !is_progress_line(line) && !line.starts_with("Cloning into")
+        })
         .collect();
     let start = lines.len().saturating_sub(ERROR_LINES);
     lines[start..].join("\n")
@@ -280,7 +282,10 @@ mod tests {
             fatal: unable to access 'https://example.invalid/r.git/': Could not resolve host\n";
         let out = summarise_stderr(raw);
         assert!(out.contains("fatal: unable to access"), "{out}");
-        assert!(out.contains("Cloning into bare repository"), "{out}");
+        assert!(
+            !out.contains("Cloning into"),
+            "git's banner only buries the reason: {out}"
+        );
         assert!(!out.contains("45%"), "progress must be dropped: {out}");
     }
 

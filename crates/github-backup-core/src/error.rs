@@ -11,7 +11,7 @@ use github_backup_client::ClientError;
 #[derive(Debug, Error)]
 pub enum CoreError {
     /// An error from the GitHub API client.
-    #[error("GitHub API error: {0}")]
+    #[error(transparent)]
     Client(#[from] ClientError),
 
     /// A filesystem I/O error.
@@ -29,7 +29,7 @@ pub enum CoreError {
     Json(#[from] serde_json::Error),
 
     /// A `git` subprocess exited with a non-zero status.
-    #[error("git {args} failed (exit {code}): {stderr}")]
+    #[error("git {} failed (exit {code}): {stderr}", git_operation(.args))]
     GitFailed {
         /// The git arguments (for context).
         args: String,
@@ -41,7 +41,7 @@ pub enum CoreError {
 
     /// A `git` subprocess was stopped because it made no progress (produced no
     /// output) for longer than the stall limit.
-    #[error("git {args} made no progress for {timeout_secs}s and was stopped")]
+    #[error("git {} made no progress for {timeout_secs}s and was stopped", git_operation(.args))]
     GitTimeout {
         /// The git arguments (for context).
         args: String,
@@ -81,6 +81,15 @@ pub enum CoreError {
         /// The lossy string representation of the offending path.
         path: String,
     },
+}
+
+/// The git operation (`clone`, `fetch`, `push`, ...) out of a full argument
+/// list.  Messages name the operation only: the arguments carry URLs and local
+/// paths that bury the reason, and the log already says which repository.
+fn git_operation(args: &str) -> &str {
+    args.split_whitespace()
+        .find(|word| !word.starts_with('-'))
+        .unwrap_or("command")
 }
 
 impl CoreError {
@@ -214,5 +223,28 @@ mod tests {
             );
         }
         assert!(!CoreError::Interrupted.is_remote_missing());
+    }
+
+    #[test]
+    fn git_errors_name_the_operation_not_the_whole_command_line() {
+        let e = CoreError::GitFailed {
+            args: "clone --progress --mirror file:///very/long/origin.git /very/long/dest.git"
+                .into(),
+            code: 128,
+            stderr: "fatal: repository not found".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "git clone failed (exit 128): fatal: repository not found"
+        );
+        let t = CoreError::GitTimeout {
+            args: "fetch --progress --all".into(),
+            timeout_secs: 60,
+        };
+        assert_eq!(
+            t.to_string(),
+            "git fetch made no progress for 60s and was stopped"
+        );
+        assert_eq!(git_operation("--progress"), "command");
     }
 }

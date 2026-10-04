@@ -343,8 +343,6 @@ async fn finish(
     started_at_unix: u64,
     encrypt_key: Option<&[u8; 32]>,
 ) -> ExitCode {
-    info!("{stats}");
-
     if post.dry_run {
         // A dry run changes nothing: no manifest, mirror push, S3 sync, report,
         // metrics, history or webhook.
