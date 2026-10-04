@@ -105,6 +105,13 @@ use super::clone_type::CliCloneType;
         --mirror-to https://codeberg.org \\\n      \
         --mirror-token $CODEBERG_TOKEN --mirror-owner alice\n\
         \n\
+        EXIT STATUS:\n  \
+        0  everything that was asked for succeeded\n  \
+        1  the run could not be carried out (bad config, rejected token, ...)\n  \
+        2  usage error\n  \
+        3  the run finished but some items could not be backed up\n  \
+        130/143  interrupted (Ctrl+C / SIGTERM)\n\
+        \n\
         MORE:  https://tomtom215.github.io/github-backup-rust/\n",
 )]
 #[command(group(
@@ -124,7 +131,7 @@ pub struct Args {
     ///
     /// Values in the file act as defaults; explicit CLI flags take precedence.
     /// See the documentation for the full schema.
-    #[arg(long, short = 'c', value_name = "FILE")]
+    #[arg(help_heading = "Configuration", long, short = 'c', value_name = "FILE")]
     pub config: Option<PathBuf>,
 
     /// Print an annotated TOML configuration template to stdout and exit.
@@ -139,24 +146,26 @@ pub struct Args {
     /// ```
     ///
     /// All values are commented out; uncomment and edit the ones you need.
-    #[arg(long)]
+    #[arg(help_heading = "Configuration", verbatim_doc_comment, long)]
     pub print_config_template: bool,
 
     /// Run a self-diagnostic and exit.
     ///
-    /// Checks every prerequisite for a working backup, in order:
+    /// Checks the prerequisites for a working backup, in order:
     ///
-    /// 1. `git` binary is installed and meets the minimum version.
-    /// 2. The output directory exists, is writable, and has free space.
+    /// 1. `git` is installed (its version is reported; old versions warn).
+    /// 2. The output directory is writable.
     /// 3. A GitHub credential is configured (or anonymous mode is OK).
-    /// 4. Network connectivity to `api.github.com` (or `--api-url`).
-    /// 5. Token authenticity (one `GET /user` call) and granted OAuth scopes.
-    /// 6. The scopes are sufficient for the categories you have enabled.
+    /// 4. The API (`api.github.com` or `--api-url`, through any
+    ///    `HTTPS_PROXY`) is reachable and the token is accepted.
+    ///
+    /// It does not check OAuth scopes: use `--list-scopes` for the scopes
+    /// the enabled categories need.
     ///
     /// Prints a coloured pass/fail summary and exits 0 if every check
     /// passed, 1 otherwise.  This is the fastest way to confirm a fresh
     /// install will succeed before scheduling a real run in cron / CI.
-    #[arg(long)]
+    #[arg(help_heading = "Configuration", verbatim_doc_comment, long)]
     pub doctor: bool,
 
     /// Validate the configuration and authentication, then exit without
@@ -165,7 +174,7 @@ pub struct Args {
     /// Identical to `--doctor` for the network checks but additionally
     /// reports the resolved category set, output paths, and any flag
     /// conflicts.  Use it as a `--dry-run` for the *configuration* itself.
-    #[arg(long)]
+    #[arg(help_heading = "Configuration", long)]
     pub check: bool,
 
     /// Print the OAuth scopes recommended for the currently-enabled
@@ -174,7 +183,7 @@ pub struct Args {
     /// Useful when creating a personal access token: run with the same
     /// flags you intend to use, then paste the printed scope list into
     /// the token creation page.
-    #[arg(long)]
+    #[arg(help_heading = "Configuration", long)]
     pub list_scopes: bool,
 
     // ── Authentication ─────────────────────────────────────────────────────
@@ -182,6 +191,7 @@ pub struct Args {
     ///
     /// Can also be set via the `GITHUB_TOKEN` environment variable.
     #[arg(
+        help_heading = "Authentication",
         short = 't',
         long = "token",
         env = "GITHUB_TOKEN",
@@ -194,7 +204,7 @@ pub struct Args {
     ///
     /// Opens a browser code entry at `github.com/login/device`.
     /// Requires `--oauth-client-id`.
-    #[arg(long)]
+    #[arg(help_heading = "Authentication", long)]
     pub device_auth: bool,
 
     /// GitHub OAuth App client ID (required when using `--device-auth`).
@@ -207,13 +217,19 @@ pub struct Args {
     // environment variable, so merely having `GITHUB_OAUTH_CLIENT_ID` set (or
     // forwarded as an empty string by Compose/Unraid) would reject every run.
     // `Args::check_dependencies` enforces it for the command-line flag only.
-    #[arg(long, value_name = "CLIENT_ID", env = "GITHUB_OAUTH_CLIENT_ID")]
+    #[arg(
+        help_heading = "Authentication",
+        long,
+        value_name = "CLIENT_ID",
+        env = "GITHUB_OAUTH_CLIENT_ID"
+    )]
     pub oauth_client_id: Option<String>,
 
     /// OAuth scopes to request (space-separated).
     ///
     /// Default: `"repo gist read:org"` — sufficient for a complete backup.
     #[arg(
+        help_heading = "Authentication",
         long,
         value_name = "SCOPES",
         default_value = "repo gist read:org",
@@ -223,21 +239,26 @@ pub struct Args {
 
     // ── Output ─────────────────────────────────────────────────────────────
     /// Root directory where backup artefacts will be written.
-    #[arg(short = 'o', long = "output", value_name = "DIR")]
+    #[arg(
+        help_heading = "Output",
+        short = 'o',
+        long = "output",
+        value_name = "DIR"
+    )]
     pub output: Option<PathBuf>,
 
     /// Write a JSON summary report to this file after the backup completes.
     ///
     /// The report contains counters for every backed-up category.
     /// Useful for monitoring and auditing.
-    #[arg(long, value_name = "FILE")]
+    #[arg(help_heading = "Output", long, value_name = "FILE")]
     pub report: Option<PathBuf>,
 
     // ── Target type ────────────────────────────────────────────────────────
     /// Treat OWNER as a GitHub organisation (uses the org repos API).
     ///
     /// Without this flag, OWNER is treated as a user account.
-    #[arg(long)]
+    #[arg(help_heading = "Target", long)]
     pub org: bool,
 
     // ── Broad selectors ────────────────────────────────────────────────────
@@ -274,7 +295,7 @@ pub struct Args {
     ///
     /// **Not controlled by `--all`** (output/behaviour flags):
     ///   `--lfs` `--prefer-ssh` `--no-prune` `--clone-type` `--concurrency`
-    #[arg(long, conflicts_with_all = [
+    #[arg(help_heading = "What to back up", long, conflicts_with_all = [
         "repositories", "issues", "issue_comments", "issue_events",
         "pulls", "pull_comments", "pull_commits", "pull_reviews",
         "labels", "milestones", "releases", "release_assets",
@@ -288,19 +309,19 @@ pub struct Args {
 
     // ── Repository options ─────────────────────────────────────────────────
     /// Clone/mirror repositories.
-    #[arg(long)]
+    #[arg(help_heading = "Repositories and git", long)]
     pub repositories: bool,
 
     /// Include forked repositories.
-    #[arg(long, short = 'F')]
+    #[arg(help_heading = "Repositories and git", long, short = 'F')]
     pub forks: bool,
 
     /// Include private repositories (requires appropriate token scope).
-    #[arg(long, short = 'P')]
+    #[arg(help_heading = "Repositories and git", long, short = 'P')]
     pub private: bool,
 
     /// Clone using SSH URLs instead of HTTPS.
-    #[arg(long)]
+    #[arg(help_heading = "Repositories and git", long)]
     pub prefer_ssh: bool,
 
     /// How to clone repositories.
@@ -312,81 +333,87 @@ pub struct Args {
     /// - `shallow:<depth>`  — `git clone --depth <n>`; limited history
     ///
     /// Example: `--clone-type shallow:10`
-    #[arg(long, value_name = "TYPE", default_value = "mirror")]
+    #[arg(
+        help_heading = "Repositories and git",
+        verbatim_doc_comment,
+        long,
+        value_name = "TYPE",
+        default_value = "mirror"
+    )]
     pub clone_type: CliCloneType,
 
     /// Clone with Git LFS support.
-    #[arg(long)]
+    #[arg(help_heading = "Repositories and git", long)]
     pub lfs: bool,
 
     /// Do not prune deleted remote refs during git remote updates.
-    #[arg(long)]
+    #[arg(help_heading = "Repositories and git", long)]
     pub no_prune: bool,
 
     // ── Issue options ──────────────────────────────────────────────────────
     /// Back up issue metadata.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub issues: bool,
 
     /// Back up issue comment threads.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub issue_comments: bool,
 
     /// Back up issue timeline events.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub issue_events: bool,
 
     // ── Pull request options ───────────────────────────────────────────────
     /// Back up pull request metadata.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub pulls: bool,
 
     /// Back up pull request review comments.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub pull_comments: bool,
 
     /// Back up pull request commit lists.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub pull_commits: bool,
 
     /// Back up pull request reviews.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub pull_reviews: bool,
 
     // ── Repository metadata ────────────────────────────────────────────────
     /// Back up repository labels.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub labels: bool,
 
     /// Back up repository milestones.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub milestones: bool,
 
     /// Back up release metadata.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub releases: bool,
 
     /// Download release binary assets.
     ///
     /// Requires `--releases`.
-    #[arg(long, requires = "releases")]
+    #[arg(help_heading = "What to back up", long, requires = "releases")]
     pub release_assets: bool,
 
     /// Back up webhook configurations (requires admin token scope).
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub hooks: bool,
 
     /// Back up published security advisories.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub security_advisories: bool,
 
     /// Clone repository wikis.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub wikis: bool,
 
     // ── User / org data ────────────────────────────────────────────────────
     /// Record the list of repositories starred by the owner as JSON.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub starred: bool,
 
     /// Clone every starred repository as a bare mirror.
@@ -397,61 +424,61 @@ pub struct Args {
     ///
     /// Not included in `--all` because it can consume significant disk space
     /// and time for users with many starred repositories.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub clone_starred: bool,
 
     /// Back up repositories watched by the owner.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub watched: bool,
 
     /// Back up the owner's follower list.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub followers: bool,
 
     /// Back up the list of accounts the owner follows.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub following: bool,
 
     /// Back up gists owned by the owner.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub gists: bool,
 
     /// Back up gists starred by the authenticated user.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub starred_gists: bool,
 
     // ── Additional repository metadata ─────────────────────────────────────
     /// Back up repository topics (tags).
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub topics: bool,
 
     /// Back up the list of repository branches and their protection status.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub branches: bool,
 
     /// Back up deploy keys for each repository (requires admin access).
     ///
     /// Repositories where the token lacks admin access are skipped silently.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub deploy_keys: bool,
 
     /// Back up the list of collaborators for each repository (requires admin access).
     ///
     /// Repositories where the token lacks admin access are skipped silently.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub collaborators: bool,
 
     // ── Organisation data ──────────────────────────────────────────────────
     /// Back up the member list of the organisation (requires `--org`).
     ///
     /// Ignored when backing up a user account.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub org_members: bool,
 
     /// Back up the team list of the organisation (requires `--org`).
     ///
     /// Ignored when backing up a user account.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub org_teams: bool,
 
     // ── GitHub Actions ─────────────────────────────────────────────────────
@@ -459,7 +486,7 @@ pub struct Args {
     ///
     /// Saves `workflows.json` to each repository's metadata directory.
     /// The actual workflow YAML files are already captured by the git clone.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub actions: bool,
 
     /// Back up GitHub Actions workflow run history.
@@ -467,7 +494,7 @@ pub struct Args {
     /// For each workflow, saves `workflow_runs_<id>.json`. Can generate very
     /// large files for active repositories; opt in deliberately.
     /// Requires `--actions`.
-    #[arg(long, requires = "actions")]
+    #[arg(help_heading = "What to back up", long, requires = "actions")]
     pub action_runs: bool,
 
     // ── Deployment environments ────────────────────────────────────────────
@@ -475,7 +502,7 @@ pub struct Args {
     ///
     /// Saves `environments.json` with protection rules, required reviewers,
     /// and branch policies.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub environments: bool,
 
     // ── GitHub Discussions ─────────────────────────────────────────────────
@@ -483,7 +510,7 @@ pub struct Args {
     ///
     /// Requires the Discussions feature to be enabled on the repository.
     /// Saves `discussions.json` and per-discussion comment files.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub discussions: bool,
 
     // ── Classic Projects ───────────────────────────────────────────────────
@@ -491,7 +518,7 @@ pub struct Args {
     ///
     /// Requires Classic Projects to be enabled on the repository.
     /// Saves `projects.json` and per-project column files.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub projects: bool,
 
     // ── GitHub Packages ────────────────────────────────────────────────────
@@ -500,7 +527,7 @@ pub struct Args {
     /// Requires the `read:packages` OAuth scope.  Iterates over all supported
     /// package ecosystems (container, npm, maven, rubygems, nuget, docker) and
     /// saves package list and version metadata to the owner's JSON directory.
-    #[arg(long)]
+    #[arg(help_heading = "What to back up", long)]
     pub packages: bool,
 
     // ── Repository name filters ────────────────────────────────────────────
@@ -511,14 +538,24 @@ pub struct Args {
     ///
     /// Pattern syntax: `*` matches any sequence, `?` matches one character.
     /// Matching is case-insensitive.
-    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    #[arg(
+        help_heading = "Filters",
+        long,
+        value_name = "PATTERN",
+        value_delimiter = ','
+    )]
     pub include_repos: Vec<String>,
 
     /// Exclude repositories whose names match this glob pattern.
     ///
     /// Repeat the flag or separate patterns with commas.
     /// Takes precedence over `--include-repos`.
-    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    #[arg(
+        help_heading = "Filters",
+        long,
+        value_name = "PATTERN",
+        value_delimiter = ','
+    )]
     pub exclude_repos: Vec<String>,
 
     // ── Incremental behaviour ──────────────────────────────────────────────
@@ -531,14 +568,19 @@ pub struct Args {
     ///
     /// Accepts `2024-01-01` or `2024-01-01T00:00:00Z`.  Without this flag each
     /// repository's own watermark from the previous run is used.
-    #[arg(long, value_name = "DATE", conflicts_with = "full")]
+    #[arg(
+        help_heading = "Incremental",
+        long,
+        value_name = "DATE",
+        conflicts_with = "full"
+    )]
     pub since: Option<String>,
 
     /// Ignore incremental state and fetch everything again.
     ///
     /// Re-fetches the comments, events, commits and reviews of every issue and
     /// pull request even if nothing changed since the previous run.
-    #[arg(long)]
+    #[arg(help_heading = "Incremental", long)]
     pub full: bool,
 
     // ── GitHub Enterprise ──────────────────────────────────────────────────
@@ -549,6 +591,7 @@ pub struct Args {
     /// Defaults to `https://api.github.com`.
     /// Can also be set via the `GITHUB_API_URL` environment variable.
     #[arg(
+        help_heading = "GitHub Enterprise",
         long,
         value_name = "URL",
         env = "GITHUB_API_URL",
@@ -568,6 +611,7 @@ pub struct Args {
     ///
     /// Can also be set via the `GITHUB_CLONE_HOST` environment variable.
     #[arg(
+        help_heading = "GitHub Enterprise",
         long,
         value_name = "HOST",
         env = "GITHUB_CLONE_HOST",
@@ -585,7 +629,12 @@ pub struct Args {
     ///
     /// Provide the base URL, e.g. `https://codeberg.org` or
     /// `https://gitlab.com`.
-    #[arg(long, value_name = "URL")]
+    #[arg(
+        help_heading = "Mirroring",
+        verbatim_doc_comment,
+        long,
+        value_name = "URL"
+    )]
     pub mirror_to: Option<String>,
 
     /// Mirror destination type.
@@ -594,6 +643,8 @@ pub struct Args {
     /// - `gitea` (default) — Gitea, Codeberg, Forgejo (Gitea REST API v1)
     /// - `gitlab`          — GitLab.com or self-hosted GitLab CE/EE (REST API v4)
     #[arg(
+        help_heading = "Mirroring",
+        verbatim_doc_comment,
         long,
         value_name = "TYPE",
         default_value = "gitea",
@@ -608,6 +659,7 @@ pub struct Args {
     //
     // No clap `requires = "mirror_to"`: see `oauth_client_id`.
     #[arg(
+        help_heading = "Mirroring",
         long,
         value_name = "TOKEN",
         env = "MIRROR_TOKEN",
@@ -616,11 +668,16 @@ pub struct Args {
     pub mirror_token: Option<String>,
 
     /// Owner name at the mirror destination (username or org/namespace).
-    #[arg(long, value_name = "OWNER", requires = "mirror_to")]
+    #[arg(
+        help_heading = "Mirroring",
+        long,
+        value_name = "OWNER",
+        requires = "mirror_to"
+    )]
     pub mirror_owner: Option<String>,
 
     /// Create repositories as private at the mirror destination.
-    #[arg(long, requires = "mirror_to")]
+    #[arg(help_heading = "Mirroring", long, requires = "mirror_to")]
     pub mirror_private: bool,
 
     // ── S3 storage options ─────────────────────────────────────────────────
@@ -630,27 +687,42 @@ pub struct Args {
     /// clones are NOT uploaded.  Works with AWS S3, Backblaze B2, MinIO,
     /// Cloudflare R2, DigitalOcean Spaces, and Wasabi.  Failed uploads make
     /// the run fail.
-    #[arg(long, value_name = "BUCKET")]
+    #[arg(help_heading = "S3 storage", long, value_name = "BUCKET")]
     pub s3_bucket: Option<String>,
 
     /// AWS region for the S3 bucket (e.g., `us-east-1`).
     ///
     /// Defaults to `us-east-1` when not specified.
-    #[arg(long, value_name = "REGION", requires = "s3_bucket")]
+    #[arg(
+        help_heading = "S3 storage",
+        long,
+        value_name = "REGION",
+        requires = "s3_bucket"
+    )]
     pub s3_region: Option<String>,
 
     /// Key prefix for all S3 objects (e.g., `github-backup/`).
     ///
     /// Objects are stored as `<prefix>/<owner>/json/<path>`.  A trailing
     /// slash is optional.
-    #[arg(long, value_name = "PREFIX", requires = "s3_bucket")]
+    #[arg(
+        help_heading = "S3 storage",
+        long,
+        value_name = "PREFIX",
+        requires = "s3_bucket"
+    )]
     pub s3_prefix: Option<String>,
 
     /// Custom S3-compatible endpoint, with scheme (for B2, MinIO, R2, etc.).
     ///
     /// Example for B2: `https://s3.us-west-004.backblazeb2.com`.  Private CAs
     /// are trusted through `SSL_CERT_FILE`.  `HTTPS_PROXY` is not used.
-    #[arg(long, value_name = "URL", requires = "s3_bucket")]
+    #[arg(
+        help_heading = "S3 storage",
+        long,
+        value_name = "URL",
+        requires = "s3_bucket"
+    )]
     pub s3_endpoint: Option<String>,
 
     /// AWS access key ID.
@@ -661,6 +733,7 @@ pub struct Args {
     //
     // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
     #[arg(
+        help_heading = "S3 storage",
         long,
         value_name = "KEY",
         env = "AWS_ACCESS_KEY_ID",
@@ -675,6 +748,7 @@ pub struct Args {
     //
     // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
     #[arg(
+        help_heading = "S3 storage",
         long,
         value_name = "SECRET",
         env = "AWS_SECRET_ACCESS_KEY",
@@ -689,6 +763,7 @@ pub struct Args {
     //
     // No clap `requires = "s3_bucket"`: see `oauth_client_id`.
     #[arg(
+        help_heading = "S3 storage",
         long,
         value_name = "TOKEN",
         env = "AWS_SESSION_TOKEN",
@@ -701,7 +776,7 @@ pub struct Args {
     /// By default, only JSON metadata is uploaded; binary release assets
     /// are kept local only.  Dropping this flag later never deletes assets
     /// that are already in the bucket.
-    #[arg(long, requires = "s3_bucket")]
+    #[arg(help_heading = "S3 storage", long, requires = "s3_bucket")]
     pub s3_include_assets: bool,
 
     /// Delete S3 objects that no longer exist in the local backup.
@@ -715,7 +790,7 @@ pub struct Args {
     ///
     /// **Use with caution** — deletion is permanent unless the bucket has
     /// versioning enabled.
-    #[arg(long, requires = "s3_bucket")]
+    #[arg(help_heading = "S3 storage", long, requires = "s3_bucket")]
     pub s3_delete_stale: bool,
 
     // ── Execution ─────────────────────────────────────────────────────────
@@ -726,11 +801,11 @@ pub struct Args {
     /// This explicit `Option` form lets the config file supply the value when
     /// the CLI flag is absent, while still allowing `--concurrency 4` to
     /// override the config file's value correctly.
-    #[arg(long, value_name = "N")]
+    #[arg(help_heading = "Execution", long, value_name = "N")]
     pub concurrency: Option<usize>,
 
     /// Log what would be done without writing any files or running git.
-    #[arg(long)]
+    #[arg(help_heading = "Execution", long)]
     pub dry_run: bool,
 
     // ── Manifest & integrity ───────────────────────────────────────────────
@@ -739,7 +814,7 @@ pub struct Args {
     /// Writes `<output>/<owner>/json/backup_manifest.json` containing the
     /// SHA-256 digest of every backed-up JSON file.  Use `--verify` on a
     /// subsequent run to confirm the backup has not been tampered with.
-    #[arg(long)]
+    #[arg(help_heading = "Integrity", long)]
     pub manifest: bool,
 
     /// Verify the integrity of an existing backup instead of running a backup.
@@ -749,7 +824,7 @@ pub struct Args {
     /// file is missing, changed, or unexpected.
     ///
     /// Requires `--output` and OWNER.  Does not contact the GitHub API.
-    #[arg(long, conflicts_with = "all")]
+    #[arg(help_heading = "Integrity", long, conflicts_with = "all")]
     pub verify: bool,
 
     // ── Retention / pruning ────────────────────────────────────────────────
@@ -758,14 +833,14 @@ pub struct Args {
     ///
     /// Backup snapshots are detected as date-stamped subdirectories under
     /// `<output>` matching the pattern `YYYY-MM-DD*`.  Requires `--output`.
-    #[arg(long, value_name = "N")]
+    #[arg(help_heading = "Deprecated", long, value_name = "N")]
     pub keep_last: Option<usize>,
 
     /// Delete backup snapshot directories older than N days.
     ///
     /// Combined with `--keep-last`, both constraints are applied and
     /// whichever removes more snapshots wins.
-    #[arg(long, value_name = "DAYS")]
+    #[arg(help_heading = "Deprecated", long, value_name = "DAYS")]
     pub max_age_days: Option<u64>,
 
     // ── Prometheus metrics ─────────────────────────────────────────────────
@@ -774,7 +849,7 @@ pub struct Args {
     /// Emits counters for repositories backed up, issues fetched, etc. in the
     /// Prometheus text exposition format.  Useful for push-gateway or node
     /// exporter textfile collector integration.
-    #[arg(long, value_name = "FILE")]
+    #[arg(help_heading = "Monitoring and logging", long, value_name = "FILE")]
     pub prometheus_metrics: Option<std::path::PathBuf>,
 
     // ── Diff ──────────────────────────────────────────────────────────────
@@ -784,7 +859,7 @@ pub struct Args {
     /// Provide the path to the *previous* backup's owner JSON directory
     /// (e.g. `/var/backup/2025-12-01/octocat/json`).  Does not contact the
     /// GitHub API.
-    #[arg(long, value_name = "PREV_JSON_DIR")]
+    #[arg(help_heading = "Integrity", long, value_name = "PREV_JSON_DIR")]
     pub diff_with: Option<std::path::PathBuf>,
 
     // ── Restore ───────────────────────────────────────────────────────────
@@ -795,11 +870,16 @@ pub struct Args {
     /// `--restore-target-org` and a token with write access.
     ///
     /// **Warning:** This modifies GitHub data.  Use with care.
-    #[arg(long)]
+    #[arg(help_heading = "Restore", long)]
     pub restore: bool,
 
     /// Target organisation for `--restore`.
-    #[arg(long, value_name = "ORG", requires = "restore")]
+    #[arg(
+        help_heading = "Restore",
+        long,
+        value_name = "ORG",
+        requires = "restore"
+    )]
     pub restore_target_org: Option<String>,
 
     /// Skip the interactive confirmation prompt for `--restore`.
@@ -808,7 +888,7 @@ pub struct Args {
     /// interactive confirmation (TTY) or this flag (non-interactive / CI).
     /// Pass `--restore-yes` to acknowledge the warning and proceed without
     /// user input.
-    #[arg(long, requires = "restore")]
+    #[arg(help_heading = "Restore", long, requires = "restore")]
     pub restore_yes: bool,
 
     // ── Encryption ────────────────────────────────────────────────────────
@@ -826,6 +906,7 @@ pub struct Args {
     /// The key is never written to disk, and error messages do not echo any
     /// of its characters.
     #[arg(
+        help_heading = "Encryption",
         long,
         value_name = "HEX_KEY",
         env = "BACKUP_ENCRYPT_KEY",
@@ -849,19 +930,34 @@ pub struct Args {
     ///   --decrypt-input issues.json.enc \
     ///   --decrypt-output issues.json
     /// ```
-    #[arg(long, requires = "encrypt_key")]
+    #[arg(
+        help_heading = "Encryption",
+        verbatim_doc_comment,
+        long,
+        requires = "encrypt_key"
+    )]
     pub decrypt: bool,
 
     /// Path to the AES-256-GCM encrypted file to decrypt.
     ///
     /// Required when `--decrypt` is set.
-    #[arg(long, value_name = "FILE", requires = "decrypt")]
+    #[arg(
+        help_heading = "Encryption",
+        long,
+        value_name = "FILE",
+        requires = "decrypt"
+    )]
     pub decrypt_input: Option<PathBuf>,
 
     /// Path where the decrypted plaintext will be written.
     ///
     /// Required when `--decrypt` is set.
-    #[arg(long, value_name = "FILE", requires = "decrypt")]
+    #[arg(
+        help_heading = "Encryption",
+        long,
+        value_name = "FILE",
+        requires = "decrypt"
+    )]
     pub decrypt_output: Option<PathBuf>,
 
     // ── Webhook notification ───────────────────────────────────────────────
@@ -874,6 +970,7 @@ pub struct Args {
     ///
     /// Can also be set via the `BACKUP_NOTIFY_WEBHOOK` environment variable.
     #[arg(
+        help_heading = "Monitoring and logging",
         long,
         value_name = "URL",
         env = "BACKUP_NOTIFY_WEBHOOK",
@@ -883,11 +980,11 @@ pub struct Args {
 
     // ── Logging ────────────────────────────────────────────────────────────
     /// Suppress all non-error output.
-    #[arg(long, short = 'q')]
+    #[arg(help_heading = "Monitoring and logging", long, short = 'q')]
     pub quiet: bool,
 
     /// Increase log verbosity (`-v` = debug, `-vv` = trace).
-    #[arg(long, short = 'v', action = clap::ArgAction::Count)]
+    #[arg(help_heading = "Monitoring and logging", long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,
 
     // ── Run history ───────────────────────────────────────────────────────
@@ -896,7 +993,12 @@ pub struct Args {
     /// Each successful run appends an entry to
     /// `<output>/<owner>/json/backup_history.json`.  When the file grows beyond
     /// this limit, the oldest entries are dropped.  Defaults to 20.
-    #[arg(long, value_name = "N", default_value = "20")]
+    #[arg(
+        help_heading = "Monitoring and logging",
+        long,
+        value_name = "N",
+        default_value = "20"
+    )]
     pub history_size: usize,
 
     // ── TUI ────────────────────────────────────────────────────────────────
@@ -909,7 +1011,7 @@ pub struct Args {
     ///
     /// When invoked with only `--tui` (no other flags), the TUI starts with
     /// a blank configuration form ready for interactive input.
-    #[arg(long)]
+    #[arg(help_heading = "Interface", long)]
     pub tui: bool,
 }
 
