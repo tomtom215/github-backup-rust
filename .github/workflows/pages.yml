@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install mdBook and link checker
         # Pin mdBook to match the version used in ci.yml. book.toml enables
@@ -40,7 +40,7 @@ jobs:
         # With the linkcheck backend enabled, mdBook emits each backend into
         # its own subdirectory (docs/book/html/ for HTML, docs/book/linkcheck/
         # for the link-check report). Publish only the HTML tree.
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: docs/book/html/
 
@@ -54,4 +54,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
