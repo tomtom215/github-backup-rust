@@ -1,178 +1,70 @@
 # Restore Implementation
 
-This page documents how the `--restore` mode works internally.  For the
-user-facing guide, see the [Restore Guide](../restore.md).
+How `--restore` works internally.  For using it, see the
+[Restore Guide](../restore.md); this page does not repeat the procedures.
+
+The code is `crates/github-backup/src/restore.rs` (the mode) and
+`crates/github-backup-client/src/client/endpoints/write.rs` (the three write
+calls: `create_label`, `create_milestone`, `create_issue`).
 
 ---
 
-## Overview
+## Control Flow
 
-The `--restore` flag re-creates **labels**, **milestones**, and **issues**
-from the JSON backup into a target GitHub organisation via the GitHub REST
-API.
+1. `main` parses the arguments and resolves the credential.  With `--restore` it
+   calls `run::execute_restore` **instead of** the backup: no engine, no
+   post-processing, no lock, no contact with the source owner.
+2. `confirm_restore` prints the warning banner and returns `true` if
+   `--restore-yes` is set, `GITHUB_BACKUP_RESTORE_YES=1` is set, or the user
+   typed `yes` on a terminal.  Without a terminal and without either escape
+   hatch it prints both and the run ends with exit status `1`.  `--dry-run`
+   skips the confirmation.
+3. `run_restore` reads `<output>/<owner>/json/repos/`; if that directory does not
+   exist the restore fails (exit `1`: "no backup of '<owner>' found").
+4. For every repository directory, `restore_repo` restores labels, then
+   milestones, then issues.  Errors are counted per resource kind and never
+   abort the loop.
+5. The totals are logged; exit status is `3` if any resource errored, else `0`.
 
-```bash
-github-backup octocat \
-  --token ghp_your_write_token \
-  --output /var/backup/github \
-  --restore \
-  --restore-target-org new-org
-```
+## Per-Resource Rules
 
-### What is restored
+| Resource | Request | Already there | Notes |
+|----------|---------|---------------|-------|
+| Label | `POST /repos/{org}/{repo}/labels` (name, colour, description) | HTTP 422: counted as skipped | |
+| Milestone | `POST /repos/{org}/{repo}/milestones` (title, description, state, due date) | HTTP 422: skipped | |
+| Issue | `POST /repos/{org}/{repo}/issues` (title, body, label names) | marker found in the target: skipped | pull requests (`pull_request` set) are skipped and counted |
 
-| Artefact | Source JSON | GitHub API endpoint |
-|----------|-------------|---------------------|
-| Labels | `json/repos/<repo>/labels.json` | `POST /repos/{org}/{repo}/labels` |
-| Milestones | `json/repos/<repo>/milestones.json` | `POST /repos/{org}/{repo}/milestones` |
-| Issues | `json/repos/<repo>/issues.json` | `POST /repos/{org}/{repo}/issues` |
+* **Marker.**  Before restoring a repository's issues the tool pages through the
+  target's issues (`state=all`) and collects every
+  `<!-- github-backup-restore:<owner>/<repo>#<number> -->` found in a body.  A
+  backed-up issue whose marker is present is skipped.  Each created issue's body
+  is the original text, a rule, an italic "Restored by github-backup from ..."
+  line (original author and creation time) and the marker.
+* **No restore of state.**  The create-issue request carries no state,
+  assignees or milestone: closed issues are re-created open.  Issue numbers
+  are assigned by GitHub and differ from the originals.
+* **Missing target repository.**  Listing the target's issues fails, the
+  repository's issues are counted as errored and skipped; its labels and
+  milestones fail the same way, one request each.
+* **Order.**  Labels before issues so that label names exist.  Label names are
+  passed to the API as they are.
+* **Dry run.**  Counts what would be created, makes no request and does not
+  look for markers.
 
-### Behaviour
+The JSON is read through the typed models (`Label`, `Milestone`, `Issue`);
+the files are lossless copies of GitHub's responses, and these types ignore the
+properties restore does not need.
 
-- **Additive only** — existing resources are never deleted or modified.
-- **Idempotent** — re-running with the same backup is safe; duplicate
-  labels and milestones (HTTP 422) are silently skipped.
-- **Per-repository** — iterates over every repository directory under
-  `json/repos/` and restores each one independently.  A failure in one
-  repository is logged but does not abort the rest.
-- **Issue numbers are not preserved** — issues created in the target
-  repository receive new sequential numbers.  References to original
-  issue numbers in the bodies are not rewritten.
-- **Pull requests are skipped** — entries in `issues.json` whose
-  `pull_request` field is set are not re-created.
+## Why Pull Requests Are Not Restored
 
-### Token requirements
+GitHub offers no API to create a pull request from historic data (authors,
+timestamps, review state, merged status).  The data stays in `pulls.json`,
+`pull_*` and `issue_*` files for reference.
 
-The token must have the `repo` scope (classic PAT) or `contents: write` +
-`issues: write` permissions (fine-grained PAT) on the target organisation's
-repositories.
+## Tests
 
-### Pull request bodies, comments, and reactions
-
-GitHub does not expose a public bulk-import REST API for pull requests,
-issue comments, or reactions.  Options for migrating that data:
-
-- **GitHub CLI** — `gh issue import` (GitHub Enterprise only).
-- **GitHub Enterprise Migrations API** — for large-scale migrations between
-  organisations or instances.
-- **Third-party tools** such as
-  [`github-importer`](https://github.com/nicowillis/github-importer) and
-  [`ghec-importer`](https://github.com/github/ghec-importer).
-
----
-
-## Manual Restore Procedures
-
-### Repository Git Data
-
-```bash
-# The backup is already a bare repo; push it to a new remote
-git -C /backup/octocat/git/repos/my-repo.git \
-    push --mirror https://github.com/new-org/my-repo.git
-```
-
-```bash
-# Full clone from backup, then re-point the remote
-git clone /backup/octocat/git/repos/my-repo.git /tmp/my-repo
-git -C /tmp/my-repo remote set-url origin https://github.com/new-org/my-repo.git
-git -C /tmp/my-repo push --all
-git -C /tmp/my-repo push --tags
-```
-
-### Wikis
-
-```bash
-git -C /backup/octocat/git/wikis/my-repo.wiki.git \
-    push --mirror https://github.com/new-org/my-repo.wiki.git
-```
-
-### Gists
-
-Gist git data lives in `git/gists/<gist-id>.git/`.  Metadata (description, file
-names, visibility) is in `json/gists/<gist-id>.json`.
-
-```bash
-# Push git content to a newly created gist
-git -C /backup/octocat/git/gists/abc123.git \
-    push --mirror https://gist.github.com/new-gist-id.git
-```
-
-### Releases and Assets
-
-```bash
-gh release create v1.0.0 \
-  /backup/octocat/assets/repos/my-repo/releases/v1.0.0/my-binary \
-  --title "v1.0.0" --notes "Restored from backup"
-```
-
-### Manual Labels and Milestones via `curl`
-
-If you prefer shell scripting over `--restore`:
-
-```bash
-# Re-create labels
-jq -c '.[]' /backup/octocat/json/repos/my-repo/labels.json | while read -r label; do
-  name=$(echo "$label" | jq -r '.name')
-  color=$(echo "$label" | jq -r '.color')
-  desc=$(echo "$label" | jq -r '.description // ""')
-  curl -s -X POST \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"$name\",\"color\":\"$color\",\"description\":\"$desc\"}" \
-    "https://api.github.com/repos/new-org/my-repo/labels"
-done
-```
-
-### Deploy Keys and Collaborators
-
-`deploy_keys.json` and `collaborators.json` are informational archives.  Public
-key material in `deploy_keys.json` can be re-added via the GitHub API.
-Collaborator entries record access levels but restoring them requires
-re-inviting each user.
-
-### Starred, Followed, and Organisation Data
-
-These JSON files are reference archives.  No automated restoration path exists —
-they are useful for auditing and for manually reconstructing social graph data
-after account migration.
-
----
-
-## Backup Layout Reference
-
-```
-<output>/
-└── <owner>/
-    ├── git/
-    │   ├── repos/          # bare mirror git repos
-    │   ├── wikis/          # wiki repos
-    │   └── gists/          # gist repos
-    ├── json/
-    │   ├── starred.json
-    │   ├── watched.json
-    │   ├── followers.json
-    │   ├── following.json
-    │   ├── org_members.json    (org targets only)
-    │   ├── org_teams.json      (org targets only)
-    │   ├── gists/
-    │   │   └── <gist-id>.json
-    │   └── repos/
-    │       └── <repo>/
-    │           ├── issues.json
-    │           ├── pulls.json
-    │           ├── releases.json
-    │           ├── labels.json
-    │           ├── milestones.json
-    │           ├── topics.json
-    │           ├── branches.json
-    │           ├── hooks.json
-    │           ├── security_advisories.json
-    │           ├── deploy_keys.json
-    │           ├── collaborators.json
-    │           └── issues/ pulls/  (sub-directories for comments/events/reviews)
-    └── assets/
-        └── repos/
-            └── <repo>/
-                └── releases/
-                    └── <tag>/   # downloaded release asset binaries
-```
+`restore.rs` has unit tests for the statistics, JSON loading, the body and marker
+format (including finding markers again), the error total, and a dry run that
+makes no API call.  There is no automated test of the live marker lookup or of
+the exit statuses; those were exercised by hand against a local fake GitHub
+server during the documentation review, which is not part of the repository.

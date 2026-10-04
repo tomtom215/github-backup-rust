@@ -2,96 +2,116 @@
 
 ## 1. Get a GitHub Token
 
-Create a [Personal Access Token](https://github.com/settings/tokens) with the following scopes:
+Create a [personal access token](https://github.com/settings/tokens).  For a
+complete backup of your own account a classic token with `repo`, `gist`,
+`read:org` and `read:packages` covers everything; for public data no token is
+needed.  The scopes and fine-grained permissions per category are in
+[Authentication](authentication.md#what-each-category-needs).
 
-| Token type | Recommended scopes |
-|-----------|-------------------|
-| Classic PAT | `repo`, `gist`, `read:org` |
-| Fine-grained | Repository: `Contents (read)`, `Issues (read)`, `Pull requests (read)`, `Metadata (read)` |
-
-Export it as an environment variable:
+Export it as an environment variable (not on the command line, where `ps` and
+your shell history can see it):
 
 ```bash
 export GITHUB_TOKEN=ghp_your_token_here
 ```
 
-## 2. Run Your First Backup
-
-### Option A — Interactive TUI (recommended)
-
-Launch the full-screen TUI and configure everything interactively:
+## 2. Check the Setup
 
 ```bash
-github-backup octocat --token "$GITHUB_TOKEN" --tui
+github-backup octocat --output /var/backup/github --doctor
 ```
 
-The TUI pre-fills the owner and token, shows all settings across eight tabbed
-panels, and lets you start the backup and watch live progress — all without
-leaving your terminal.  See the [Interactive TUI guide](../tui.md) for the
-full key reference.
+`--doctor` checks that `git` is installed, that the output directory is
+writable, that the API is reachable and that GitHub accepts the token.  It
+does not check disk space or scopes.
 
-### Option B — Non-interactive CLI
+## 3. Run Your First Backup
 
-Back up everything for a user directly:
+### Option A: Interactive TUI
 
 ```bash
-github-backup octocat \
-  --token "$GITHUB_TOKEN" \
-  --output /var/backup/github \
-  --all
+github-backup octocat --tui
 ```
 
-Back up only repositories and issues for an organisation:
+The TUI pre-fills the owner (and token and output directory, if given), shows
+all settings in tabbed panels and lets you start the backup and watch live
+progress.  See the [Interactive TUI guide](../tui.md).
+
+### Option B: Command line
+
+Back up everything for a user:
+
+```bash
+github-backup octocat --output /var/backup/github --all
+```
+
+(`--all` includes private repositories and secret gists when the token
+belongs to `octocat`; see [Private repositories](../backup-categories.md#private-repositories).)
+
+Back up only repositories and issues of an organisation:
 
 ```bash
 github-backup my-org \
-  --token "$GITHUB_TOKEN" \
   --output /var/backup/github \
   --org \
   --repositories \
   --issues
 ```
 
-## 3. Explore the Output
+The command prints a plan, then progress, then a summary.  Check the **exit
+status**: `0` means complete, `3` means the backup finished but something
+could not be backed up (the summary lists it; run again to retry), `1` means it
+could not run at all.  See [Exit Codes](../configuration/cli-reference.md#exit-codes).
+
+## 4. Explore the Output
 
 ```
 /var/backup/github/
+├── .github-backup.lock
 └── octocat/
     ├── git/
     │   ├── repos/
-    │   │   ├── Hello-World.git/      ← bare mirror clone
-    │   │   └── Spoon-Fork.git/
+    │   │   ├── Hello-World.git/        ← mirror clone
+    │   │   └── Spoon-Knife.git/
     │   ├── wikis/
     │   │   └── Hello-World.wiki.git/
     │   └── gists/
     │       └── abc123.git/
     └── json/
+        ├── repos.json
         ├── starred.json
-        ├── watched.json
-        ├── followers.json
-        ├── following.json
+        ├── backup_state.json
+        ├── backup_history.json
         └── repos/
             └── Hello-World/
+                ├── info.json
                 ├── issues.json
-                ├── issue_comments.json
+                ├── issue_comments/1.json
                 ├── pulls.json
                 ├── releases.json
                 ├── labels.json
                 └── milestones.json
 ```
 
-## 4. Common Recipes
+(A selection; which files appear depends on the flags.)  The full listing is on
+[Output Directory Layout](../configuration/output-layout.md).
 
-### Selective backup with high concurrency
+## 5. Run It Again
+
+Run the same command again whenever you like (or schedule it with
+[systemd](../deployment/systemd.md) or [cron](../deployment/cron.md)).  Git
+clones are updated in place and only changed issues and pull requests are
+re-fetched; nothing already captured is lost.  See
+[Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).
+
+## 6. Common Recipes
+
+### Selective backup with higher concurrency
 
 ```bash
 github-backup octocat \
-  --token "$GITHUB_TOKEN" \
   --output /backup \
-  --repositories \
-  --issues \
-  --pulls \
-  --releases \
+  --repositories --issues --pulls --releases \
   --concurrency 8
 ```
 
@@ -99,26 +119,25 @@ github-backup octocat \
 
 ```bash
 github-backup octocat \
-  --token "$GITHUB_TOKEN" \
   --output /backup \
   --repositories \
   --clone-type shallow:10
 ```
 
-### Dry-run (preview without writing)
+### Dry run (preview, writes nothing)
 
 ```bash
-github-backup octocat \
-  --token "$GITHUB_TOKEN" \
-  --output /backup \
-  --all \
-  --dry-run
+github-backup octocat --output /backup --all --dry-run
 ```
+
+A dry run lists the repositories it would back up and writes nothing: no files,
+no lock, no state, no report and no network call except the read-only listing.
+Owner-level data and gists are skipped.
 
 ### Using a config file
 
 ```bash
-# Create /etc/github-backup/config.toml
+mkdir -p /etc/github-backup
 cat > /etc/github-backup/config.toml <<'EOF'
 owner = "octocat"
 output = "/var/backup/github"
@@ -129,39 +148,43 @@ pulls = true
 releases = true
 wikis = true
 EOF
+chmod 600 /etc/github-backup/config.toml
 
-github-backup --config /etc/github-backup/config.toml --token "$GITHUB_TOKEN"
+github-backup --config /etc/github-backup/config.toml
 ```
 
-### Mirror to Codeberg after backup
+(The token comes from `GITHUB_TOKEN`.)
+
+### Push mirror to Codeberg after the backup
 
 ```bash
+export MIRROR_TOKEN=your_codeberg_token
 github-backup octocat \
-  --token "$GITHUB_TOKEN" \
   --output /backup \
   --repositories \
   --mirror-to https://codeberg.org \
-  --mirror-token "$CODEBERG_TOKEN" \
   --mirror-owner your_codeberg_username
 ```
 
-### S3 sync after backup
+### S3 sync of the metadata
 
 ```bash
+export AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...
 github-backup octocat \
-  --token "$GITHUB_TOKEN" \
   --output /backup \
   --all \
   --s3-bucket my-backup-bucket \
-  --s3-region us-east-1 \
-  --s3-access-key "$AWS_ACCESS_KEY_ID" \
-  --s3-secret-key "$AWS_SECRET_ACCESS_KEY"
+  --s3-region us-east-1
 ```
+
+The bucket must exist.  Only the JSON metadata goes to S3, not the repository
+clones; see [S3](../storage/s3.md).
 
 ## Next Steps
 
-- [Interactive TUI](../tui.md) — full-screen interface with live progress
-- [Authentication options](authentication.md) — PAT vs. OAuth device flow
-- [Backup categories](../backup-categories.md) — what each flag backs up
-- [CLI Reference](../configuration/cli-reference.md) — all flags explained
-- [Docker](../docker.md) — containerised and scheduled backups
+- [Interactive TUI](../tui.md): full-screen interface with live progress
+- [Authentication](authentication.md): tokens, scopes and the device flow
+- [Backup categories](../backup-categories.md): what each flag backs up, and what it cannot
+- [CLI Reference](../configuration/cli-reference.md): all flags and the exit codes
+- [Monitoring](../monitoring.md): get told when a backup fails
+- [Docker](../docker.md): containers and scheduled backups

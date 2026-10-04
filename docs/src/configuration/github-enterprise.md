@@ -1,28 +1,37 @@
 # GitHub Enterprise Server (GHES)
 
-`github-backup` supports GitHub Enterprise Server by overriding the API base URL and the clone hostname.
+`github-backup` can back up a GitHub Enterprise Server instance by overriding
+the API base URL and, when it differs, the clone hostname.
+
+> **Verification status.** The project's tests run against mock clients and
+> local fake servers.  No real GHES instance was available, so GHES-specific
+> behaviour (older API versions, missing endpoints) is not verified.  An
+> endpoint that a GHES version lacks answers 404 and is skipped or reported as
+> a failure like any other missing resource.
 
 ---
 
 ## Configuration
 
-Set the `--api-url` flag (or `api_url` in `config.toml`) to your GHES REST API endpoint:
+Set `--api-url` (or `GITHUB_API_URL`, or `api_url` in the config file) to your
+instance's REST API root.  It must be an `https://` URL:
 
 ```bash
-github-backup octocat \
-  --token $GITHUB_TOKEN \
+github-backup myorg \
   --output /backup \
   --api-url https://github.example.com/api/v3 \
-  --all
+  --org --all
 ```
 
-The tool constructs all API requests relative to this base URL, so the standard `https://api.github.com` root is replaced throughout.
+(Pass the token in `GITHUB_TOKEN`.)  Every API request is made relative to this
+base, and git clones use the `clone_url` the API returns.
 
 ### Config File
 
 ```toml
-# config.toml
-token = "ghp_xxxxxxxxxxxx"
+# config.toml  (token comes from GITHUB_TOKEN)
+owner = "my-org"
+org = true
 output = "/backup"
 api_url = "https://github.example.com/api/v3"
 all = true
@@ -30,100 +39,78 @@ all = true
 
 ---
 
-## TLS / Self-Signed Certificates
+## TLS and Private Certificate Authorities
 
-If your GHES instance uses a self-signed or internal CA certificate, add the CA bundle to the system trust store before running `github-backup`.
+If the instance uses an internal CA, make both the tool and `git` trust it.
 
-On Debian/Ubuntu:
-
-```bash
-cp my-ca.crt /usr/local/share/ca-certificates/
-update-ca-certificates
-```
-
-On RHEL/Fedora:
+System-wide (works for both):
 
 ```bash
-cp my-ca.crt /etc/pki/ca-trust/source/anchors/
-update-ca-trust
+# Debian / Ubuntu
+cp my-ca.crt /usr/local/share/ca-certificates/ && update-ca-certificates
+# RHEL / Fedora
+cp my-ca.crt /etc/pki/ca-trust/source/anchors/ && update-ca-trust
 ```
 
-`github-backup` uses the system certificate store via `rustls-native-certs`; no additional flags are needed once the CA is trusted system-wide.
+Or per process: `SSL_CERT_FILE=/path/to/ca.pem` for `github-backup` and
+`GIT_SSL_CAINFO=/path/to/ca.pem` for the `git` it starts.  The tool uses
+`rustls` with the operating system's certificate store; it has no flag to
+disable certificate verification.
 
 ---
 
 ## Clone URLs
 
-By default, repository clone URLs are taken directly from the API response (`clone_url` and `ssh_url` fields).  For GHES these already point to your instance hostname, so no extra configuration is needed.
-
-If your GHES clone hostname differs from the API hostname (for example, when using a separate load balancer), use `--clone-host` to override:
+Clone URLs come from the API response (`clone_url`, or `ssh_url` with
+`--prefer-ssh`).  If your instance advertises a hostname that is not reachable
+from the backup host, or the git endpoint is behind a different load balancer
+than the API, replace the hostname:
 
 ```bash
-github-backup octocat \
-  --token $GITHUB_TOKEN \
+github-backup myorg \
   --output /backup \
   --api-url https://github-api.example.com/api/v3 \
   --clone-host github-git.example.com \
-  --repositories
+  --org --repositories
 ```
 
 ---
 
 ## Authentication
 
-GHES supports the same personal access token flow as GitHub.com.  Create a token at:
-
-```
-https://<your-ghes-host>/settings/tokens
-```
-
-For organisation backups, the token must belong to an organisation owner or must have explicit repository access granted.
-
-### Required Scopes
-
-| Category | Required scope |
-|----------|---------------|
-| Public repos | `public_repo` |
-| Private repos | `repo` |
-| Hooks / deploy keys / collaborators | `repo` (admin access) |
-| Gists | `gist` |
-| Org members / teams | `read:org` |
+GHES accepts the same personal access tokens as github.com; create one at
+`https://<your-ghes-host>/settings/tokens`.  The scopes per category are in
+[Authentication](../getting-started/authentication.md#what-each-category-needs).
+For organisation backups the token owner must be able to see the repositories
+(organisation owner, or explicit access).
 
 ---
 
 ## GitHub Enterprise Cloud (GHEC)
 
-GitHub Enterprise Cloud uses `https://api.github.com` — the same endpoint as GitHub.com.  No `--api-url` override is needed.  Token scopes and the `--org` flag work identically to GitHub.com.
+GHEC uses `https://api.github.com`, like github.com: no `--api-url` is needed.
+If the organisation enforces SAML single sign-on, authorise the token for it
+in GitHub's token settings, otherwise the API answers 403.
 
 ---
 
-## Proxy Support
+## Proxies
 
-If your GHES instance (or GitHub.com) is reached through a corporate HTTP proxy, set `HTTPS_PROXY` before running the tool:
-
-```bash
-export HTTPS_PROXY=http://proxy.example.com:3128
-github-backup octocat --token $GITHUB_TOKEN --output /backup --all
-```
-
-`github-backup` reads `HTTPS_PROXY` (or the lowercase `https_proxy`) at startup and routes all GitHub API calls through the proxy via HTTP `CONNECT` tunnelling.  Credentials embedded in the URL (`http://user:pass@host:port`) are forwarded automatically as a `Proxy-Authorization` header.
-
-> **Note:** git clone and push operations are performed by the system `git` binary, which honours `HTTPS_PROXY` / `GIT_PROXY_COMMAND` from the environment independently.  Export them together for consistent behaviour.
-
-See [Environment Variables → Proxy](environment.md#proxy) for the full variable reference.
+`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to the API calls;
+`git` follows its own proxy settings.  S3 and mirror-destination API calls do
+not use a proxy.  Details and the SOCKS limitation are in
+[Environment Variables](environment.md#proxy).
 
 ---
 
 ## Rate Limits
 
-GHES rate limits are configurable by your site administrator and may differ from GitHub.com defaults.  If you encounter `429 Too Many Requests` responses, reduce concurrency:
+GHES rate limits are configured by the site administrator.  The tool waits out
+`429` responses and `403` responses that carry rate-limit information
+(`Retry-After`, `X-RateLimit-Remaining: 0` or a "rate limit" message) and
+retries; see [Troubleshooting](../development/troubleshooting.md#rate-limit-errors).
+To reduce the pressure, lower the concurrency:
 
 ```bash
-github-backup octocat --token $GITHUB_TOKEN --output /backup --all --concurrency 2
-```
-
-Or in `config.toml`:
-
-```toml
-concurrency = 2
+github-backup myorg --output /backup --org --all --concurrency 2
 ```

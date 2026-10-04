@@ -1,127 +1,166 @@
 # Troubleshooting
 
-This page covers the most common problems encountered when running
-`github-backup` and how to resolve them.
+The most common problems and how to resolve them.  First look at the **exit
+status** and the summary at the end of the run (it lists every failure with its
+reason): `3` means the backup finished but something could not be backed up;
+`1` means it could not run.  The same list is in the `--report` file.  See
+[Exit Codes](../configuration/cli-reference.md#exit-codes) and
+[Monitoring](../monitoring.md).
+
+Quick checks:
+
+```bash
+github-backup octocat --doctor        # git, output directory, network, token accepted?
+github-backup octocat --dry-run --all # what would be backed up (writes nothing)
+```
 
 ---
 
 ## Authentication Errors
 
-### `401 Unauthorized`
+### `GitHub API error 401: Bad credentials`
 
-Your token is missing or invalid.
+The token is missing, revoked, expired or mistyped.  The run stops at once with
+exit status `1` and prints a hint.
 
-- Verify the token with `curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user`.
-- Ensure `GITHUB_TOKEN` is exported in the environment where `github-backup` runs.
-- Classic tokens: ensure the `repo` and `gist` scopes are enabled.
-- Fine-grained tokens: ensure the token has read access to the repositories you want to back up.
+- `github-backup --doctor` reports `token ... rejected by GitHub (HTTP 401)`.
+- Check the token the process really sees: `GITHUB_TOKEN` must be exported in the
+  environment where `github-backup` runs (cron and systemd do not read your
+  shell profile).  An empty `GITHUB_TOKEN=` is treated as unset.
+- Classic tokens need the scopes of the categories you enabled; see
+  [Authentication](../getting-started/authentication.md#what-each-category-needs).
 
-### `403 Forbidden` on hooks or security advisories
+### `GitHub API error 403` / `Resource not accessible`
 
-Backing up webhooks (`--hooks`) requires admin permission on the repository.
-`github-backup` automatically skips these with an `INFO`-level log message when
-access is denied — this is expected and not an error.
+- The token lacks the scope or permission, or an organisation with SAML single
+  sign-on has not authorised it (authorise the token in your GitHub token
+  settings).
+- For hooks, deploy keys, collaborators, advisories and branch protection a 403
+  or 404 on a repository is logged at `INFO` level (`skipping hooks (no admin
+  access)`) and the file is simply not written; the run is **not** marked
+  incomplete.  If a file you expect is missing, look for `skipping` in the log.
 
-### OAuth Device Flow timeout
+### The tool warns that the token "cannot read GET /user"
 
-If you start `--device-auth` but don't enter the code in time, the flow will
-time out with a `slow_down` or `access_denied` error. Simply re-run the
-command.
+GitHub App installation tokens cannot call `GET /user`.  For a user target the
+tool then lists public repositories and gists only.  Use a personal access token
+to back up private data of your own account.
+
+### OAuth device flow ends with "OAuth device code expired"
+
+You did not enter the code before it expired.  Run the command again.  "OAuth
+authorisation was denied" means you declined the request in the browser.
+`--oauth-client-id` is only valid with `--device-auth`.
 
 ---
 
 ## Rate Limit Errors
 
-### `rate limit hit, sleeping`
+### `rate limited; waiting Ns (attempt K)`
 
-`github-backup` automatically waits until the rate-limit window resets and
-retries.  For large accounts this can mean waiting up to 60 minutes.
+A `429` or a `403` with rate-limit information (`Retry-After`, no remaining
+requests, or a "rate limit" message): the client waits as long as GitHub says
+(at least a minute, doubling, when GitHub gives no time) and retries, up to 6
+times and about an hour of waiting per request.  Nothing to do unless it takes
+too long.
 
-To reduce rate-limit pressure:
+### `rate limit exceeded; retry after Ns`
+
+The wait would exceed that budget (for example a primary limit that resets in
+more than an hour).  The run stops with exit status `1` and keeps its
+checkpoint; run it again after the window resets.  To reduce the pressure:
 
 1. Lower concurrency: `--concurrency 1`.
-2. Use `--since <DATETIME>` to only fetch recently-updated issues and PRs.
-3. Break up the backup into smaller runs (e.g. `--include-repos "a*"` then `--include-repos "b*"`).
-
-### `RateLimitExceeded` error after 3 retries
-
-GitHub's secondary rate limits apply to certain write-heavy operations.
-Reduce `--concurrency` and re-run.
+2. Enable fewer categories, or split the work with `--include-repos` over
+   several runs.
+3. Leave the incremental state in place (`backup_state.json`): unchanged issues
+   and pull requests then cost no per-item requests.  (`--since` is not needed
+   for this; it is an expert override.)
 
 ---
 
 ## Network and TLS Errors
 
-### `Tls: no CA certificates found`
+### `TLS error: ...`, or `system TLS roots` fails in `--doctor`
 
-On minimal Linux installations (Alpine, distroless) the system CA bundle may
-be absent.
+No usable certificate store.  On minimal systems install the CA package
+(`apk add ca-certificates`, `apt-get install ca-certificates`); the container
+image includes it.  For a private CA set `SSL_CERT_FILE` (tool) and
+`GIT_SSL_CAINFO` (git).
 
-- Install `ca-certificates`: `apk add ca-certificates` / `apt-get install ca-certificates`.
-- When using Docker, use the provided `Dockerfile` which already includes `ca-certificates`.
+### `HTTP transport error: client error (Connect)`
 
-### `Connect` or `Connection refused` errors behind a proxy
-
-If `github-backup` cannot reach `api.github.com` in a network where outbound HTTPS is only permitted through a proxy:
-
-```
-ERROR backup failed: GitHub API error: HTTP transport error: client error (Connect)
-```
-
-Set `HTTPS_PROXY`:
+The API cannot be reached.  Behind a proxy set `HTTPS_PROXY` (an HTTP proxy;
+SOCKS is not supported):
 
 ```bash
 export HTTPS_PROXY=http://proxy.example.com:3128
 github-backup octocat --output /backup --all
 ```
 
-With credentials:
+When a proxy variable is present the log says `HTTP proxy configured from the
+environment`.  `git` reads the same variables itself.  S3 requests and the
+Gitea/GitLab API calls of `--mirror-to` ignore proxy settings and connect
+directly.
 
-```bash
-export HTTPS_PROXY=http://user:secret@proxy.example.com:3128
-github-backup octocat --output /backup --all
-```
+### `request timed out`
 
-At startup you will see:
-```
-INFO  routing GitHub API calls through HTTPS proxy proxy=http://proxy.example.com:3128
-```
+Each request has a 120 s limit (headers, and the silence between two chunks of
+the body); transient timeouts and `5xx` answers are retried (GET only, 3 times).
+There is no flag to change the limit.  A `git` command that prints nothing for
+10 minutes is stopped separately.
 
-> **git clone vs API calls**: `github-backup` routes API calls through the proxy automatically. For git clone operations the system `git` binary reads `HTTPS_PROXY` / `GIT_PROXY_COMMAND` independently — set those environment variables too if git clones are also failing.
+### `invalid API URL`
 
-### `Timeout` errors
-
-GitHub can be slow for very large repositories or under high load.  The
-default request timeout is 120 seconds.  There is currently no CLI flag to
-increase it, but you can increase it by setting `RUST_LOG=debug` and checking
-whether requests are consistently timing out on the same endpoint.
+`--api-url` must be an `https://` URL with a host, for example
+`https://github.example.com/api/v3`.
 
 ---
 
 ## Git Errors
 
-### `git clone` fails with `fatal: repository not found`
+### `git clone ... failed (exit 128): ... Repository not found`
 
-- Confirm the repository is accessible with your token.
-- For private repositories, ensure `--private` is set and your token has the `repo` scope.
-- For SSH clones (`--prefer-ssh`), ensure your SSH key is available in the environment.
+The token cannot see the repository (private repository without `repo` scope,
+SAML not authorised) or it was deleted or renamed.  The run goes on with the
+other repositories and ends with exit status `3`.  `--private` is needed to
+include private repositories at all.
 
-### `git remote update` fails with exit code ≠ 0
+### `detected dubious ownership`
 
-`github-backup` logs the error and continues with the next repository.
-Check for:
+`git` refuses a repository owned by a different user.  The tool trusts the exact
+path it works on, so this is rare; if it happens run as the owning user
+(`docker run --user`, `User=` in the unit) or `chown -R` the output directory.
 
-- Network interruptions during large repository fetches.
-- Repositories that have been deleted or transferred between backup runs.
+### `git ... made no progress for 600s and was stopped`
+
+A stalled connection.  Re-run; check the network and proxy.  A slow transfer
+that keeps printing progress is never stopped.
+
+### `git lfs` not found
+
+`--lfs` needs `git-lfs` on the `PATH` (the container image has it).
+
+### `git remote update` / `git fetch` fails
+
+The repository is logged as failed and the rest continue.  Causes: network
+interruptions, a repository deleted or transferred since the last run, a
+directory owned by another user.
+
+### A branch I deleted on GitHub is gone from the backup
+
+By design: a mirror follows GitHub, including deletions and force-pushes.  See
+[Clones Follow GitHub](../configuration/output-layout.md#clones-follow-github) and
+`--no-prune`.
 
 ---
 
 ## Storage Errors
 
-### `cannot create directory: Permission denied`
+### `cannot create output directory` / `Permission denied`
 
-Ensure the backup output directory (`--output`) exists and is writable by the
-user running `github-backup`:
+`--output` must exist or be creatable, and be writable by the user running
+`github-backup`:
 
 ```bash
 mkdir -p /var/backup/github
@@ -129,73 +168,94 @@ chown backup-user:backup-group /var/backup/github
 chmod 750 /var/backup/github
 ```
 
-### Disk full during backup
+In a container the volume must be writable by the container user (UID 1000 by
+default); see [Docker](../docker.md#users-and-permissions).
 
-`github-backup` does not pre-check available disk space.  If the disk fills
-up mid-run you will see write errors.  Per-repository errors are non-fatal —
-the run continues and errored repos are counted in the summary report.
+### `another backup for '<owner>' is already running`
 
-Monitor disk usage with a pre-backup check:
+Another `github-backup` holds the lock on that output directory.  Wait for it.
+The lock is an operating-system lock that disappears when its process ends, so
+a crashed or killed run never leaves a stale lock; the `.backup.lock` and
+`.github-backup.lock` files that remain are harmless markers.
+
+### Disk full
+
+The run stops (`fatal error: stopping the run`, exit status `1`) and keeps its
+checkpoint.  The tool does not check free space beforehand.  Free space and
+re-run.  A simple pre-check:
 
 ```bash
 REQUIRED_GB=50
 AVAIL_GB=$(df --output=avail -BG /var/backup/github | tail -1 | tr -d 'G ')
-if [ "$AVAIL_GB" -lt "$REQUIRED_GB" ]; then
-  echo "Not enough disk space" >&2
-  exit 1
-fi
+[ "$AVAIL_GB" -ge "$REQUIRED_GB" ] || { echo "Not enough disk space" >&2; exit 1; }
 ```
+
+### "0 repositories" in the summary
+
+The listing came back empty or everything was filtered out.  Check the OWNER
+spelling, `--org` for organisations, `--forks` / `--private` (forks and private
+repositories are excluded by default), `--include-repos` / `--exclude-repos`, and
+whether a user's token belongs to that user (private repositories need that).
 
 ---
 
 ## S3 Sync Issues
 
-### `403 Forbidden` from S3
+A failed upload is a recorded failure (exit status `3`) and the message names
+the S3 error code.
 
-- Verify the access key and secret key.
-- Ensure the IAM policy allows `s3:PutObject`, `s3:GetObject` (for HEAD checks), and `s3:ListBucket`.
-- For non-AWS providers (B2, R2, MinIO) verify the `--s3-endpoint` URL.
+### `AccessDenied` / `403`
 
-### Objects not updating
+Check the keys, the endpoint, and the policy: it needs `s3:ListBucket` on the
+bucket and `s3:GetObject` and `s3:PutObject` on the objects (plus
+`s3:DeleteObject` for `--s3-delete-stale`).  Without `s3:ListBucket` a `HEAD`
+of a missing object answers 403 and every file is uploaded on every run.  See
+[S3 permissions](../storage/s3.md#required-permissions).
 
-`github-backup` performs a `HeadObject` check before uploading.  If the
-remote object's ETag matches the local SHA-256, the upload is skipped.  This
-is the intended incremental behaviour.  To force a full re-upload, delete the
-objects in the bucket first.
+### Objects are not updating
+
+An object is skipped only when its stored SHA-256 digest and size match the local
+file.  Changing the encryption key re-uploads everything.  To force a full
+re-upload delete the objects (or use a new `--s3-prefix`).
+
+### Nothing happens in `--dry-run`
+
+A dry run skips the S3 step entirely.
 
 ---
 
 ## Mirroring Issues
 
-### `401 Unauthorized` on Gitea/Codeberg push
+### `401` / `403` on the destination
 
-- Verify the mirror token (`--mirror-token` / `MIRROR_TOKEN`).
-- Ensure the token has repository-creation permissions at the destination.
+Check `--mirror-token` / `MIRROR_TOKEN` and that the token may create repositories
+(and push) at the destination.
 
-### Mirror push creates duplicate repositories
+### A repository is refused as "foreign"
 
-`github-backup` attempts to create the repository before pushing.  If the
-repository already exists, it uses the existing one.  A `409 Conflict` from
-the Gitea API is silently ignored.
+The destination already has a repository of that name that the tool did not
+create (its description is not `GitHub mirror of <owner>/<repo>`) and it is not
+empty.  The tool never pushes into such a repository.  Use another
+`--mirror-owner`, or empty it first.
+
+### `422` from the Gitea API
+
+The tool treats HTTP 422 on creation as "already exists" (a race between the
+existence check and the creation) and goes on to push.  If the repository does
+not really exist, for example because the name is not valid at the destination,
+the push fails and is reported.
 
 ---
 
 ## Enabling Debug Logging
 
-For any issue not listed here, enable detailed logs:
-
 ```bash
-RUST_LOG=debug github-backup octocat --token "$GITHUB_TOKEN" --output /backup --all 2>&1 | tee /tmp/debug.log
+github-backup octocat --output /backup --all -v 2>&1 | tee /tmp/debug.log
 ```
 
-Or increase verbosity via flags:
-
-```bash
-github-backup octocat -vv --token "$GITHUB_TOKEN" --output /backup --all
-```
-
-`-v` = `debug`, `-vv` = `trace` (very verbose; includes every HTTP request
-and response header).
+`-v` is debug, `-vv` is trace (connection-level events of the HTTP client;
+request and response headers are not logged, and no level prints the token).
+`RUST_LOG` overrides both.
 
 ---
 
@@ -206,6 +266,7 @@ Please open an issue at
 and include:
 
 1. The command you ran (redact tokens).
-2. The relevant log output (with `RUST_LOG=debug`).
-3. Your OS and Rust version (`rustc --version`).
-4. The `github-backup --version` output.
+2. The relevant log output (`-v`) and, if you used `--report`, its `failures`.
+3. Your operating system, and `git --version`.
+4. The `github-backup --version` output (a build from `main` and the last release
+   print the same number: say which one you use).

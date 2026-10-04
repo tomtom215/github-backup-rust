@@ -48,13 +48,15 @@ sudo tee /etc/systemd/system/github-backup.service > /dev/null <<'EOF'
 Description=GitHub Backup
 After=network-online.target
 Wants=network-online.target
+OnFailure=notify-failure@%n.service
 
 [Service]
 Type=oneshot
 User=github-backup
 Group=github-backup
 EnvironmentFile=/etc/github-backup/secrets.env
-ExecStart=/usr/local/bin/github-backup --config /etc/github-backup/config.toml
+ExecStart=/usr/local/bin/github-backup --config /etc/github-backup/config.toml --report /var/lib/github-backup/report.json
+StateDirectory=github-backup
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=github-backup
@@ -105,33 +107,62 @@ sudo systemctl start github-backup.service
 journalctl -u github-backup.service -f
 ```
 
-## Multiple Owners
+## Exit Status and Failure Handling
 
-Create separate service/timer pairs for each owner, or use a wrapper script:
+The unit fails whenever the exit status is not `0`: `1` (the run could not
+run), `3` (the run finished but something could not be backed up) and `130` /
+`143` (stopped).  `OnFailure=` therefore fires for an incomplete backup too, and
+`systemctl status github-backup.service` shows the status.  Do **not** add
+`SuccessExitStatus=3`: that would hide incomplete backups.  `journalctl` shows
+the summary banner with the list of failures.  See
+[Monitoring](../monitoring.md) for the report file, metrics and webhook.
 
-```bash
-# /usr/local/bin/github-backup-all.sh
-#!/bin/bash
-set -euo pipefail
-for owner in octocat myorg another-org; do
-  github-backup "$owner" \
-    --config /etc/github-backup/config.toml \
-    --output /var/backup/github
-done
+A failure unit that sends mail:
+
+```ini
+# /etc/systemd/system/notify-failure@.service
+[Unit]
+Description=Notify on failure of %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mail -s "%i failed on %H" ops@example.com
 ```
 
-## Monitoring
+`StateDirectory=github-backup` creates `/var/lib/github-backup` (owned by the
+service user) for the `--report` file; with `ProtectSystem=strict` the report
+path must be writable, which `StateDirectory=` provides.
 
-Check the last run time and status:
+## Stopping and Timeouts
+
+`systemctl stop` sends `SIGTERM`.  The backup stops its `git` processes, releases
+its lock and exits `143` within a few seconds; the next run resumes (within 6
+hours) from the checkpoint.  No cleanup of lock files is ever needed.
+
+## Multiple Owners
+
+Create separate service/timer pairs per owner, or one script that does not stop
+at the first failure:
+
+```bash
+#!/bin/bash
+# /usr/local/bin/github-backup-all.sh
+status=0
+for owner in octocat myorg another-org; do
+  github-backup "$owner" --config /etc/github-backup/config.toml \
+    --output /var/backup/github || status=$?
+done
+exit "$status"
+```
+
+(Each owner needs its own `--report` and `--prometheus-metrics` file if you use
+them: both hold one run.  If the config file has `org = true` it applies to every
+owner; keep organisations and users in separate configs.)  The last non-zero
+status is the one systemd sees.
+
+## Monitoring
 
 ```bash
 systemctl list-timers github-backup.timer
 journalctl -u github-backup.service --since "yesterday"
-```
-
-Send a notification on failure using `OnFailure`:
-
-```ini
-[Unit]
-OnFailure=notify-failure@%n.service
 ```

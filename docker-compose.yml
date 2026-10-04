@@ -16,7 +16,7 @@
 #
 # ── Profiles ───────────────────────────────────────────────────────────────
 #   (default)  – local filesystem backup, output → ./backups/
-#   doctor     – run --doctor pre-flight checks
+#   doctor     – run the --doctor pre-flight checks only
 #   tui        – interactive full-screen TUI (needs a real terminal)
 #   verify     – verify the integrity of an existing backup
 #   s3         – backup + sync to AWS S3
@@ -26,7 +26,8 @@
 #   gitlab     – backup + mirror push to GitLab.com or self-hosted GitLab
 #
 # ── Usage ──────────────────────────────────────────────────────────────────
-#   # First-time pre-flight check (no files written, no API calls billed)
+#   # First-time pre-flight check (git, output directory, network, token;
+#   # one free /rate_limit request, no backup is made)
 #   docker compose --profile doctor run --rm doctor octocat
 #
 #   # Local backup to ./backups/

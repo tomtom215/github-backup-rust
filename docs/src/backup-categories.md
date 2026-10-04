@@ -20,24 +20,46 @@ properties, GitHub's key order), not a summary: see
 
 ### Clone Types Explained
 
-| Type | Command | Use Case |
-|------|---------|----------|
-| `mirror` (default) | `git clone --mirror` | Complete backup: all refs, all branches, full history |
-| `bare` | `git clone --bare` | Bare repo without remote-tracking refs; slightly smaller |
-| `full` | `git clone` | Working-tree clone; use to browse/build source |
-| `shallow:<n>` | `git clone --depth <n>` | Limited history; saves disk space; not for archival |
+| Type | First clone | Later runs | Use case |
+|------|-------------|-----------|----------|
+| `mirror` (default) | `git clone --mirror` | `git fetch --all --prune` | Complete backup: every branch and tag, `refs/pull/*`, full history |
+| `bare` | `git clone --bare` | `git fetch --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'` | Branches and tags only, no pull-request refs; slightly smaller |
+| `full` | `git clone --no-local` into `repos/<repo>/` | `git fetch --all --prune` | A working tree you can browse or build; not pushed by `--mirror-to` |
+| `shallow:<n>` | `git clone --mirror --depth <n>` | `git fetch --depth <n>` | Limited history to save disk space; not an archive |
+
+How the clone types behave in detail:
+
+* Updates are `fetch`es into the existing directory; nothing is cloned twice.
+  Unless `--no-prune` is given, branches and tags deleted on GitHub are deleted
+  from the clone and force-pushed branches are overwritten (see
+  [Clones Follow GitHub](configuration/output-layout.md#clones-follow-github)).
+* A fresh clone is made in a hidden staging directory next to the target and
+  renamed into place only when it is complete, so an interrupted clone leaves
+  nothing under the real name (the staging directory is removed on the next
+  run).
+* A **shallow** clone contains only the repository's default branch (and the
+  tags that point into it) at first, because git's `--depth` implies a single
+  branch for the initial clone; the next update fetches every branch at the
+  requested depth.
+* `--lfs` adds `git lfs fetch --all origin` after the mirror update (the clone
+  itself is always a mirror: `--lfs` overrides `--clone-type`).  It needs
+  `git-lfs` on the `PATH`; without `--lfs` the clone holds LFS pointer files
+  only, not the large objects.
+* A `git` command that prints no output for 10 minutes is treated as stalled
+  and killed; a clone that keeps making progress can take as long as it needs.
+* `--prefer-ssh` clones over SSH; the token is then not used for git and git
+  needs working SSH credentials.
 
 Example:
 ```bash
-# Mirror clone (default) — recommended
-github-backup octocat --token $GITHUB_TOKEN --output /backup --repositories
+# Mirror clone (default), recommended
+github-backup octocat --output /backup --repositories
 
-# Shallow clone, last 5 commits only
-github-backup octocat --token $GITHUB_TOKEN --output /backup \
-  --repositories --clone-type shallow:5
+# Shallow clone, last 5 commits
+github-backup octocat --output /backup --repositories --clone-type shallow:5
 ```
 
-Output: `<output>/<owner>/git/repos/<repo>.git/`
+Output: `<output>/<owner>/git/repos/<repo>.git/` (`<repo>/` for `--clone-type full`)
 
 ### Private repositories
 
@@ -128,8 +150,12 @@ Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 
 Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, `deploy_keys.json`, `collaborators.json`, etc.
 
-> **Note**: `--hooks`, `--deploy-keys`, and `--collaborators` all require admin access to the repository.
-> On repositories where the token lacks admin rights the tool logs a warning and continues rather than failing the entire backup.
+> **Note**: `--hooks`, `--deploy-keys`, `--collaborators`, `--security-advisories`, the protection rules of
+> `--branches`, `--actions` and `--environments` need admin or equivalent access.  When GitHub answers
+> **403 or 404** for a repository the tool treats it as "not available to this token", writes an `INFO`
+> line and skips that file.  This is **not** counted as a failure and does not change the exit status, so
+> a token without the needed permission yields a backup without those files and exit status `0`.
+> Look for the file in the output (or for `skipping` in the log) when you rely on these categories.
 
 ---
 
@@ -261,13 +287,18 @@ Output: `<output>/<owner>/json/packages_<type>.json`
 
 ## The `--all` Flag
 
-`--all` enables every category above except:
+`--all` enables every category above (including the non-functional `--discussions` and `--projects`, which
+log a warning) except:
 - `--lfs` (requires git-lfs to be installed)
 - `--prefer-ssh` (requires SSH keys to be set up)
 - `--no-prune` (affects update behaviour)
 - `--action-runs` (can be very large for active repositories)
 - `--clone-starred` (can consume substantial disk space)
 - `--concurrency` (set separately)
+
+`--forks` and `--private` **are** part of `--all`.  The excluded options can be given next to `--all` and are
+honoured (`--all --clone-starred`, `--all --action-runs`, `--all --lfs`).  Individual category flags cannot be
+combined with `--all` on the command line.
 
 ```bash
 github-backup octocat --token $GITHUB_TOKEN --output /backup --all

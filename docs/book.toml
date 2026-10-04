@@ -10,15 +10,12 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
-default-theme = "navy"
+default-theme = "light"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/tomtom215/github-backup-rust"
 edit-url-template = "https://github.com/tomtom215/github-backup-rust/edit/main/docs/{path}"
 site-url = "/github-backup-rust/"
-cname = ""
-no-section-label = false
-additional-css = []
-additional-js = []
+additional-css = ["theme/docs-extra.css"]
 
 [output.html.search]
 enable = true
