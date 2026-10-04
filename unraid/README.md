@@ -35,8 +35,8 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 | Output Directory                  | `/backup` (Path)         | `/mnt/user/backups/github/`      | Required. Point at an Unraid share. |
 | GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Required. User / org to back up. |
 | GitHub Token                      | `GITHUB_TOKEN`           | _(empty)_                        | Required, **masked**. |
-| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available.  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:latest --tui` from the Unraid terminal. |
-| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted). Shell metacharacters refused. |
+| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:latest --tui` from the Unraid terminal. |
+| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted). The characters `;`, backtick, `$`, `(` and `)` are refused. |
 | GitHub API URL (GHES)             | `GITHUB_API_URL`         | _(empty)_                        | Advanced. |
 | GitHub Clone Host (split GHES)    | `GITHUB_CLONE_HOST`      | _(empty)_                        | Advanced. |
 | OAuth App Client ID               | `GITHUB_OAUTH_CLIENT_ID` | _(empty)_                        | Advanced. Pair with `--device-auth` in Extra CLI Flags. |
@@ -83,8 +83,9 @@ rebuild); shell metacharacters are rejected up-front.
    The backup runs to completion and exits.
 
 The container is one-shot: it exits when the backup finishes.  The exit code
-is visible with `docker ps -a` (0 on success); the Docker tab only shows
-started/stopped.  Blank form fields are passed to the container as empty
+is visible with `docker ps -a`: `0` complete, `3` finished but incomplete
+(something could not be backed up; the log lists it), `1` could not run; the
+Docker tab only shows started/stopped.  Blank form fields are passed to the container as empty
 variables; the entrypoint treats an empty optional variable as unset.
 
 ## Scheduling recurring backups
@@ -104,9 +105,10 @@ containers. The community-standard pattern is:
 3. Set the schedule to a cron expression — daily at 02:00 is `0 2 * * *`.
 
 The script returns immediately; the container runs in the background
-and writes structured progress to its Docker log. A *successful* run
-exits with code 0; *failure* exits with the error category's code
-(usually 1); read the log or `docker ps -a` to see which.
+and writes structured progress to its Docker log.  Its exit code is `0` for a
+complete backup, `3` for one that finished but is incomplete and `1` if it could
+not run (see `docker ps -a`; the log has the details).  Use the `BACKUP_NOTIFY_WEBHOOK`
+field if you want a notification: the status is `success`, `partial` or `failure`.
 
 ## Restore
 
@@ -116,16 +118,23 @@ hundreds of issues against the wrong org. To run it, supply explicit
 arguments via the *Post Arguments* field on the WebUI edit page (or
 exec from the Console):
 
-    --restore --restore-target-org my-other-org --restore-yes
+    OWNER --restore --restore-target-org my-other-org --restore-yes
 
-Set `GITHUB_BACKUP_RESTORE_YES=1` if you'd prefer the env-var form.
+`OWNER` names the backup to read (the owner you backed up).  With Post Arguments
+the container's `GITHUB_OWNER` variable is **not** used, so the owner must be
+the first argument; `GITHUB_TOKEN` must be a token with write access.  The
+target repositories must already exist.  Restore reads the local backup only and
+makes no backup first; see the [Restore guide](https://tomtom215.github.io/github-backup-rust/restore.html).
+Set `GITHUB_BACKUP_RESTORE_YES=1` if you'd prefer the env-var form to
+`--restore-yes`.
 
 ## Verify a previous backup
 
-Switch `Run Mode` to `--verify` and start the container. It reads the
-SHA-256 manifest under the configured output directory and exits 0
-when every file matches, non-zero when anything is missing, tampered,
-or unexpected.
+Back up with `--manifest` in Extra CLI Flags, then switch `Run Mode` to
+`--verify` and start the container.  It reads the SHA-256 manifest under the
+configured output directory and exits `0` when every data file under `json/` matches,
+non-zero when anything is missing, changed or unexpected.  It does not check the
+git clones.
 
 ## Submission to Community Applications
 
