@@ -4,9 +4,12 @@
 //! SHA-256 hash manifest for backup integrity and tamper-evidence.
 //!
 //! After a backup run, [`write_manifest`] walks the backup directory tree and
-//! records the SHA-256 digest of every file in a manifest file.  The manifest
-//! itself is written last and contains a digest of the sorted entry list so
-//! its own integrity can be checked.
+//! records the SHA-256 digest of every JSON file in a manifest file.  The
+//! manifest does **not** vouch for itself (it carries no digest of its own
+//! entry list) and does not cover the git clones; store a digest of the
+//! manifest elsewhere if tamper-evidence matters.  Files that record how runs
+//! went rather than what was backed up (`backup_history.json`,
+//! `backup_state.json`, the checkpoint and the lock) are left out.
 //!
 //! [`verify_manifest`] re-reads the manifest and recomputes every digest,
 //! reporting any files that are missing, added, or have changed content.
