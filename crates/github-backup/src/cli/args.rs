@@ -77,7 +77,7 @@ use super::clone_type::CliCloneType;
 /// ```text
 /// github-backup --config /etc/github-backup/config.toml
 /// ```
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "github-backup",
     version,
@@ -171,9 +171,9 @@ pub struct Args {
     /// Validate the configuration and authentication, then exit without
     /// performing a backup.
     ///
-    /// Identical to `--doctor` for the network checks but additionally
-    /// reports the resolved category set, output paths, and any flag
-    /// conflicts.  Use it as a `--dry-run` for the *configuration* itself.
+    /// Runs the same checks as `--doctor`, then prints the resolved owner,
+    /// output directory, API URL, concurrency and recommended token scopes.
+    /// Use it to confirm what a configuration resolves to.
     #[arg(help_heading = "Configuration", long)]
     pub check: bool,
 
@@ -227,7 +227,10 @@ pub struct Args {
 
     /// OAuth scopes to request (space-separated).
     ///
-    /// Default: `"repo gist read:org"` — sufficient for a complete backup.
+    /// Default: `"repo gist read:org"` — enough for repositories, issues,
+    /// pull requests and gists.  Some categories need more (for example
+    /// `read:packages` for `--packages`); `--list-scopes` shows what the
+    /// categories you enabled need.
     #[arg(
         help_heading = "Authentication",
         long,
@@ -796,11 +799,9 @@ pub struct Args {
     // ── Execution ─────────────────────────────────────────────────────────
     /// Maximum number of repositories to back up in parallel.
     ///
-    /// Defaults to 4. Set to 1 for sequential operation.
-    ///
-    /// This explicit `Option` form lets the config file supply the value when
-    /// the CLI flag is absent, while still allowing `--concurrency 4` to
-    /// override the config file's value correctly.
+    /// Defaults to 4. Set to 1 for sequential operation.  Each repository is
+    /// backed up by one worker (clone, wiki and metadata), so a higher value
+    /// finishes sooner but makes more simultaneous requests to GitHub.
     #[arg(help_heading = "Execution", long, value_name = "N")]
     pub concurrency: Option<usize>,
 
@@ -828,18 +829,15 @@ pub struct Args {
     pub verify: bool,
 
     // ── Retention / pruning ────────────────────────────────────────────────
-    /// Keep only the N most recent backup snapshot directories and delete
-    /// older ones.
+    /// **Deprecated and ignored.**  Nothing is deleted.
     ///
-    /// Backup snapshots are detected as date-stamped subdirectories under
-    /// `<output>` matching the pattern `YYYY-MM-DD*`.  Requires `--output`.
+    /// github-backup keeps one continuously updated backup per owner, not
+    /// dated snapshots, and deleting directories by name pattern was unsafe.
+    /// Rotate snapshots with your backup tool (restic, borg, ZFS).
     #[arg(help_heading = "Deprecated", long, value_name = "N")]
     pub keep_last: Option<usize>,
 
-    /// Delete backup snapshot directories older than N days.
-    ///
-    /// Combined with `--keep-last`, both constraints are applied and
-    /// whichever removes more snapshots wins.
+    /// **Deprecated and ignored.**  Nothing is deleted.  See `--keep-last`.
     #[arg(help_heading = "Deprecated", long, value_name = "DAYS")]
     pub max_age_days: Option<u64>,
 
@@ -854,7 +852,7 @@ pub struct Args {
 
     // ── Diff ──────────────────────────────────────────────────────────────
     /// Compare the current backup with a previous backup directory and print
-    /// a summary of what changed (repos added/removed, issue counts, etc.).
+    /// a summary of which repositories were added or removed.
     ///
     /// Provide the path to the *previous* backup's owner JSON directory
     /// (e.g. `/var/backup/2025-12-01/octocat/json`).  Does not contact the
@@ -865,15 +863,19 @@ pub struct Args {
     // ── Restore ───────────────────────────────────────────────────────────
     /// Restore backed-up data to a GitHub organisation.
     ///
-    /// Re-creates issues, labels, and milestones from the JSON backup in
-    /// `<output>/<owner>/json` to the target organisation.  Requires
-    /// `--restore-target-org` and a token with write access.
+    /// Re-creates issues, labels, and milestones from the local JSON backup in
+    /// `<output>/<owner>/json` in the matching repositories of the target
+    /// organisation (they must already exist).  This is a mode of its own: no
+    /// backup is made and GitHub is not read, so it works after the source is
+    /// gone.  Safe to repeat: issues restored earlier are recognised and
+    /// skipped.  The target defaults to OWNER (`--restore-target-org`
+    /// overrides it); a token with write access is required.
     ///
     /// **Warning:** This modifies GitHub data.  Use with care.
     #[arg(help_heading = "Restore", long)]
     pub restore: bool,
 
-    /// Target organisation for `--restore`.
+    /// Target organisation for `--restore` (default: OWNER).
     #[arg(
         help_heading = "Restore",
         long,
@@ -964,7 +966,9 @@ pub struct Args {
     /// Send a webhook notification to this URL after the backup completes.
     ///
     /// Posts a JSON payload to the given URL with the backup outcome
-    /// (`"success"` or `"failure"`), the owner, timestamp, and counters.
+    /// (`"success"`, `"partial"` when some items could not be backed up, or
+    /// `"failure"`), the owner, timestamp, counters, and the names of the
+    /// failed items (without their error text).
     /// Notification failures are logged as warnings and never cause the
     /// backup process to exit with a non-zero code.
     ///
@@ -1005,9 +1009,10 @@ pub struct Args {
     /// Launch the interactive terminal user interface (TUI).
     ///
     /// Opens a full-screen interactive interface for configuring and running
-    /// backups.  All options available via CLI flags are accessible through
-    /// the TUI.  Token, owner, and output directory are pre-populated from
-    /// any values supplied on the command line.
+    /// backups.  Options given on the command line pre-fill the form.  The
+    /// TUI covers the repository and metadata categories only: mirroring, S3,
+    /// reports, metrics, the webhook, device-flow login and `--config` are
+    /// command-line only.
     ///
     /// When invoked with only `--tui` (no other flags), the TUI starts with
     /// a blank configuration form ready for interactive input.

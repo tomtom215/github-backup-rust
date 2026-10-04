@@ -4,9 +4,10 @@
 //! Git subprocess abstraction: clone, mirror, push, and fetch.
 //!
 //! The production implementation ([`ProcessGitRunner`]) shells out to the
-//! system `git` binary.  Credentials for HTTPS cloning are injected via the
-//! `GIT_ASKPASS` environment variable rather than being embedded in the URL,
-//! which avoids leaking tokens in process listings and git reflog.
+//! system `git` binary.  Credentials for HTTPS cloning are handed to git
+//! through the environment of the child process and an inline, host-scoped
+//! credential helper (see `credential`): never in the URL, in argv or in a file,
+//! and never offered to any host other than the one being cloned.
 //!
 //! # Hardening features
 //!
@@ -24,18 +25,18 @@
 //! - **Prompt cancellation** — triggering [`CloneOptions::cancel`] stops running
 //!   git processes (and their transport helpers) within a fraction of a second.
 //!
-//! - **Partial clone cleanup** — if a fresh clone fails (destination did not
-//!   exist before the attempt), any partially written directory is removed so
-//!   the next run starts cleanly.
+//! - **Atomic clones** — a fresh clone is made in a hidden staging directory
+//!   next to the destination and renamed into place only when git finished, so
+//!   the destination is either absent or a complete repository.  A run killed
+//!   mid-clone leaves only a staging directory, which the next run deletes.
 //!
-//! - **Post-clone fsck** — after every *fresh* clone
-//!   (`CloneOptions::run_fsck = true`) `git fsck --no-dangling` is run.
-//!   Corruption is reported as [`CoreError::GitFsckFailed`] so callers can
-//!   decide whether to abort or log and continue.
+//! - **Optional post-clone fsck** — with `CloneOptions::run_fsck = true`
+//!   (off by default) `git fsck --no-dangling` runs on every fresh clone and
+//!   problems are logged as warnings.
 //!
 //! # Sub-modules
 //!
-//! - `askpass` — RAII guard that writes and cleans up the `GIT_ASKPASS` script
+//! - `credential` — the host-scoped credential helper and its configuration
 //! - `process` — spawns and supervises one git subprocess
 //! - `spy` — test-only `SpyGitRunner` stub (available under `test_support` in tests)
 
@@ -125,8 +126,8 @@ impl Default for CloneOptions {
 /// - If `dest` already exists, update it in-place.
 /// - If `dest` does not exist, perform a fresh clone.
 ///
-/// For HTTPS URLs, `opts.token` is injected via a temporary `GIT_ASKPASS`
-/// script that is removed by a RAII guard after the git process exits.
+/// For HTTPS URLs, `opts.token` is passed through the git child's environment
+/// and a credential helper scoped to the URL's host (see `credential`).
 ///
 /// The methods return `Send` futures so they can be awaited inside spawned
 /// Tokio tasks.
