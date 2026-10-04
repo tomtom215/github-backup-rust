@@ -16,7 +16,7 @@ properties, GitHub's key order), not a summary: see
 | `--prefer-ssh` | Use SSH URLs instead of HTTPS for cloning |
 | `--clone-type` | Clone mode: `mirror` (default), `bare`, `full`, `shallow:<n>` |
 | `--lfs` | Enable Git LFS support |
-| `--no-prune` | Skip pruning deleted remote refs on update |
+| `--prune` | Delete branches and tags from the clone when they were deleted on GitHub (default: keep them) |
 
 ### Clone Types Explained
 
@@ -30,8 +30,8 @@ properties, GitHub's key order), not a summary: see
 How the clone types behave in detail:
 
 * Updates are `fetch`es into the existing directory; nothing is cloned twice.
-  Unless `--no-prune` is given, branches and tags deleted on GitHub are deleted
-  from the clone and force-pushed branches are overwritten (see
+  Branches and tags deleted on GitHub are kept in the clone unless `--prune` is
+  given; force-pushed branches are overwritten either way (see
   [Clones Follow GitHub](configuration/output-layout.md#clones-follow-github)).
 * A fresh clone is made in a hidden staging directory next to the target and
   renamed into place only when it is complete, so an interrupted clone leaves
@@ -291,7 +291,7 @@ Output: `<output>/<owner>/json/packages_<type>.json`
 log a warning) except:
 - `--lfs` (requires git-lfs to be installed)
 - `--prefer-ssh` (requires SSH keys to be set up)
-- `--no-prune` (affects update behaviour)
+- `--prune` (affects update behaviour)
 - `--action-runs` (can be very large for active repositories)
 - `--clone-starred` (can consume substantial disk space)
 - `--concurrency` (set separately)

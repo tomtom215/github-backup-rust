@@ -297,7 +297,7 @@ pub struct Args {
     ///   `--clone-starred` — clone every starred repository
     ///
     /// **Not controlled by `--all`** (output/behaviour flags):
-    ///   `--lfs` `--prefer-ssh` `--no-prune` `--clone-type` `--concurrency`
+    ///   `--lfs` `--prefer-ssh` `--prune` `--clone-type` `--concurrency`
     #[arg(help_heading = "What to back up", long, conflicts_with_all = [
         "repositories", "issues", "issue_comments", "issue_events",
         "pulls", "pull_comments", "pull_commits", "pull_reviews",
@@ -349,8 +349,22 @@ pub struct Args {
     #[arg(help_heading = "Repositories and git", long)]
     pub lfs: bool,
 
-    /// Do not prune deleted remote refs during git remote updates.
-    #[arg(help_heading = "Repositories and git", long)]
+    /// Delete branches and tags from the local clone when they were deleted
+    /// on GitHub.
+    ///
+    /// Off by default: a backup keeps what GitHub no longer has, so a deleted
+    /// branch or tag stays recoverable.  Branches that were force-pushed are
+    /// overwritten either way (their old commits are not kept).  Turn this on
+    /// to make each clone an exact mirror of GitHub's current refs.
+    #[arg(
+        help_heading = "Repositories and git",
+        long,
+        conflicts_with = "no_prune"
+    )]
+    pub prune: bool,
+
+    /// Deprecated and ignored: not pruning is now the default.
+    #[arg(help_heading = "Deprecated", long, hide = true)]
     pub no_prune: bool,
 
     // ── Issue options ──────────────────────────────────────────────────────
@@ -679,9 +693,29 @@ pub struct Args {
     )]
     pub mirror_owner: Option<String>,
 
-    /// Create repositories as private at the mirror destination.
-    #[arg(help_heading = "Mirroring", long, requires = "mirror_to")]
+    /// Create every mirror repository as private.  This is the default.
+    #[arg(
+        help_heading = "Mirroring",
+        long,
+        requires = "mirror_to",
+        conflicts_with = "mirror_public"
+    )]
     pub mirror_private: bool,
+
+    /// Create mirrors of public repositories as public.
+    ///
+    /// Without this flag every mirror is created private.  A repository counts
+    /// as public only if the backup's `repos.json` lists it as public; a
+    /// private source (or one whose visibility is unknown) is mirrored
+    /// privately whatever this flag says.  It affects repositories as they are
+    /// created: an existing mirror keeps its visibility.
+    #[arg(
+        help_heading = "Mirroring",
+        long,
+        requires = "mirror_to",
+        conflicts_with = "mirror_private"
+    )]
+    pub mirror_public: bool,
 
     // ── S3 storage options ─────────────────────────────────────────────────
     /// S3 bucket to sync backup metadata to (the bucket must already exist).

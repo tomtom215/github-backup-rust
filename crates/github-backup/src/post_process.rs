@@ -319,6 +319,12 @@ fn summarize_failures(report: &SyncReport) -> String {
     text
 }
 
+/// Whether every mirror is forced private: unless `--mirror-public` was given,
+/// and always when `--mirror-private` was (a config file may set both).
+fn mirror_forced_private(args: &Args) -> bool {
+    args.mirror_private || !args.mirror_public
+}
+
 /// Builds a [`MirrorDest`] from CLI args, or returns `None` if no mirror
 /// destination is configured.
 #[must_use]
@@ -335,13 +341,13 @@ pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
             base_url,
             token,
             namespace: owner,
-            private: args.mirror_private,
+            private: mirror_forced_private(args),
         })),
         _ => Some(MirrorDest::Gitea(GiteaConfig {
             base_url,
             token,
             owner,
-            private: args.mirror_private,
+            private: mirror_forced_private(args),
         })),
     }
 }
@@ -519,6 +525,94 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn forced_private(extra: &[&str]) -> bool {
+        let mut argv = vec![
+            "github-backup",
+            "octocat",
+            "--token",
+            "t",
+            "--mirror-to",
+            "https://codeberg.example",
+        ];
+        argv.extend(extra);
+        let args = crate::cli::test_support::parse(&argv);
+        match build_mirror_dest(&args).expect("a destination") {
+            MirrorDest::Gitea(c) => c.private,
+            MirrorDest::GitLab(c) => c.private,
+        }
+    }
+
+    /// Mirrors are private unless `--mirror-public` is given; and even then the
+    /// runner only publishes repositories known to be public (`wants_private`).
+    #[test]
+    fn mirrors_are_forced_private_unless_mirror_public_is_given() {
+        assert!(forced_private(&[]), "default");
+        assert!(forced_private(&["--mirror-private"]), "explicit");
+        assert!(!forced_private(&["--mirror-public"]), "opt-in");
+    }
+
+    #[test]
+    fn mirror_public_and_mirror_private_cannot_be_combined_on_the_command_line() {
+        assert!(crate::cli::test_support::try_parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-public",
+            "--mirror-private",
+        ])
+        .is_err());
+    }
+
+    /// A config file that (wrongly) sets both resolves to private.
+    #[test]
+    fn a_config_that_sets_both_means_private() {
+        let mut args = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+        ]);
+        let cfg = github_backup_types::config::ConfigFile::from_toml_str(
+            "mirror_public = true\nmirror_private = true\n",
+        )
+        .expect("parses");
+        args.merge_config(&cfg);
+        assert!(build_mirror_dest(&args).is_some());
+        assert!(mirror_forced_private(&args), "private wins");
+    }
+
+    /// The command line beats the file: `--mirror-private` ignores
+    /// `mirror_public = true`, and `--mirror-public` ignores `mirror_private`.
+    #[test]
+    fn the_command_line_beats_the_config_file_for_mirror_visibility() {
+        let cfg = github_backup_types::config::ConfigFile::from_toml_str(
+            "mirror_public = true\nmirror_private = true\n",
+        )
+        .expect("parses");
+        let mut private = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-private",
+        ]);
+        private.merge_config(&cfg);
+        assert!(!private.mirror_public);
+        assert!(mirror_forced_private(&private));
+
+        let mut public = crate::cli::test_support::parse(&[
+            "github-backup",
+            "octocat",
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-public",
+        ]);
+        public.merge_config(&cfg);
+        assert!(!public.mirror_private);
+        assert!(!mirror_forced_private(&public));
+    }
 
     #[test]
     fn decode_encrypt_key_none_returns_none() {

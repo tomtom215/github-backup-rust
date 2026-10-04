@@ -43,10 +43,12 @@ pub struct GiteaConfig {
     /// Repositories will be created/updated under this owner.
     pub owner: String,
 
-    /// Whether to create mirrored repositories as private.
+    /// Force every mirrored repository private, even one whose source is
+    /// public.
     ///
-    /// When `false`, repositories are created as public (matching the
-    /// visibility of the source repository may require additional logic).
+    /// When `false`, a repository is created public only if its source is
+    /// *known* to be public (see `push::wants_private`); every other one is
+    /// private.  A private source is never published.
     pub private: bool,
 }
 
@@ -104,7 +106,9 @@ pub struct GitLabConfig {
     /// created.
     pub namespace: String,
 
-    /// Whether to create mirrored repositories as private.
+    /// Force every mirrored repository private, even one whose source is
+    /// public.  When `false`, only repositories known to be public at the
+    /// source are created public; a private source is never published.
     pub private: bool,
 }
 

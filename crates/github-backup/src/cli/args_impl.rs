@@ -177,7 +177,11 @@ impl Args {
         // Clone behaviour flags.
         self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
         self.lfs |= cfg.lfs.unwrap_or(false);
-        self.no_prune |= cfg.no_prune.unwrap_or(false);
+        // `--no-prune` (deprecated) is the default now; an explicit one still
+        // beats a `prune = true` in the file.
+        if !self.no_prune {
+            self.prune |= cfg.prune.unwrap_or(false);
+        }
         // Clone type: the config supplies it only when the command line did not.
         if !clone_type_explicit {
             if let Some(ref ct) = cfg.clone_type {
@@ -212,7 +216,15 @@ impl Args {
                 self.mirror_owner = Some(o.clone());
             }
         }
-        self.mirror_private |= cfg.mirror_private.unwrap_or(false);
+        // The command line decides when it says either; the file fills in only
+        // when it is silent.  `mirror_private` wins over `mirror_public` if a
+        // file sets both (see `build_mirror_dest`).
+        if !self.mirror_public {
+            self.mirror_private |= cfg.mirror_private.unwrap_or(false);
+        }
+        if !self.mirror_private {
+            self.mirror_public |= cfg.mirror_public.unwrap_or(false);
+        }
         // S3 storage: CLI takes precedence.
         if self.s3_bucket.is_none() {
             if let Some(ref b) = cfg.s3_bucket {
@@ -338,7 +350,7 @@ impl Args {
                     prefer_ssh: self.prefer_ssh,
                     clone_type,
                     lfs: self.lfs,
-                    no_prune: self.no_prune,
+                    prune: self.prune,
                     dry_run: self.dry_run,
                     concurrency,
                     include_repos: self.include_repos,
@@ -366,7 +378,7 @@ impl Args {
                 prefer_ssh: self.prefer_ssh,
                 clone_type,
                 lfs: self.lfs,
-                no_prune: self.no_prune,
+                prune: self.prune,
                 issues: self.issues,
                 issue_comments: self.issue_comments,
                 issue_events: self.issue_events,

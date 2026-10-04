@@ -103,14 +103,17 @@
 # clone_type = "mirror"    # one of: mirror, bare, full, "shallow:<depth>"
 # prefer_ssh = false       # use SSH URLs (requires ssh-agent)
 # lfs = false              # clone Git LFS objects too
-# no_prune = false         # keep refs deleted upstream
+# prune = false            # true: delete branches and tags that were deleted on GitHub (default: keep them)
 
 # ── Mirror push (Gitea / Codeberg / Forgejo / GitLab) ─────────────────────
 
 # mirror_to = "https://codeberg.org"
 # mirror_token = "..."     # PREFER MIRROR_TOKEN env var
 # mirror_owner = "your-username"
-# mirror_private = false
+# Mirrors are created private.  Set mirror_public = true to create mirrors of
+# repositories that are public on GitHub as public (private ones stay private).
+# mirror_public = false
+# mirror_private = false   # explicit form of the default
 
 # ── S3-compatible storage ─────────────────────────────────────────────────
 

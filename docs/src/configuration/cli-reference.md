@@ -87,7 +87,8 @@ See [GitHub Enterprise Server](github-enterprise.md).
 | `--prefer-ssh` | | `false` | Clone over SSH instead of HTTPS (no token is used; git needs working SSH keys). |
 | `--clone-type <TYPE>` | | `mirror` | `mirror`, `bare`, `full` or `shallow:<depth>`; see [Clone types](../backup-categories.md#clone-types-explained). |
 | `--lfs` | | `false` | Also fetch Git LFS objects (`git lfs fetch --all`) after the mirror update.  Needs `git-lfs` installed; overrides `--clone-type`. |
-| `--no-prune` | | `false` | Do not prune refs that were deleted on GitHub. |
+| `--prune` | | `false` | Delete branches and tags from the clone when they were deleted on GitHub.  Without it they are kept; force-pushed branches are overwritten either way. |
+| `--no-prune` | | | Deprecated and ignored: not pruning is the default.  Cannot be combined with `--prune`. |
 
 ## Issue and Pull Request Options
 
@@ -189,7 +190,8 @@ watermark from the previous clean run decides which items can be skipped.  See
 | `--mirror-type <TYPE>` | none | `gitea` | `gitea` (Gitea, Codeberg, Forgejo) or `gitlab`. |
 | `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | none | API token for the destination.  The variable is ignored unless `--mirror-to` is given. |
 | `--mirror-owner <OWNER>` | none | OWNER | User or organisation/namespace at the destination. |
-| `--mirror-private` | none | `false` | Create destination repositories as private.  Without it a repository is created private anyway unless GitHub says it is public. |
+| `--mirror-private` | none | `false` | Create every destination repository as private.  This is the default; the flag states it explicitly.  Cannot be combined with `--mirror-public`. |
+| `--mirror-public` | none | `false` | Create mirrors of repositories that are public on GitHub as public.  A private source, or one whose visibility is unknown, is still mirrored privately.  Cannot be combined with `--mirror-private`. |
 
 See [Mirroring](../mirroring.md).
 

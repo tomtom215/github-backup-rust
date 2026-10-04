@@ -24,7 +24,7 @@ for every kind of setting:
 |-----------------|------|
 | Single values (`owner`, `token`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
 | `clone_type` | A `--clone-type` given on the command line wins, including `--clone-type mirror`.  The file applies only when the flag was not given. |
-| Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `no_prune`, `prefer_ssh`, `mirror_private`, `s3_include_assets`) | **Either one turns it on.**  A switch that is `true` in the file cannot be turned off from the command line; set it to `false` (or remove it) in the file instead. |
+| Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `prune`, `prefer_ssh`, `mirror_private`, `mirror_public`, `s3_include_assets`) | **Either one turns it on.**  A switch that is `true` in the file cannot be turned off from the command line; set it to `false` (or remove it) in the file instead. |
 | Lists (`include_repos`, `exclude_repos`) | The patterns of the file and of the command line are **combined**. |
 
 ```bash
@@ -61,7 +61,7 @@ concurrency = 8
 # clone_type = "mirror"  # "mirror", "bare", "full", "shallow:<depth>" or { shallow = <depth> }
 # prefer_ssh  = false
 # lfs         = false
-# no_prune    = false
+# prune       = false   # true: delete refs that were deleted on GitHub
 
 # ── Backup categories ──────────────────────────────────────────────────────
 
@@ -121,7 +121,8 @@ org_teams        = false
 # mirror_to      = "https://codeberg.org"   # Gitea-type only: mirror_type cannot be set in the file
 # mirror_token   = "cb_token"         # or use MIRROR_TOKEN env var
 # mirror_owner   = "alice"
-# mirror_private = false
+# mirror_public  = false   # true: mirrors of public repositories are public
+# mirror_private = false   # explicit form of the default
 
 # ── S3-compatible storage ──────────────────────────────────────────────────
 # s3_bucket       = "my-github-backup"
@@ -212,7 +213,8 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `clone_type` | string or table | `mirror` | `"mirror"`, `"bare"`, `"full"`, `"shallow:<depth>"` (for example `"shallow:3"`) or the table form `{ shallow = 3 }` |
 | `prefer_ssh` | bool | `false` | Use SSH clone URLs instead of HTTPS |
 | `lfs` | bool | `false` | Also fetch Git LFS objects (needs `git-lfs`) |
-| `no_prune` | bool | `false` | Do not prune deleted remote refs |
+| `prune` | bool | `false` | Delete branches and tags from the clone when they were deleted on GitHub |
+| `no_prune` | bool | — | Deprecated and ignored (not pruning is the default); still accepted so old files load |
 
 ### Backup Categories
 
@@ -266,7 +268,8 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `mirror_to` | string | — | Push mirrors to this base URL.  The destination type is always Gitea/Codeberg/Forgejo from a config file (`--mirror-type gitlab` has no key) |
 | `mirror_token` | string | — | API token for the mirror host (prefer `MIRROR_TOKEN` env var) |
 | `mirror_owner` | string | — | Owner name at the mirror destination |
-| `mirror_private` | bool | `false` | Create repos as private at the mirror destination |
+| `mirror_private` | bool | `false` | Create every mirror private (the default).  Wins if `mirror_public` is also set |
+| `mirror_public` | bool | `false` | Create mirrors of public repositories as public; private ones stay private |
 
 ### S3-Compatible Storage
 

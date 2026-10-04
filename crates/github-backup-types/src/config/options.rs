@@ -42,8 +42,10 @@ pub struct BackupOptions {
     pub clone_type: CloneType,
     /// Enable Git LFS when cloning.
     pub lfs: bool,
-    /// Do not prune deleted remote refs during updates.
-    pub no_prune: bool,
+    /// Delete branches and tags from the local clone when they were deleted
+    /// on the remote.  Off by default, so a backup keeps what GitHub no longer
+    /// has.
+    pub prune: bool,
 
     // ── Issues ────────────────────────────────────────────────────────────
     /// Backup issue metadata (title, body, state, labels, etc.).
@@ -287,7 +289,7 @@ impl BackupOptions {
             prefer_ssh: false,
             clone_type: CloneType::Mirror,
             lfs: false,
-            no_prune: false,
+            prune: false,
             issues: true,
             issue_comments: true,
             issue_events: true,

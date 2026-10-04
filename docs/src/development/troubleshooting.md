@@ -147,11 +147,11 @@ The repository is logged as failed and the rest continue.  Causes: network
 interruptions, a repository deleted or transferred since the last run, a
 directory owned by another user.
 
-### A branch I deleted on GitHub is gone from the backup
+### A branch I deleted on GitHub is still in the backup
 
-By design: a mirror follows GitHub, including deletions and force-pushes.  See
-[Clones Follow GitHub](../configuration/output-layout.md#clones-follow-github) and
-`--no-prune`.
+By design: deleted branches and tags are kept.  Pass `--prune` to remove them on
+the next run.  See
+[Clones Follow GitHub](../configuration/output-layout.md#clones-follow-github).
 
 ---
 

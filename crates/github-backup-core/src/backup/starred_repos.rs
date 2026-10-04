@@ -74,7 +74,7 @@ pub struct StarredOutcome {
 /// - `starred_dir` — Root directory for cloned repos:
 ///   `<starred_dir>/<repo_owner>/<repo_name>.git`.
 /// - `queue_path` — Path to the JSON queue file (created if absent).
-/// - `clone_opts` — Token and no-prune settings passed to git.
+/// - `clone_opts` — Token and prune settings passed to git.
 ///
 /// # Errors
 ///

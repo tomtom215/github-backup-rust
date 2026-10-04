@@ -598,7 +598,7 @@ where
         };
         CloneOptions {
             token,
-            no_prune: self.opts.no_prune,
+            prune: self.opts.prune,
             cancel: self.cancel.clone(),
             ..CloneOptions::default()
         }

@@ -53,7 +53,7 @@ github-backup octocat --token $GITHUB_TOKEN --output /backup \
 
 ### Gist update behaviour
 
-On subsequent runs, gists are updated in place with `git fetch --all --prune` (without `--prune` if `--no-prune` is set), exactly like mirror clones of repositories.  Gists are always mirror clones; `--clone-type` does not apply to them.  A gist that cannot be cloned or updated is recorded as a failure of the run (`gist <id>`) while the other gists continue.
+On subsequent runs, gists are updated in place with `git fetch --all` (with `--prune` added if `--prune` is set), exactly like mirror clones of repositories.  Gists are always mirror clones; `--clone-type` does not apply to them.  A gist that cannot be cloned or updated is recorded as a failure of the run (`gist <id>`) while the other gists continue.
 
 ---
 

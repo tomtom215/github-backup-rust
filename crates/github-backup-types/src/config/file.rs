@@ -164,7 +164,12 @@ pub struct ConfigFile {
     /// Enable Git LFS when cloning.
     pub lfs: Option<bool>,
 
-    /// Do not prune deleted remote refs during git remote updates.
+    /// Delete branches and tags from the local clone when they were deleted
+    /// on the remote (default: keep them).
+    pub prune: Option<bool>,
+
+    /// Deprecated and ignored: keeping deleted refs is now the default.  Still
+    /// accepted so that existing configuration files keep loading.
     pub no_prune: Option<bool>,
 
     // ── Report ────────────────────────────────────────────────────────────
@@ -185,8 +190,13 @@ pub struct ConfigFile {
     /// Owner name at the mirror destination (username or org).
     pub mirror_owner: Option<String>,
 
-    /// Create repositories as private at the mirror destination.
+    /// Create every repository as private at the mirror destination (this is
+    /// the default; the key exists to say so explicitly).
     pub mirror_private: Option<bool>,
+
+    /// Create mirrors of public repositories as public.  Mirrors of private
+    /// repositories stay private regardless.
+    pub mirror_public: Option<bool>,
 
     // ── S3 storage ─────────────────────────────────────────────────────────
     /// S3 bucket to sync backup metadata to.

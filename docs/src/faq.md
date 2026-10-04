@@ -30,8 +30,8 @@ attachments, LFS objects unless `--lfs`, and the contents of starred gists.
 It updates it, and does not lose what the first run captured:
 
 - **Git clones** are updated in place with `git fetch`.  A branch or tag
-  deleted on GitHub is deleted from the clone too (unless `--no-prune`), and a
-  force-pushed branch is overwritten: the clone follows GitHub.
+  deleted on GitHub stays in the clone (unless `--prune`), while a force-pushed
+  branch is overwritten.
 - **`issues.json` and `pulls.json`** are fetched in full and **merged** into the
   stored file; an item that disappears from GitHub stays in the backup.
 - **Other JSON lists** are rewritten with the current response.

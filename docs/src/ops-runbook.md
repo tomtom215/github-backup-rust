@@ -136,11 +136,11 @@ keeps one continuously updated backup per owner and never deletes snapshot
 directories.  If you need point-in-time copies, snapshot the output directory
 with restic, borg, ZFS or LVM, and apply the retention policy there.
 
-Know what "update" means for deletions: a mirror update **prunes** refs that
-were deleted on GitHub and follows force-pushes.  A deleted branch is gone from
-the backup after the next run (its objects stay until `git gc`).  Add
-`--no-prune` to keep deleted refs, and keep snapshots if you must be able to
-recover an earlier state.  `issues.json` and `pulls.json` keep items that
+Know what "update" means for deletions: by default a mirror update **keeps**
+branches and tags that were deleted on GitHub, but it follows force-pushes (the
+old commits of a force-pushed branch are not kept, and become unreachable until
+`git gc` removes them).  Add `--prune` to delete refs that were deleted on
+GitHub, and keep snapshots if you must be able to recover an earlier state.  `issues.json` and `pulls.json` keep items that
 disappear from GitHub; other lists mirror the current state.
 
 ### S3 stale object cleanup

@@ -682,7 +682,7 @@ fn toggle_field(app: &mut App) {
         (3, 2) => app.config.private = !app.config.private,
         (3, 3) => app.config.lfs = !app.config.lfs,
         (3, 4) => app.config.prefer_ssh = !app.config.prefer_ssh,
-        (3, 5) => app.config.no_prune = !app.config.no_prune,
+        (3, 5) => app.config.prune = !app.config.prune,
         (5, 0) => app.config.manifest = !app.config.manifest,
         (5, 1) => app.config.dry_run = !app.config.dry_run,
         _ => {}

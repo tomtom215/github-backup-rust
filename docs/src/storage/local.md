@@ -25,9 +25,9 @@ only place that lists every file; this page does not repeat it.
 `github-backup` is designed to be run repeatedly into the same directory.  On
 later runs:
 
-- **Git repositories** are updated in place (`git fetch --all --prune` for
-  mirrors) instead of being cloned again.  Deleted branches and tags are
-  pruned unless `--no-prune` is given; force-pushed branches are overwritten.
+- **Git repositories** are updated in place (`git fetch --all` for mirrors)
+  instead of being cloned again.  Deleted branches and tags are kept unless
+  `--prune` is given; force-pushed branches are overwritten.
 - **JSON lists** (`issues.json`, `pulls.json`, `releases.json`, ...) are fetched
   in full and written again.  `issues.json` and `pulls.json` are **merged** with
   what is already stored, so an item that has since disappeared from GitHub's

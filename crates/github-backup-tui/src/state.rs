@@ -87,7 +87,7 @@ pub struct ConfigState {
     pub private: bool,
     pub lfs: bool,
     pub prefer_ssh: bool,
-    pub no_prune: bool,
+    pub prune: bool,
     pub concurrency: String,
 
     // ── Filter ────────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ impl Default for ConfigState {
             private: false,
             lfs: false,
             prefer_ssh: false,
-            no_prune: false,
+            prune: false,
             concurrency: String::from("4"),
             include_repos: String::new(),
             exclude_repos: String::new(),
@@ -257,7 +257,7 @@ impl ConfigState {
             0 => 2,  // Auth: token, api_url
             1 => 5,  // Target: owner, output_dir, org_mode, since, full
             2 => 34, // Categories: 34 bool flags
-            3 => 7,  // Clone: clone_type, forks, private, lfs, prefer_ssh, no_prune, concurrency
+            3 => 7,  // Clone: clone_type, forks, private, lfs, prefer_ssh, prune, concurrency
             4 => 2,  // Filter: include, exclude
             5 => 2,  // Output: manifest, dry_run
             _ => 1,
@@ -318,7 +318,7 @@ impl ConfigState {
             private,
             lfs,
             prefer_ssh,
-            no_prune,
+            prune,
             concurrency,
             include_repos,
             exclude_repos,
@@ -379,7 +379,7 @@ impl ConfigState {
             prefer_ssh: *prefer_ssh,
             clone_type,
             lfs: *lfs,
-            no_prune: *no_prune,
+            prune: *prune,
             issues: *issues,
             issue_comments: *issue_comments,
             issue_events: *issue_events,
@@ -478,7 +478,7 @@ impl ConfigState {
             prefer_ssh,
             clone_type,
             lfs,
-            no_prune,
+            prune,
             include_repos,
             exclude_repos,
             since,
@@ -537,7 +537,7 @@ impl ConfigState {
             prefer_ssh: *prefer_ssh,
             clone_type,
             lfs: *lfs,
-            no_prune: *no_prune,
+            prune: *prune,
             include_repos: include_repos.join(", "),
             exclude_repos: exclude_repos.join(", "),
             since: since.clone().unwrap_or_default(),

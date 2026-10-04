@@ -35,11 +35,19 @@ is bumped.
   more.  With `--encrypt-key` the digest is keyed, so changing the key re-uploads
   everything.
 - **`--mirror-to` pushes branches and tags only** (`git push --prune` with
-  explicit refspecs, no `--mirror`), creates repositories **private** unless the
-  source is known to be public, and **refuses to push into an existing repository
+  explicit refspecs, no `--mirror`), creates every repository **private** unless
+  `--mirror-public` is given **and** the source is known to be public (a private
+  source is never published), and **refuses to push into an existing repository
   that it did not create** (unless that repository is empty).  Gitea repositories
   for an organisation owner are created through the organisation endpoint.
   Working-tree clones (`--clone-type full`) are not pushed.
+- **Git clones keep what GitHub deleted.** Updates no longer prune: a branch or tag
+  deleted on GitHub stays in the clone (force-pushed branches are still
+  overwritten).  Pass `--prune` (config key `prune`) for the old behaviour.
+  `--no-prune` and the config key `no_prune` are still accepted and ignored; they
+  cannot be combined with `--prune`.  If a deleted branch `foo` is replaced by
+  `foo/bar`, git cannot hold both: that update prunes once, logs a warning and
+  continues.  The TUI's "No Prune" toggle became "Prune deleted refs".
 - **`--restore` is restore-only**: it no longer runs a backup first and works from
   the local backup.  It asks for confirmation first, skips issues it restored
   before, and exits `3` when items could not be restored.  Target repositories must
@@ -64,6 +72,8 @@ is bumped.
 
 ### Added
 
+- `--prune` and `--mirror-public` (and the config keys `prune`, `mirror_public`); see the
+  upgrade notes above for what they change.
 - **Failure isolation and honest reporting.**  Every repository and every category
   is an isolated step; a failure is recorded (scope, step, message) and the rest of
   the run continues.  Only credentials rejected (401), an exhausted rate-limit
@@ -138,7 +148,8 @@ is bumped.
 - **Git subprocesses**: a **stall** timeout (600 s without output; was a 600 s
   wall-clock limit) with `--progress`, no pipe deadlock for large outputs, async
   runner on the blocking pool, process-group kill on cancellation, `git fetch --all
-  --prune` instead of `git remote update --prune`, bare clones update with explicit
+  --prune` instead of `git remote update --prune` (pruning has since become opt-in,
+  see above), bare clones update with explicit
   refspecs (they never advanced before), fresh clones go to a staging directory and
   are renamed when complete.  Git runs with stdin closed, `GIT_TERMINAL_PROMPT=0`
   and `LC_ALL=C`.
@@ -210,8 +221,8 @@ is bumped.
   `-c safe.directory=<path>`.
 - Failure messages, logs and reports are scrubbed of tokens and URL credentials.
 - Release-asset downloads never forward the credential across origins.
-- Mirrors are private by default and never overwrite a repository the tool did not
-  create.
+- Mirrors are private by default (`--mirror-public` opts public sources in) and never
+  overwrite a repository the tool did not create.
 - S3: keyed (HMAC) content digests for encrypted uploads so the bucket learns no
   unkeyed hash of the plaintext; delete-stale guarded as described above; credentials
   validated and kept out of `Debug` output.

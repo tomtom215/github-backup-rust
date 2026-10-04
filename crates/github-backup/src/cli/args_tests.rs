@@ -99,7 +99,30 @@ fn parse_concurrency_and_dry_run() {
 }
 
 #[test]
-fn parse_no_prune() {
+fn pruning_is_off_by_default_and_opt_in() {
+    let off = parse(&["github-backup", "octocat", "--token", "t", "--repositories"]);
+    let (_, _, opts) = off.into_backup_options();
+    assert!(
+        !opts.prune,
+        "a backup keeps refs deleted upstream by default"
+    );
+
+    let on = parse(&[
+        "github-backup",
+        "octocat",
+        "--token",
+        "t",
+        "--repositories",
+        "--prune",
+    ]);
+    let (_, _, opts) = on.into_backup_options();
+    assert!(opts.prune);
+}
+
+/// `--no-prune` is the default now; it is still accepted so existing
+/// scripts keep working, and it cannot be combined with `--prune`.
+#[test]
+fn deprecated_no_prune_is_accepted_and_conflicts_with_prune() {
     let args = parse(&[
         "github-backup",
         "octocat",
@@ -108,9 +131,17 @@ fn parse_no_prune() {
         "--repositories",
         "--no-prune",
     ]);
-    assert!(args.no_prune);
     let (_, _, opts) = args.into_backup_options();
-    assert!(opts.no_prune);
+    assert!(!opts.prune);
+    assert!(try_parse(&[
+        "github-backup",
+        "octocat",
+        "--token",
+        "t",
+        "--prune",
+        "--no-prune",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -260,19 +291,31 @@ fn merge_config_sets_org_from_config() {
 }
 
 #[test]
-fn merge_config_sets_prefer_ssh_and_no_prune() {
+fn merge_config_sets_prefer_ssh_and_prune() {
     let mut args = parse(&["github-backup", "octocat", "--token", "t"]);
     assert!(!args.prefer_ssh);
-    assert!(!args.no_prune);
+    assert!(!args.prune);
 
     let cfg = github_backup_types::config::ConfigFile {
         prefer_ssh: Some(true),
-        no_prune: Some(true),
+        prune: Some(true),
         ..Default::default()
     };
     args.merge_config(&cfg);
     assert!(args.prefer_ssh);
-    assert!(args.no_prune);
+    assert!(args.prune);
+}
+
+/// A config file written for the old default (`no_prune = true`) still loads,
+/// and an explicit `--no-prune` on the command line beats `prune = true`.
+#[test]
+fn old_no_prune_config_key_still_loads_and_cli_no_prune_wins() {
+    let cfg =
+        github_backup_types::config::ConfigFile::from_toml_str("no_prune = true\nprune = true\n")
+            .expect("both keys parse");
+    let mut args = parse(&["github-backup", "octocat", "--token", "t", "--no-prune"]);
+    args.merge_config(&cfg);
+    assert!(!args.prune, "explicit --no-prune beats the file");
 }
 
 #[test]

@@ -55,10 +55,12 @@ skipped.
 
 ## Safety
 
-* **A repository is created private** unless GitHub's listing says the source is
-  public.  If visibility is unknown (no `repos.json`), it is private.
-  `--mirror-private` forces private even for public sources.  An existing
-  repository keeps its current visibility.
+* **A repository is created private** by default.  `--mirror-public` makes the
+  mirror of a repository public, but only if GitHub's listing (`repos.json`)
+  says the source is public: a private source, or one whose visibility is
+  unknown (no `repos.json`), is created private whatever the flags say.
+  `--mirror-private` states the default explicitly.  An existing repository
+  keeps its current visibility.
 * **A repository this tool did not create is never pushed into.**  Every
   repository it creates gets the description `GitHub mirror of <owner>/<repo>`.
   An existing destination repository is accepted only if it carries that
@@ -77,10 +79,11 @@ skipped.
 | `--mirror-type <TYPE>` | none | `gitea` (default) or `gitlab`; command line only (no config-file key) |
 | `--mirror-token <TOKEN>` | `MIRROR_TOKEN` | API token (the variable is ignored unless `--mirror-to` is given) |
 | `--mirror-owner <OWNER>` | none | User, organisation (Gitea) or namespace (GitLab) to create repositories under; default: the GitHub OWNER |
-| `--mirror-private` | none | Always create private repositories |
+| `--mirror-private` | none | Create every repository private (the default) |
+| `--mirror-public` | none | Create mirrors of public repositories as public |
 
-`--mirror-to`, `--mirror-token` (or `MIRROR_TOKEN`), `--mirror-owner` and
-`--mirror-private` can also be set in the config file; `--mirror-type` cannot.
+`--mirror-to`, `--mirror-token` (or `MIRROR_TOKEN`), `--mirror-owner`,
+`--mirror-private` and `--mirror-public` can also be set in the config file; `--mirror-type` cannot.
 
 ### Gitea, Forgejo, Codeberg
 

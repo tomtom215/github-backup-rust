@@ -272,7 +272,7 @@ fn render_clone_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
         FieldDef::toggle(2, "Include Private", cfg.private, cfg),
         FieldDef::toggle(3, "Git LFS", cfg.lfs, cfg),
         FieldDef::toggle(4, "Prefer SSH", cfg.prefer_ssh, cfg),
-        FieldDef::toggle(5, "No Prune", cfg.no_prune, cfg)
+        FieldDef::toggle(5, "Prune deleted refs", cfg.prune, cfg)
             .help("Keep refs that were deleted upstream."),
         FieldDef::text(6, "Concurrency (1-64)", &cfg.concurrency, false, cfg)
             .help("Repositories processed in parallel."),

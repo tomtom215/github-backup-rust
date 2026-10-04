@@ -77,8 +77,11 @@ pub struct CloneOptions {
     /// Token to inject for HTTPS authentication, or `None` for unauthenticated
     /// (public repos) or SSH-based cloning.
     pub token: Option<String>,
-    /// When `true`, skip `--prune` during updates.
-    pub no_prune: bool,
+    /// When `true`, updates pass `--prune`, so branches and tags deleted on the
+    /// remote are deleted from the local clone too.  The default (`false`)
+    /// keeps them: a backup should still hold what GitHub no longer has.
+    /// Force-pushed branches are overwritten either way.
+    pub prune: bool,
     /// Seconds a git subprocess may go without producing any output before it
     /// is killed and [`CoreError::GitTimeout`] is returned.
     ///
@@ -95,12 +98,12 @@ pub struct CloneOptions {
 }
 
 impl CloneOptions {
-    /// No authentication, prune enabled, default stall limit, fsck disabled.
+    /// No authentication, pruning off, default stall limit, fsck disabled.
     #[must_use]
     pub fn unauthenticated() -> Self {
         Self {
             token: None,
-            no_prune: false,
+            prune: false,
             stall_timeout_secs: DEFAULT_STALL_TIMEOUT_SECS,
             run_fsck: false,
             cancel: CancelFlag::new(),
@@ -134,8 +137,8 @@ impl Default for CloneOptions {
 pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a bare mirror (`git clone --mirror`).
     ///
-    /// If `dest` already exists, updates it with `git fetch --all` (pruning
-    /// deleted refs unless `opts.no_prune` is set).
+    /// If `dest` already exists, updates it with `git fetch --all` (deleted
+    /// refs are pruned only if `opts.prune` is set).
     ///
     /// # Errors
     ///
@@ -372,7 +375,7 @@ impl Job {
             // `git clone --bare` writes no fetch refspec, so `git fetch --all`
             // would exit 0 having fetched nothing, forever.  Name the refspecs.
             let mut args = vec!["fetch", "--progress"];
-            if !self.opts.no_prune {
+            if self.opts.prune {
                 args.push("--prune");
             }
             args.extend([
@@ -449,15 +452,40 @@ impl Job {
     /// accepts `--progress`; on a mirror clone the two yield identical refs
     /// (including force-pushed branches and deleted tags with `--prune`).
     fn fetch_all_args(&self) -> &'static [&'static str] {
-        if self.opts.no_prune {
-            &["fetch", "--progress", "--all"]
-        } else {
+        if self.opts.prune {
             &["fetch", "--progress", "--all", "--prune"]
+        } else {
+            &["fetch", "--progress", "--all"]
         }
     }
 
     /// Runs an update command inside the existing repository.
+    ///
+    /// Not pruning has one failure mode: when a branch that was deleted on the
+    /// remote is replaced by one whose name needs its place as a directory
+    /// (`foo` deleted, `foo/bar` created), git cannot create the new ref while
+    /// the stale one exists.  Such a fetch is repeated once with `--prune`, so
+    /// the repository keeps being backed up; it loses only the stale refs.
     fn update(&self, args: &[&str]) -> Result<(), CoreError> {
+        match self.run_update(args) {
+            Err(CoreError::GitFailed { stderr, .. })
+                if !self.opts.prune
+                    && args.first() == Some(&"fetch")
+                    && is_ref_name_conflict(&stderr) =>
+            {
+                warn!(
+                    dest = %self.dest.display(),
+                    "a deleted branch blocks a new one of the same path; pruning deleted refs once to continue"
+                );
+                let mut retry = args.to_vec();
+                retry.insert(1, "--prune");
+                self.run_update(&retry)
+            }
+            other => other,
+        }
+    }
+
+    fn run_update(&self, args: &[&str]) -> Result<(), CoreError> {
         run_git(
             &self.program,
             args,
@@ -601,6 +629,13 @@ fn run_fsck(program: &Path, repo_dir: &Path) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// `true` if a failed fetch was blocked by a stale ref occupying the name a
+/// new ref needs (a directory/file clash between `foo` and `foo/bar`).
+fn is_ref_name_conflict(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("cannot lock ref") || lower.contains("git remote prune")
+}
+
 #[cfg(test)]
 mod tests {
     use super::spy::SpyGitRunner;
@@ -636,7 +671,7 @@ mod tests {
     fn clone_options_unauthenticated_has_no_token() {
         let opts = CloneOptions::unauthenticated();
         assert!(opts.token.is_none());
-        assert!(!opts.no_prune);
+        assert!(!opts.prune);
         assert_eq!(opts.stall_timeout_secs, DEFAULT_STALL_TIMEOUT_SECS);
         assert!(!opts.run_fsck);
     }
@@ -647,7 +682,7 @@ mod tests {
         let b = CloneOptions::unauthenticated();
         assert_eq!(a.stall_timeout_secs, b.stall_timeout_secs);
         assert_eq!(a.run_fsck, b.run_fsck);
-        assert_eq!(a.no_prune, b.no_prune);
+        assert_eq!(a.prune, b.prune);
     }
 
     #[tokio::test]
@@ -934,6 +969,18 @@ exit 128"#,
         let args = std::fs::read_to_string(&seen).expect("args");
         assert!(args.contains("+refs/heads/*:refs/heads/*"), "{args}");
         assert!(args.contains("+refs/tags/*:refs/tags/*"), "{args}");
+        assert!(!args.contains("--prune"), "pruning is opt-in: {args}");
+
+        // With pruning requested the same update passes `--prune`.
+        let opts = CloneOptions {
+            prune: true,
+            ..with_stall(10)
+        };
+        runner
+            .bare_clone("https://example.invalid/r.git", &dest, &opts)
+            .await
+            .expect("update");
+        let args = std::fs::read_to_string(&seen).expect("args");
         assert!(args.contains("--prune"), "{args}");
     }
 
@@ -1007,7 +1054,23 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
         let lines: Vec<String> = argv.lines().map(subcommand).collect();
         assert_eq!(lines.len(), 2, "{argv}");
         assert!(lines[0].starts_with("clone --progress --mirror "), "{argv}");
-        assert_eq!(lines[1], "fetch --progress --all --prune", "{argv}");
+        assert_eq!(
+            lines[1], "fetch --progress --all",
+            "pruning is opt-in: {argv}"
+        );
+
+        // `prune` adds `--prune` to the update (and only to the update).
+        let pruning = CloneOptions {
+            prune: true,
+            ..with_stall(10)
+        };
+        runner
+            .mirror_clone("https://example.invalid/r.git", &existing, &pruning)
+            .await
+            .expect("pruning update");
+        let argv = std::fs::read_to_string(&log).expect("argv log");
+        let last = argv.lines().map(subcommand).next_back().expect("a call");
+        assert_eq!(last, "fetch --progress --all --prune", "{argv}");
     }
 }
 
@@ -1280,5 +1343,119 @@ mod credential_tests {
         let text = err.to_string();
         assert!(text.contains("dubious ownership"), "{text}");
         assert!(text.contains("--user") && text.contains("chown"), "{text}");
+    }
+}
+
+/// Real git against a local origin: what an update does with refs that were
+/// deleted upstream.
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn origin_with_branches(dir: &Path, branches: &[&str]) -> String {
+        let origin = dir.join("origin");
+        std::fs::create_dir(&origin).expect("mkdir");
+        git(&origin, &["init", "-q"]);
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        for b in branches {
+            git(&origin, &["branch", b]);
+        }
+        format!("file://{}", origin.display())
+    }
+
+    fn refs(repo: &Path) -> Vec<String> {
+        git(
+            repo,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    async fn mirror(url: &str, dest: &Path, prune: bool) -> Result<(), CoreError> {
+        let opts = CloneOptions {
+            prune,
+            ..CloneOptions::unauthenticated()
+        };
+        ProcessGitRunner::new().mirror_clone(url, dest, &opts).await
+    }
+
+    #[tokio::test]
+    async fn a_branch_deleted_upstream_is_kept_unless_pruning_is_asked_for() {
+        for (prune, expect_kept) in [(false, true), (true, false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let url = origin_with_branches(dir.path(), &["feature"]);
+            let dest = dir.path().join("mirror.git");
+            mirror(&url, &dest, prune).await.expect("clone");
+            assert!(refs(&dest).contains(&"feature".to_owned()));
+
+            git(&dir.path().join("origin"), &["branch", "-D", "feature"]);
+            mirror(&url, &dest, prune).await.expect("update");
+
+            assert_eq!(
+                refs(&dest).contains(&"feature".to_owned()),
+                expect_kept,
+                "prune={prune}: {:?}",
+                refs(&dest)
+            );
+        }
+    }
+
+    /// Without pruning, `foo` (deleted) and `foo/bar` (new) cannot coexist as
+    /// refs.  The update must not fail forever: it prunes once and goes on.
+    #[tokio::test]
+    async fn a_new_branch_under_a_deleted_branchs_name_does_not_wedge_the_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = origin_with_branches(dir.path(), &["foo"]);
+        let dest = dir.path().join("mirror.git");
+        mirror(&url, &dest, false).await.expect("clone");
+
+        let origin = dir.path().join("origin");
+        git(&origin, &["branch", "-D", "foo"]);
+        git(&origin, &["branch", "foo/bar"]);
+        mirror(&url, &dest, false)
+            .await
+            .expect("the update recovers instead of failing");
+
+        let now = refs(&dest);
+        assert!(now.contains(&"foo/bar".to_owned()), "{now:?}");
+        assert!(!now.contains(&"foo".to_owned()), "{now:?}");
+    }
+
+    #[test]
+    fn only_ref_name_clashes_trigger_the_pruning_retry() {
+        assert!(is_ref_name_conflict(
+            "error: cannot lock ref 'refs/heads/foo/bar': 'refs/heads/foo' exists"
+        ));
+        assert!(is_ref_name_conflict(
+            "error: some local refs could not be updated; try running\n 'git remote prune origin'"
+        ));
+        assert!(!is_ref_name_conflict("fatal: repository not found"));
+        assert!(!is_ref_name_conflict(
+            "fatal: unable to access: could not resolve host"
+        ));
     }
 }

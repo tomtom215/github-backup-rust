@@ -617,7 +617,7 @@ proptest! {
         private in any::<bool>(),
         prefer_ssh in any::<bool>(),
         lfs in any::<bool>(),
-        no_prune in any::<bool>(),
+        prune in any::<bool>(),
         issues in any::<bool>(),
         issue_comments in any::<bool>(),
         issue_events in any::<bool>(),
@@ -652,7 +652,7 @@ proptest! {
             target,
             repositories, forks, private, prefer_ssh,
             clone_type: CloneType::Mirror,
-            lfs, no_prune,
+            lfs, prune,
             issues, issue_comments, issue_events,
             pulls, pull_comments, pull_commits, pull_reviews,
             labels, milestones, releases, release_assets,
@@ -686,7 +686,7 @@ proptest! {
         prop_assert_eq!(decoded.private, opts.private);
         prop_assert_eq!(decoded.prefer_ssh, opts.prefer_ssh);
         prop_assert_eq!(decoded.lfs, opts.lfs);
-        prop_assert_eq!(decoded.no_prune, opts.no_prune);
+        prop_assert_eq!(decoded.prune, opts.prune);
         prop_assert_eq!(decoded.issues, opts.issues);
         prop_assert_eq!(decoded.issue_comments, opts.issue_comments);
         prop_assert_eq!(decoded.issue_events, opts.issue_events);

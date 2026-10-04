@@ -199,14 +199,19 @@ when GitHub has none, the sidecar).  Otherwise it is downloaded again.
 
 ## Clones Follow GitHub
 
-A mirror clone is updated with `git fetch --all --prune`, so a branch or tag
-that is deleted on GitHub is deleted from the backup on the next run, and a
-force-pushed branch is overwritten.  The backup is a faithful copy of the
-current state, not an archive of every state; objects that become unreachable
-stay in the repository's object store until `git gc` removes them.  Use
-`--no-prune` to keep deleted refs (force-pushed refs are still updated), and
-snapshot the output directory with a tool such as restic, borg or ZFS if you
-need history.
+A mirror clone is updated with `git fetch --all`.  A branch or tag that is
+deleted on GitHub **stays** in the backup, so a deleted branch can still be
+recovered; a force-pushed branch is overwritten, and the commits it used to
+point at stay in the repository's object store only until `git gc` removes
+them.  Pass `--prune` (config key `prune`) to delete refs that were deleted on
+GitHub instead, which makes each clone an exact copy of GitHub's current refs.
+Snapshot the output directory with a tool such as restic, borg or ZFS if you
+need the history of force-pushed branches.
+
+One case needs pruning to continue: if a deleted branch `foo` is replaced by a
+new branch `foo/bar`, git cannot hold both refs.  The update then prunes once,
+logs a warning, and carries on, so that repository keeps being backed up (the
+stale refs are lost in that case).
 
 ## Design Rationale
 

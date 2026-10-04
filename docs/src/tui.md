@@ -58,7 +58,7 @@ Six tabs:
 | Auth | GitHub token (always masked), API URL for GitHub Enterprise (`https://` only) |
 | Target | Owner, output directory, organisation mode, since date, **Full backup (ignore state)** |
 | Categories | 34 backup-category toggles |
-| Clone | Clone type (mirror/bare/full/shallow), forks, private, LFS, prefer-SSH, no-prune, concurrency (1–64) |
+| Clone | Clone type (mirror/bare/full/shallow), forks, private, LFS, prefer-SSH, prune deleted refs, concurrency (1–64) |
 | Filter | include / exclude repository globs (comma-separated) |
 | Output | Write SHA-256 manifest, dry run |
 

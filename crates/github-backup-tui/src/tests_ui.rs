@@ -1180,7 +1180,7 @@ fn form_round_trips_through_backup_options() {
         private: true,
         lfs: true,
         prefer_ssh: true,
-        no_prune: true,
+        prune: true,
         clone_type: CloneType::Bare,
         include_repos: vec!["a-*".into(), "b".into()],
         exclude_repos: vec!["c".into()],
