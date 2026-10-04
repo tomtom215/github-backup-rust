@@ -61,11 +61,25 @@ async fn main() -> ExitCode {
         if let Err(e) = args.check_dependencies(&matches) {
             e.exit();
         }
+        // Resolve the command line the same way a normal run does, so
+        // `--all --private --dry-run ...` pre-fill the Configure screen.
+        let token = args.token.clone();
+        let owner = args.owner.clone();
+        let output = args.output.as_ref().map(|p| p.display().to_string());
+        let api_url = args.api_url.clone();
+        let manifest = args.manifest;
+        if args.owner.is_none() {
+            // `into_backup_options` needs an owner; the TUI asks for it.
+            args.owner = Some(String::new());
+        }
+        let (_, _, options) = args.into_backup_options();
         let initial = InitialConfig {
-            token: args.token.clone(),
-            owner: args.owner.clone(),
-            output: args.output.as_ref().map(|p| p.display().to_string()),
-            api_url: args.api_url.clone(),
+            token,
+            owner,
+            output,
+            api_url,
+            options: Some(options),
+            manifest,
         };
         return github_backup_tui::run_tui(initial).await;
     }

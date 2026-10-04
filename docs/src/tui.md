@@ -1,122 +1,118 @@
 # Interactive TUI
 
 `github-backup` ships a full-screen terminal user interface built with
-[Ratatui](https://ratatui.rs) 0.30.  Pass `--tui` to any normal invocation
-and the tool enters the TUI instead of running non-interactively.
+[Ratatui](https://ratatui.rs) 0.30.  Pass `--tui` and the tool enters the TUI
+instead of running non-interactively.
 
 ```bash
 # Recommended first-run experience
 export GITHUB_TOKEN=ghp_your_token_here
 github-backup octocat --tui
 
-# Pre-seed common settings via flags; the TUI picks them up
-github-backup octocat \
-  --token "$GITHUB_TOKEN" \
-  --output /var/backup/github \
-  --tui
+# Flags pre-fill the Configure screen
+github-backup octocat --tui --token "$GITHUB_TOKEN" --output /var/backup/github \
+  --all --private --dry-run --org --concurrency 8 --manifest
 ```
 
-Any flags passed alongside `--tui` are loaded into the Configure screen as
-initial values.  You can review and adjust every setting before starting
-a backup run.
+The command line is resolved exactly as for a normal run, so `--all`,
+`--private`, `--forks`, `--dry-run`, `--org`, `--full`, `--since`,
+`--include-repos`, `--clone-type`, `--concurrency`, `--manifest` and the
+individual category flags all arrive in the Configure screen as initial
+values.  Review and adjust them, then start the backup.  Not carried over:
+`--config` files, `--clone-host`, and every option listed under
+[What the TUI cannot do](#what-the-tui-cannot-do).
+
+The TUI needs an interactive terminal on stdout.  Without one (a pipe, cron,
+`docker run` without `-t`) it prints a one-line explanation and exits with
+status 2.
 
 ---
 
 ## Screen Overview
 
-The title bar lists five screens.  Press the corresponding number key to
-switch at any time.
+The title bar lists five screens.  Press the number key to switch (not while a
+backup is running, and not while editing a field).  On narrow terminals the
+title bar shrinks to digits.
 
 ```
  github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
 ```
 
+Terminals smaller than 30x8 show a "Terminal too small" notice instead of a
+clipped screen.
+
 ### 1 — Dashboard
 
-The home screen.  Shows the owner, output directory, token status, and the
-last successful run (date, repo count).  Use `j` / `k` to select an action
-and `Enter` to activate it.
-
-```
-  Owner          octocat
-  Output dir     /var/backup/github
-  Token          ghp_****...****   (set)
-  Last run       2026-03-29 08:14 UTC  (312 repos)
-
-  > Start backup
-    Verify integrity
-    Configure
-```
+Owner, output directory, token status (never shown, only "configured") and the
+last recorded run: time, repository count and result (`complete`, or
+`INCOMPLETE (N failures)`).  The last run is read from
+`<output>/<owner>/json/backup_history.json`, falling back to
+`backup_state.json`, and refreshed whenever you return to the Dashboard.
 
 ### 2 — Configure
 
-All 50+ backup settings in a single screen, organised across eight tabs:
+Six tabs:
 
 | Tab | Contents |
 |-----|----------|
-| Auth | Token, OAuth client ID / scopes, device-auth toggle |
-| Target | Owner, output dir, org mode, concurrency, dry-run |
-| Categories | 34 backup-category toggles (repos, issues, PRs, gists, …) |
-| Clone | Clone type (mirror/bare/full/shallow), LFS, no-prune, prefer-SSH |
-| Filter | include-repos, exclude-repos glob patterns, since date |
-| Mirror | Mirror-to URL, mirror token, owner, type (Gitea/Gitlab), private |
-| S3 | Bucket, region, prefix, endpoint, access key, secret key, include-assets |
-| Output | Config file path, report path, API URL, clone host |
+| Auth | GitHub token (always masked), API URL for GitHub Enterprise (`https://` only) |
+| Target | Owner, output directory, organisation mode, since date, **Full backup (ignore state)** |
+| Categories | 34 backup-category toggles |
+| Clone | Clone type (mirror/bare/full/shallow), forks, private, LFS, prefer-SSH, no-prune, concurrency (1–64) |
+| Filter | include / exclude repository globs (comma-separated) |
+| Output | Write SHA-256 manifest, dry run |
 
-Navigate tabs with `h` / `l` (or `←` / `→`).  Move between fields with
-`j` / `k`.  Press `Enter` to begin editing a text field; `Esc` to commit.
-Toggle booleans with `Enter`.  Cycle select fields with `<` / `>`.
+*Full backup* ignores the saved incremental state and re-fetches everything.
+It cannot be combined with *Since*, as on the command line.  The Output tab
+ends with a note: **Command line only: mirror push, S3 sync, JSON report,
+Prometheus metrics, webhook notification and device-flow sign-in.**
 
-On the Categories tab, press `A` to select all or deselect all at once.
+The focused field's help text is shown under the list when there is room.
+Starting a backup validates the form (owner, token, `https://` API URL, date
+format, concurrency range) and shows what to fix in a dialog.
 
 ### 3 — Run
 
 Live view of an active backup:
 
-- **Progress gauge** — filled as repos complete; labelled with counts and
-  the current phase name
-- **Repo list** (35 % width) — all discovered repositories with status icons:
-  ` .` pending, `>>` running, `ok` done, `!!` error, `--` skipped; auto-scrolls
-  to keep the active repo visible
-- **Log panel** (65 % width) — structured log lines from `tracing` (timestamp,
-  level, message), scrollable with `g` / `G`
-- **Stats bar** — repos done / total, error count, elapsed time, key hints
+- **Progress gauge** — repositories finished out of discovered, with a failure
+  count.  As soon as one repository fails the title reads
+  `INCOMPLETE: N failed` and the bar turns red.
+- **Repo list** — `>>` running, `ok` done, `!!` failed (with the reason),
+  `--` skipped.  Failed repositories are pinned to the top so they never
+  scroll away.
+- **Log panel** — one row per entry (long lines are cut, never wrapped), so the
+  newest entry is always visible while following.  Only this tool's own INFO
+  and above are shown by default; set `RUST_LOG` to change that.
+- **Counters** — repos finished/total, failed, elapsed (stops when the run
+  ends), and key hints.
 
-Scroll the repo list with `j` / `k`.  Scroll the log with `g` (top) / `G`
-(bottom).  Cancel the running backup with `Ctrl+C`.
+With no backup running this screen just says so; `Esc` or `q` leave it.
 
 ### 4 — Verify
 
-Offline integrity check against the JSON manifest stored in the output directory.
-Press `Enter` to start a verification run; the results appear in-place:
-
-```
-  Path: /var/backup/github/octocat/json
-  Status: CLEAN
-
-  Files OK: 4,821
-  Tampered:  0
-  Missing:   0
-  Unexpected: 0
-```
-
-Scroll through tampered / missing / unexpected file lists with `j` / `k`.
+Checks the JSON files listed in `backup_manifest.json` against the disk.  It
+does **not** cover git mirrors.  The manifest exists only if you ran a backup
+with *Write SHA-256 Manifest* (or `--manifest`); otherwise Verify says so.
+`v` starts it.
 
 ### 5 — Results
 
-Post-run statistics after each backup completes (or fails):
+The verdict follows the engine, never the repo counters alone:
 
-| Counter | Value |
-|---------|-------|
-| Repos discovered | 317 |
-| Repos backed up | 312 |
-| Repos skipped | 3 |
-| Repos errored | 2 |
-| Gists backed up | 14 |
-| Issues fetched | 8,042 |
-| PRs fetched | 1,203 |
-| Workflows fetched | 289 |
-| Elapsed | 4m 32s |
+| Headline | Meaning |
+|----------|---------|
+| `BACKUP COMPLETE` | ran to the end, nothing failed |
+| `BACKUP INCOMPLETE - N failures` | ran to the end but something failed; **not a complete backup** |
+| `DRY RUN COMPLETE - nothing was written` | dry run, no failures |
+| `BACKUP CANCELLED` | stopped with Ctrl+C |
+| `BACKUP FAILED` | stopped by a fatal error; the message is shown |
+
+Below the headline: counters (repositories discovered / backed up / skipped /
+failed, gists, issues, pull requests, workflows, discussions) and, when
+anything failed, a scrollable **Failures** list with the scope (usually
+`owner/repo`), the step (`clone`, `wiki`, `issues`, …) and the message.  The
+selected failure's full text is shown underneath when there is room.
 
 ---
 
@@ -126,69 +122,100 @@ Post-run statistics after each backup completes (or fails):
 
 | Key | Action |
 |-----|--------|
-| `1`–`5` | Switch screens |
-| `q` | Quit (prompts to cancel if backup is running) |
-| `Ctrl+C` | Quit / cancel backup |
-| `Esc` | Dismiss error modal |
+| `1`–`5` | Switch screens (disabled while a backup runs or a field is being edited) |
+| `Ctrl+C` | Cancel the running backup; anywhere else, quit |
+| any key | Dismiss an error dialog |
 
-### Dashboard (`1`)
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Move selection down / up |
-| `Enter` | Activate selected action |
-
-### Configure (`2`)
+### Dashboard
 
 | Key | Action |
 |-----|--------|
-| `h` / `l` or `←` / `→` | Previous / next tab |
-| `j` / `k` or `↑` / `↓` | Move field cursor |
-| `Enter` | Begin editing text field; toggle boolean |
-| `Esc` | Commit field edit (text fields) |
-| `< >` | Cycle select field options |
-| `A` | Select-all / deselect-all (Categories tab only) |
-| `Backspace` | Delete last character (text field edit mode) |
+| `j` / `k` or `↓` / `↑` | Select action |
+| `Enter` | Run the selected action |
+| `r` / `c` / `v` / `q` | Run backup / Configure / Verify / Quit |
 
-### Run (`3`)
+### Configure
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Scroll repo list down / up |
-| `g` | Scroll log to top |
-| `G` | Scroll log to bottom |
-| `Ctrl+C` | Cancel running backup |
+| `Tab` / `Shift+Tab` | Next / previous tab |
+| `j` / `k` or `↓` / `↑` | Next / previous field |
+| `Space` | Toggle a checkbox |
+| `Enter` | Edit a text field (toggles a checkbox) |
+| `←` / `→` | Change the Clone type |
+| `A` | Categories tab: select all, or none when all are on |
+| `s` / `F5` | Start the backup |
+| `Esc` | Back to the Dashboard |
 
-### Verify (`4`)
+While editing a text field: `Enter` **saves**, `Esc` **discards** the change,
+`Backspace` deletes.  Pasting inserts a single clean line; a paste never
+triggers shortcuts.  The Concurrency field accepts digits only.  There is no
+cursor movement inside a field.
+
+### Run
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Start verification |
-| `j` / `k` | Scroll results list |
+| `Ctrl+C` | Cancel (stops git and releases the lock; Results then shows `CANCELLED`) |
+| `j` / `k` | Scroll the repo list |
+| `g` / `G` | Log: oldest / follow newest |
+| `PgUp` / `PgDn` | Scroll the log |
+| `Esc` / `q` | Leave the screen (only when no backup is running) |
 
-### Results (`5`)
+### Verify
 
 | Key | Action |
 |-----|--------|
-| `r` | Return to Dashboard |
+| `v` | Start verification |
+| `j` / `k`, `PgUp` / `PgDn` | Scroll |
+| `Esc` / `d` | Dashboard |
+| `q` | Quit |
+
+### Results
+
+| Key | Action |
+|-----|--------|
+| `j` / `k`, `PgUp` / `PgDn` | Select failure |
+| `g` / `G` | First / last failure |
+| `r` | Run again (starts a new backup immediately) |
+| `d` / `Esc` | Dashboard |
+| `c` | Configure |
+| `q` | Quit |
 
 ---
 
+## What the TUI cannot do
+
+These exist only on the command line, and the TUI does not offer them:
+
+- mirror push (Gitea/GitLab), S3 sync, JSON report, Prometheus metrics, webhook
+  notification;
+- device-flow sign-in (a token is required);
+- `--config` files and `--clone-host`;
+- the CLI-level output lock.
+
+What the TUI does after a run, like the CLI: the engine writes the incremental
+state, the TUI appends a run-history entry (shown on the Dashboard, including
+the failure count) and, if enabled and not a dry run, writes the manifest.  A
+manifest that cannot be written counts as a failure of the run.
+
+## Terminal safety
+
+Raw mode, the alternate screen and bracketed paste are always restored on
+exit, on a panic (the message is printed after the terminal is restored), and
+on `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT`.  Such a signal cancels a
+running backup first (git is killed, the lock released) and exits with
+128 + the signal number.  A second signal exits immediately.  `SIGKILL` cannot
+be handled; run `reset` if you ever use it.  Closing the terminal window ends
+the process.
+
 ## Architecture Notes
 
-The TUI lives in the `github-backup-tui` crate.  It does not embed its own
-backup logic; it drives the same `BackupEngine` used by the CLI.  A
-`tokio::sync::mpsc::UnboundedSender<BackupEvent>` is passed to the backup and
-verify tasks; the event loop drains it every 16 ms and applies events to the
-`App` state struct.
+The TUI lives in the `github-backup-tui` crate and drives the same
+`BackupEngine` as the CLI.  Per-repository progress and outcome arrive over the
+engine's event channel; the final verdict and failure list come from
+`BackupStats`.  A tracing layer forwards log events to the Run screen's log
+panel.  Terminal input is read on a dedicated thread; the async loop redraws
+only when something changed.
 
-A custom `tracing_subscriber::Layer` (`TuiTracingLayer`) intercepts all
-`tracing` events and forwards them as `BackupEvent::LogLine` so structured
-log output appears in the Run screen's log panel instead of stderr.
-
-The backup task is cancelled via a `tokio::sync::oneshot::Sender<()>` stored
-on `App`; `Ctrl+C` sends the signal and the task exits cleanly within one
-poll cycle.
-
-See [Architecture](development/architecture.md) for the full crate dependency
-graph and data flow diagram.
+See [Architecture](development/architecture.md) for the crate dependency graph.

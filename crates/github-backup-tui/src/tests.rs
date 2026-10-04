@@ -36,6 +36,7 @@ fn initial_config_populates_fields() {
         owner: Some("octocat".into()),
         output: Some("/var/backup".into()),
         api_url: Some("https://ghe.example.com/api/v3".into()),
+        ..Default::default()
     });
     assert_eq!(app.config.token, "ghp_abc");
     assert_eq!(app.config.owner, "octocat");
@@ -624,6 +625,7 @@ fn backup_event_done_transitions_to_results() {
             issues_fetched: 100,
             prs_fetched: 50,
             workflows_fetched: 20,
+            discussions_fetched: 0,
             elapsed_secs: 42.5,
             failures: vec![],
             dry_run: false,

@@ -126,60 +126,58 @@ github-backup octocat --output /var/backup/github --all
 ## Interactive TUI
 
 Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](https://ratatui.rs) 0.30.
+Flags given with `--tui` (`--all`, `--private`, `--dry-run`, `--org`, `--full`, `--since`,
+`--concurrency`, `--manifest`, category flags, ...) pre-fill the Configure screen.
 
 ```
  github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Owner          octocat                                                      │
-│  Output dir     /var/backup/github                                           │
-│  Token          ghp_****...****                                              │
-│  Last run       2026-03-29 08:14 UTC  (312 repos)                            │
-│                                                                              │
-│  > Start backup                                                              │
-│    Verify integrity                                                          │
-│    Configure                                                                 │
+┌ Status ──────────────────────────────────────────────────────────────────────┐
+│Owner:  octocat                        Last run: 2026-10-03T23:51:37Z         │
+│Output: /var/backup/github             Repos:    312                          │
+│Token:  configured                     Result:   INCOMPLETE (1 failure)       │
 └──────────────────────────────────────────────────────────────────────────────┘
- j/k select   Enter run   q quit
+┌ Actions ─────────────────────────────────────────────────────────────────────┐
+│> [r] Run Backup                                                              │
+│  [c] Configure                                                               │
+│  [v] Verify Integrity                                                        │
+│  [q] Quit                                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+r run backup  q quit  c configure  v verify  j/k move  Enter select  1-5 screens
 ```
 
 ### TUI Screens
 
 | Screen | Key | Purpose |
 |--------|-----|---------|
-| Dashboard | `1` | Overview of last run; launch backup or verify |
-| Configure | `2` | Edit all 50+ settings across 8 tabbed panels |
-| Run | `3` | Live progress: gauge, repo list, log panel |
-| Verify | `4` | Integrity check against stored manifests |
-| Results | `5` | Post-run statistics table |
+| Dashboard | `1` | Last run (with result and failure count); start a backup or verify |
+| Configure | `2` | Six tabs: Auth, Target (incl. **Full backup**), Categories, Clone, Filter, Output |
+| Run | `3` | Live progress; shows `INCOMPLETE: N failed` as soon as something fails |
+| Verify | `4` | Integrity check of the JSON manifest (not the cloned repositories) |
+| Results | `5` | `COMPLETE` / `INCOMPLETE` / `CANCELLED` / `FAILED`, counters, scrollable list of failures (scope, step, message) |
 
-### Global Keys
+A run in which anything failed is always reported as **INCOMPLETE**, never as complete.
 
-| Key | Action |
-|-----|--------|
-| `1`–`5` | Switch screens |
-| `q` / `Ctrl+C` | Quit (cancel running backup first) |
-| `Tab` / `Shift+Tab` | Cycle focus within a screen |
-| `Enter` | Confirm / activate |
-| `Esc` | Cancel / dismiss modal |
-
-### Configure Screen Keys
+### Keys
 
 | Key | Action |
 |-----|--------|
-| `h` / `l` or `←` / `→` | Previous / next tab |
-| `j` / `k` or `↑` / `↓` | Move field cursor |
-| `Enter` | Edit text field / toggle boolean |
-| `Esc` | Commit field edit |
-| `A` (categories tab) | Select all / deselect all |
-| `< >` | Cycle select field options |
+| `1`-`5` | Switch screens (not while a backup runs or a field is edited) |
+| `Ctrl+C` | Cancel the running backup; elsewhere quit |
+| `Tab` / `Shift+Tab` | Configure: next / previous tab |
+| `j` / `k` | Move (fields, lists) |
+| `Space` / `Enter` | Toggle / edit a field |
+| `Enter` / `Esc` while editing | Save / discard the edit |
+| `A` (Categories) | Select all, or none if all are on |
+| `s` / `F5` | Configure: start the backup |
+| `g` / `G`, `PgUp` / `PgDn` | Run: log oldest / newest, scroll |
+| `r` | Results: run again |
+| `Esc` | Back to the Dashboard (Configure, Verify, Results) |
 
-### Run Screen Keys
+### What the TUI cannot do
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Scroll repo list |
-| `g` / `G` | Scroll log panel top / bottom |
-| `Ctrl+C` | Cancel running backup |
+Mirror push, S3 sync, JSON report, Prometheus metrics, webhook notification,
+device-flow sign-in, `--config` files and `--clone-host` are command-line only;
+the Output tab says so.  See the [TUI guide](docs/src/tui.md) for details.
 
 ## Feature Summary
 
