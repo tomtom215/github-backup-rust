@@ -13,10 +13,24 @@
 
 /* Long unbroken inline code (paths, flags) may wrap instead of overflowing. */
 .content main p code,
-.content main li code,
+.content main li code {
+    overflow-wrap: anywhere;
+}
+
+/* In tables, never break a flag or path in the middle: the table scrolls. */
 .content main td code,
 .content main th code {
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow-wrap: normal;
+}
+
+.content main td,
+.content main th {
+    vertical-align: top;
+}
+
+.content main td:last-child {
+    min-width: 14rem;
 }
 
 /* Code blocks scroll horizontally rather than widening the page. */

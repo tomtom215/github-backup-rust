@@ -50,7 +50,7 @@ github-backup octocat --output /var/backup/github --all \
 
 ```json
 {
-  "tool_version": "0.3.2",
+  "tool_version": "X.Y.Z",
   "schema_version": 1,
   "owner": "octocat",
   "started_at": "2026-01-15T04:00:00Z",
@@ -76,7 +76,7 @@ github-backup octocat --output /var/backup/github --all \
 }
 ```
 
-(`tool_version` is the version of the binary that wrote the file.)
+(`tool_version` is the version of the binary that wrote the file; `X.Y.Z` stands for it here.)
 
 | Field | Type | Description |
 |-------|------|-------------|
