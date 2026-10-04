@@ -713,6 +713,7 @@ async fn run_backup_task(
                 issues_fetched: stats.issues_fetched(),
                 prs_fetched: stats.prs_fetched(),
                 workflows_fetched: stats.workflows_fetched(),
+                discussions_fetched: stats.discussions_fetched(),
                 elapsed_secs: stats.elapsed_secs(),
                 failures: stats.failures(),
                 dry_run,

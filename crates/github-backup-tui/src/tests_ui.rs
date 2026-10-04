@@ -71,6 +71,7 @@ fn done_event(failures: Vec<Failure>, errored: u64, dry_run: bool) -> BackupEven
         issues_fetched: 30,
         prs_fetched: 4,
         workflows_fetched: 5,
+        discussions_fetched: 6,
         elapsed_secs: 65.0,
         failures,
         dry_run,
@@ -780,6 +781,9 @@ fn validate_rejects_bad_values_instead_of_silently_fixing_them() {
         app.config.to_backup_config().2.since.as_deref(),
         Some("2024-01-01T08:00:00Z")
     );
+    app.config.full = true;
+    assert!(app.config.validate().unwrap().contains("Full backup"));
+    app.config.full = false;
     app.config.since.clear();
 
     app.config.api_url = "http://insecure.example".into();
@@ -1161,4 +1165,74 @@ fn a_reader_stuck_in_read_cannot_hang_shutdown() {
         quick,
         std::time::Duration::from_secs(2)
     ));
+}
+
+// ── Pre-fill from the command line ────────────────────────────────────────────
+
+#[test]
+fn form_round_trips_through_backup_options() {
+    use github_backup_types::config::{BackupOptions, BackupTarget, CloneType};
+
+    let opts = BackupOptions {
+        target: BackupTarget::Org,
+        full: true,
+        forks: true,
+        private: true,
+        lfs: true,
+        prefer_ssh: true,
+        no_prune: true,
+        clone_type: CloneType::Bare,
+        include_repos: vec!["a-*".into(), "b".into()],
+        exclude_repos: vec!["c".into()],
+        since: Some("2024-01-01T00:00:00Z".into()),
+        dry_run: true,
+        concurrency: 9,
+        ..BackupOptions::all()
+    };
+    let cfg = crate::state::ConfigState::from_backup_options(&opts);
+    let (_, _, back, _) = cfg.to_backup_config();
+    assert_eq!(format!("{opts:?}"), format!("{back:?}"));
+    assert!(cfg.validate().is_some(), "owner/token still missing");
+}
+
+#[test]
+fn default_options_round_trip_too() {
+    use github_backup_types::config::BackupOptions;
+    let opts = BackupOptions {
+        repositories: true,
+        concurrency: 4,
+        ..BackupOptions::default()
+    };
+    let (_, _, back, _) = crate::state::ConfigState::from_backup_options(&opts).to_backup_config();
+    assert_eq!(format!("{opts:?}"), format!("{back:?}"));
+}
+
+#[test]
+fn initial_config_options_prefill_the_configure_screen() {
+    use github_backup_types::config::BackupOptions;
+    let app = App::new(InitialConfig {
+        owner: Some("octocat".into()),
+        token: Some("dummy".into()),
+        options: Some(BackupOptions {
+            private: true,
+            dry_run: true,
+            issues: true,
+            concurrency: 2,
+            ..BackupOptions::default()
+        }),
+        manifest: true,
+        ..Default::default()
+    });
+    assert!(app.config.private && app.config.dry_run && app.config.issues);
+    assert!(app.config.manifest);
+    assert_eq!(app.config.concurrency, "2");
+    assert_eq!(app.config.owner, "octocat");
+    assert!(app.config.validate().is_none());
+}
+
+#[test]
+fn results_show_discussions() {
+    let app = app_with_results(done_event(vec![], 0, false));
+    let t = text(&app, 120, 40);
+    assert!(t.contains("Discussions fetched"), "{t}");
 }

@@ -155,9 +155,9 @@ impl StatsLayout {
     fn choose(remaining: u16, width: u16, has_panel: bool) -> Self {
         // The failure panel needs 3 list rows + 3 detail rows + borders to be useful.
         let panel_min = if has_panel { 10 } else { 0 };
-        if remaining >= 10 + panel_min {
+        if remaining >= 11 + panel_min {
             Self::Table
-        } else if remaining >= 6 + panel_min && width >= 56 {
+        } else if remaining >= 7 + panel_min && width >= 56 {
             Self::TwoColumn
         } else {
             Self::Summary
@@ -166,8 +166,8 @@ impl StatsLayout {
 
     fn height(self) -> u16 {
         match self {
-            Self::Table => 10,
-            Self::TwoColumn => 6,
+            Self::Table => 11,
+            Self::TwoColumn => 7,
             Self::Summary => 2,
         }
     }
@@ -192,6 +192,11 @@ fn counters(res: &ResultsState) -> Vec<(&'static str, u64, Style)> {
         ("Issues fetched", res.issues_fetched, theme::NORMAL),
         ("Pull requests fetched", res.prs_fetched, theme::NORMAL),
         ("Workflows fetched", res.workflows_fetched, theme::NORMAL),
+        (
+            "Discussions fetched",
+            res.discussions_fetched,
+            theme::NORMAL,
+        ),
     ]
 }
 
@@ -215,11 +220,12 @@ fn render_stats(frame: &mut Frame, res: &ResultsState, area: Rect, layout: Stats
             fmt_n(res.repos_discovered)
         );
         let l2 = format!(
-            "gists {}  issues {}  PRs {}  workflows {}",
+            "gists {}  issues {}  PRs {}  workflows {}  disc. {}",
             fmt_n(res.gists_backed_up),
             fmt_n(res.issues_fetched),
             fmt_n(res.prs_fetched),
-            fmt_n(res.workflows_fetched)
+            fmt_n(res.workflows_fetched),
+            fmt_n(res.discussions_fetched)
         );
         let s1 = if res.repos_errored > 0 {
             theme::ERR_STYLE

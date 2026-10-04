@@ -39,6 +39,7 @@ pub enum BackupEvent {
         issues_fetched: u64,
         prs_fetched: u64,
         workflows_fetched: u64,
+        discussions_fetched: u64,
         elapsed_secs: f64,
         failures: Vec<Failure>,
         dry_run: bool,

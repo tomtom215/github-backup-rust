@@ -287,6 +287,12 @@ impl BackupStats {
         self.inner.workflows_fetched.load(Ordering::Relaxed)
     }
 
+    /// Total Discussions fetched across all repositories.
+    #[must_use]
+    pub fn discussions_fetched(&self) -> u64 {
+        self.inner.discussions_fetched.load(Ordering::Relaxed)
+    }
+
     /// Elapsed seconds since this [`BackupStats`] was constructed.
     ///
     /// Because every handle shares the same [`Arc`], this returns the time
@@ -436,6 +442,15 @@ mod tests {
         assert_eq!(s.workflows_fetched(), 5);
         s.add_workflows(1);
         assert_eq!(s.workflows_fetched(), 6);
+    }
+
+    #[test]
+    fn backup_stats_discussions_fetched_accessor() {
+        let s = BackupStats::new();
+        assert_eq!(s.discussions_fetched(), 0);
+        s.add_discussions(3);
+        s.add_discussions(2);
+        assert_eq!(s.discussions_fetched(), 5);
     }
 
     #[test]

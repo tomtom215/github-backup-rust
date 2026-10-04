@@ -54,11 +54,20 @@ pub struct InitialConfig {
     pub owner: Option<String>,
     pub output: Option<String>,
     pub api_url: Option<String>,
+    /// Backup options resolved from the command line (`--all`, `--private`,
+    /// `--dry-run`, `--org`, ...); pre-fills the Configure screen.
+    pub options: Option<github_backup_types::config::BackupOptions>,
+    /// `--manifest` was given.
+    pub manifest: bool,
 }
 
 impl App {
     pub fn new(initial: InitialConfig) -> Self {
-        let mut config = ConfigState::default();
+        let mut config = match &initial.options {
+            Some(opts) => ConfigState::from_backup_options(opts),
+            None => ConfigState::default(),
+        };
+        config.manifest = initial.manifest;
         if let Some(t) = initial.token {
             config.token = t;
         }
@@ -319,6 +328,7 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
             issues_fetched,
             prs_fetched,
             workflows_fetched,
+            discussions_fetched,
             elapsed_secs,
             failures,
             dry_run,
@@ -341,6 +351,7 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 issues_fetched,
                 prs_fetched,
                 workflows_fetched,
+                discussions_fetched,
                 elapsed_secs,
                 error_message: None,
                 failures,

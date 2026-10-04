@@ -429,6 +429,124 @@ impl ConfigState {
         )
     }
 
+    /// The reverse of [`ConfigState::to_backup_config`]: a form pre-filled from
+    /// resolved command-line options (`--tui --all --private --dry-run ...`).
+    ///
+    /// Like `to_backup_config` this names every `BackupOptions` field and uses
+    /// no `..`, so a new option is a compile error until it is decided how the
+    /// form represents it.
+    pub fn from_backup_options(opts: &BackupOptions) -> Self {
+        let BackupOptions {
+            target,
+            full,
+            repositories,
+            issues,
+            issue_comments,
+            issue_events,
+            pulls,
+            pull_comments,
+            pull_commits,
+            pull_reviews,
+            labels,
+            milestones,
+            releases,
+            release_assets,
+            hooks,
+            security_advisories,
+            wikis,
+            starred,
+            clone_starred,
+            watched,
+            followers,
+            following,
+            gists,
+            starred_gists,
+            topics,
+            branches,
+            deploy_keys,
+            collaborators,
+            org_members,
+            org_teams,
+            actions,
+            action_runs,
+            environments,
+            discussions,
+            projects,
+            packages,
+            forks,
+            private,
+            prefer_ssh,
+            clone_type,
+            lfs,
+            no_prune,
+            include_repos,
+            exclude_repos,
+            since,
+            // The form has no field for the clone host override.
+            clone_host: _,
+            dry_run,
+            concurrency,
+        } = opts;
+
+        let clone_type = match clone_type {
+            CloneType::Mirror => CloneTypeForm::Mirror,
+            CloneType::Bare => CloneTypeForm::Bare,
+            CloneType::Full => CloneTypeForm::Full,
+            CloneType::Shallow(_) => CloneTypeForm::Shallow,
+        };
+
+        Self {
+            org_mode: *target == BackupTarget::Org,
+            full: *full,
+            repositories: *repositories,
+            issues: *issues,
+            issue_comments: *issue_comments,
+            issue_events: *issue_events,
+            pulls: *pulls,
+            pull_comments: *pull_comments,
+            pull_commits: *pull_commits,
+            pull_reviews: *pull_reviews,
+            labels: *labels,
+            milestones: *milestones,
+            releases: *releases,
+            release_assets: *release_assets,
+            hooks: *hooks,
+            security_advisories: *security_advisories,
+            wikis: *wikis,
+            starred: *starred,
+            clone_starred: *clone_starred,
+            watched: *watched,
+            followers: *followers,
+            following: *following,
+            gists: *gists,
+            starred_gists: *starred_gists,
+            topics: *topics,
+            branches: *branches,
+            deploy_keys: *deploy_keys,
+            collaborators: *collaborators,
+            org_members: *org_members,
+            org_teams: *org_teams,
+            actions: *actions,
+            action_runs: *action_runs,
+            environments: *environments,
+            discussions: *discussions,
+            projects: *projects,
+            packages: *packages,
+            forks: *forks,
+            private: *private,
+            prefer_ssh: *prefer_ssh,
+            clone_type,
+            lfs: *lfs,
+            no_prune: *no_prune,
+            include_repos: include_repos.join(", "),
+            exclude_repos: exclude_repos.join(", "),
+            since: since.clone().unwrap_or_default(),
+            dry_run: *dry_run,
+            concurrency: concurrency.to_string(),
+            ..Self::default()
+        }
+    }
+
     /// Validates the form; returns what to fix, or `None` if a run may start.
     pub fn validate(&self) -> Option<String> {
         let owner = self.owner.trim();
@@ -457,6 +575,13 @@ impl ConfigState {
             if let Err(e) = normalise_since(&self.since) {
                 return Some(format!("{e} (Configure > Target tab)"));
             }
+        }
+        if self.full && !self.since.trim().is_empty() {
+            return Some(
+                "Full backup and Since cannot be combined (as on the command line); clear one \
+                 (Configure > Target tab)"
+                    .into(),
+            );
         }
         match self.concurrency.trim().parse::<usize>() {
             Ok(n) if (1..=MAX_CONCURRENCY).contains(&n) => {}
@@ -699,6 +824,7 @@ pub struct ResultsState {
     pub issues_fetched: u64,
     pub prs_fetched: u64,
     pub workflows_fetched: u64,
+    pub discussions_fetched: u64,
     pub elapsed_secs: f64,
     pub error_message: Option<String>,
     /// Every failure the engine recorded, in the order recorded.
