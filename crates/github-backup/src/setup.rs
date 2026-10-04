@@ -209,9 +209,15 @@ mod tests {
             toml.contains("REQUIRED — the GitHub user"),
             "template must flag owner as REQUIRED"
         );
+        // `output` is optional (it defaults to the current directory), and the
+        // template must not claim otherwise.
         assert!(
-            toml.contains("REQUIRED — root directory"),
-            "template must flag output as REQUIRED"
+            !toml.contains("REQUIRED — root directory"),
+            "output is optional and must not be flagged REQUIRED"
+        );
+        assert!(
+            toml.contains("default: the current directory"),
+            "template must state the default for output"
         );
     }
 
