@@ -21,7 +21,7 @@
 #   docker run --rm -e GITHUB_TOKEN github-backup octocat --doctor
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM rust:1.88-alpine AS builder
+FROM rust:1.99-alpine AS builder
 
 # Build dependencies
 RUN apk add --no-cache musl-dev pkgconf
