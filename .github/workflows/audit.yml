@@ -24,7 +24,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Tag ref, not a commit SHA (see ci.yml); Dependabot keeps it current.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
