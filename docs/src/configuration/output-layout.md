@@ -22,8 +22,34 @@ missing property stays missing; it is not turned into `null`).
 Files that are lists hold a JSON array.  `workflows.json`, `workflow_runs_<id>.json`
 and `environments.json` hold the array of items (every page of GitHub's
 `{"total_count": ..., "<items>": [...]}` response merged); `topics.json` holds
-the list of topic names; `branch_protections.json` is an object keyed by
-branch name.
+the list of topic names (taken from the repository object);
+`branch_protections.json` is an object keyed by branch name; `rulesets.json`
+holds the full object of every ruleset, ordered by `id`.
+
+Two exceptions to "exactly as returned": `temp_clone_token`, a short-lived
+credential GitHub may put in repository objects, is removed (a credential is
+never written to a file), and a file that **accumulates** (below) holds every
+object it has ever seen, the current ones as GitHub returns them now.
+
+## Snapshots and accumulating history
+
+A backup should never forget what it captured, so most files **accumulate**:
+each run merges what GitHub returns now into what is already stored, matching
+objects on a stable key.  An object GitHub returns again replaces the stored
+copy; an object GitHub no longer returns (deleted, or past GitHub's retention)
+**stays**.  Files that describe *who has access or how the repository is
+configured now* are **snapshots** instead, replaced on every run, because a
+removed deploy key or collaborator must not look as if it were still there.
+
+| Kind | Files (key) |
+|------|-------------|
+| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`) |
+| Snapshot | `info.json`, `topics.json`, `branches.json`, `branch_protections.json`, `rulesets.json`, `hooks.json`, `deploy_keys.json`, `collaborators.json`, `environments.json`, `starred.json`, `watched.json`, `followers.json`, `following.json`, `org_members.json`, `org_teams.json`, `gists/starred_index.json`, `gists/<id>.json`, `gists/<id>.starred.json` |
+
+Within an accumulating file the objects are ordered by their key when it is a
+number (by stored order, then new objects, otherwise).  Note that a restore
+(`--restore`) from `labels.json` and `milestones.json` therefore also recreates
+labels and milestones that were deleted on GitHub after they were backed up.
 
 ## Tree
 
@@ -53,7 +79,12 @@ branch name.
         ├── org_members.json                ← --org-members   (org targets)
         ├── org_teams.json                  ← --org-teams     (org targets)
         ├── packages_<type>.json            ← --packages
-        ├── package_versions_<type>_<name>.json
+        ├── package_versions_<type>_<name>.json ← <name> percent-encoded
+        ├── projects/                       ← --projects (Projects v2)
+        │   ├── projects.json
+        │   └── <number>/
+        │       ├── fields.json
+        │       └── items.json              ← items with their field values
         ├── starred_clone_queue.json        ← --clone-starred progress
         ├── backup_state.json               ← incremental watermarks per repository
         ├── backup_history.json             ← recent runs (--history-size)
@@ -62,12 +93,14 @@ branch name.
         ├── .backup.lock                    ← engine lock (stays on disk, see below)
         ├── gists/
         │   ├── <gist-id>.json              ← --gists
+        │   ├── <gist-id>.comments.json     ← --gists, when the gist has comments
         │   ├── <gist-id>.starred.json      ← --starred-gists
         │   ├── index.json                  ← all owned gists
         │   └── starred_index.json          ← all starred gists
         └── repos/
+            ├── <repo>@<id>/                ← an earlier repository of that name (see below)
             └── <repo>/
-                ├── info.json               ← the repository object (always written)
+                ├── info.json               ← GET /repos/<owner>/<repo> (always written)
                 ├── issues.json
                 ├── issue_comments/<n>.json ← one file per issue or pull request
                 ├── issue_events/<n>.json   ← one file per issue or pull request
@@ -78,7 +111,9 @@ branch name.
                 ├── releases.json
                 ├── release_assets/
                 │   └── <tag>/
-                │       ├── <asset-file>        ← binary release asset
+                │       └── <asset-file>        ← binary release asset
+                ├── release_checksums/
+                │   └── <tag>/
                 │       └── <asset-file>.sha256 ← its checksum
                 ├── labels.json
                 ├── milestones.json
@@ -87,19 +122,35 @@ branch name.
                 ├── topics.json
                 ├── branches.json
                 ├── branch_protections.json ← protected branches (needs admin access)
+                ├── rulesets.json
                 ├── deploy_keys.json
                 ├── collaborators.json
+                ├── commit_comments.json    ← --all
                 ├── workflows.json
                 ├── workflow_runs_<id>.json ← one per workflow (--action-runs)
                 └── environments.json
 ```
 
-`discussions.json`, `discussion_comments_<n>.json`, `projects.json` and
-`project_columns_<id>.json` are **not** produced: GitHub's REST API has no such
-endpoints, see [Discussions and Classic Projects](../backup-categories.md#discussions).
+No discussion files are produced: GitHub serves Discussions through GraphQL
+only, see [Discussions](../backup-categories.md#discussions).
 Repositories that the options exclude (forks without `--forks`, private
 repositories without `--private`, `--include-repos` / `--exclude-repos`) get
-neither a clone nor a metadata directory.
+neither a clone nor a metadata directory.  The include and exclude patterns
+are matched against the repository **name** only (`my-repo`), never against
+`owner/name`.
+
+### A repository deleted and recreated under the same name
+
+Directories are named after the repository, so a repository that was deleted
+on GitHub and recreated under the same name would land in the old one's
+directory and mix two repositories' issues and history.  Before backing up a
+repository, the tool compares the `id` in its stored `info.json` with the
+repository's current `id`.  When they differ, the earlier backup is set aside,
+not deleted: `json/repos/<repo>/` becomes `json/repos/<repo>@<old id>/`, and
+`git/repos/<repo>.git` (or `<repo>/`) and `git/wikis/<repo>.wiki.git` get the
+same `@<old id>` suffix.  `@` cannot occur in a GitHub repository name, so the
+new name never collides with a real repository.  A warning is logged and the
+new repository is backed up from scratch.
 
 ### Bookkeeping files
 
@@ -163,7 +214,8 @@ mirror clone plus the LFS objects in the same directory.
 | `org_members.json` | `--org-members` (org targets) |
 | `org_teams.json` | `--org-teams` (org targets) |
 | `packages_<type>.json`, `package_versions_<type>_<name>.json` | `--packages` |
-| `gists/<id>.json`, `gists/index.json` | `--gists` |
+| `projects/projects.json`, `projects/<number>/fields.json`, `projects/<number>/items.json` | `--projects` |
+| `gists/<id>.json`, `gists/<id>.comments.json`, `gists/index.json` | `--gists` |
 | `gists/<id>.starred.json`, `gists/starred_index.json` | `--starred-gists` |
 | `repos/<name>/info.json` | always, for every backed-up repository |
 | `repos/<name>/issues.json` | `--issues` |
@@ -174,15 +226,16 @@ mirror clone plus the LFS objects in the same directory.
 | `repos/<name>/pull_commits/<n>.json` | `--pull-commits` |
 | `repos/<name>/pull_reviews/<n>.json` | `--pull-reviews` |
 | `repos/<name>/releases.json` | `--releases` |
-| `repos/<name>/release_assets/<tag>/<file>` and `<file>.sha256` | `--release-assets` |
+| `repos/<name>/release_assets/<tag>/<file>`, `release_checksums/<tag>/<file>.sha256` | `--release-assets` |
 | `repos/<name>/labels.json` | `--labels` |
 | `repos/<name>/milestones.json` | `--milestones` |
 | `repos/<name>/hooks.json` | `--hooks` |
 | `repos/<name>/security_advisories.json` | `--security-advisories` |
 | `repos/<name>/topics.json` | `--topics` |
-| `repos/<name>/branches.json`, `branch_protections.json` | `--branches` |
+| `repos/<name>/branches.json`, `branch_protections.json`, `rulesets.json` | `--branches` |
 | `repos/<name>/deploy_keys.json` | `--deploy-keys` |
 | `repos/<name>/collaborators.json` | `--collaborators` |
+| `repos/<name>/commit_comments.json` | `--all` |
 | `repos/<name>/workflows.json` | `--actions` |
 | `repos/<name>/workflow_runs_<id>.json` | `--action-runs` |
 | `repos/<name>/environments.json` | `--environments` |
@@ -192,10 +245,13 @@ mirror clone plus the LFS objects in the same directory.
 Assets are downloaded to a temporary `.<file>.part-<pid>-<n>` next to their destination
 and renamed into place only when complete, so an interrupted run never leaves a
 truncated asset.  Each download is checked against the size GitHub reports and,
-when GitHub provides one, its SHA-256 digest; `<file>.sha256` records the
-checksum (`<sha256>  <file>`).  On the next run an asset is skipped only if it
+when GitHub provides one, its SHA-256 digest;
+`release_checksums/<tag>/<file>.sha256` records the checksum
+(`<sha256>  <file>`), in a directory of its own so that it never collides
+with an asset of that name.  On the next run an asset is skipped only if it
 is complete: its size equals GitHub's and its content matches the digest (or,
-when GitHub has none, the sidecar).  Otherwise it is downloaded again.
+when GitHub has none, the sidecar).  Otherwise it is downloaded again.  See
+[Releases](../releases.md) for how sidecars of earlier versions are moved.
 
 ## Clones Follow GitHub
 

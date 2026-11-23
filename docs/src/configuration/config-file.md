@@ -105,10 +105,11 @@ actions          = true
 # ── Deployment environments ─────────────────────────────────────────────────
 environments     = true
 
-# ── Packages ───────────────────────────────────────────────────────────────
-# (`discussions` and `projects` are accepted but back up nothing: GitHub's
-#  REST API has no endpoint for them.)
+# ── Packages and projects ──────────────────────────────────────────────────
+# (`discussions` is accepted but backs up nothing yet: GitHub serves
+#  Discussions through GraphQL only; the run logs a warning.)
 packages         = false  # requires the read:packages OAuth scope
+projects         = false  # Projects (v2); requires the read:project scope
 
 # ── Organisation-specific ───────────────────────────────────────────────────
 org_members      = false
@@ -246,19 +247,19 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `gists` | bool | `false` | Back up gists |
 | `starred_gists` | bool | `false` | Back up starred gists |
 | `topics` | bool | `false` | Back up repository topics |
-| `branches` | bool | `false` | Back up branch list |
+| `branches` | bool | `false` | Back up branch list, branch protection rules (admin access) and rulesets |
 | `deploy_keys` | bool | `false` | Back up deploy keys (admin access required) |
-| `collaborators` | bool | `false` | Back up collaborator list (admin access required) |
+| `collaborators` | bool | `false` | Back up collaborator list (write access required) |
 | `org_members` | bool | `false` | Back up org member list (organisation targets only) |
 | `org_teams` | bool | `false` | Back up org team list (organisation targets only) |
 | `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
 | `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
 | `environments` | bool | `false` | Back up deployment environment configurations |
-| `discussions` | bool | `false` | Accepted, but backs up nothing: GitHub's REST API has no Discussions endpoint |
-| `projects` | bool | `false` | Accepted, but backs up nothing: Classic Projects are no longer in GitHub's REST API |
-| `packages` | bool | `false` | Back up GitHub Packages metadata for the target user |
-| `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
-| `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
+| `discussions` | bool | `false` | Accepted, but backs up nothing yet (GitHub serves Discussions through GraphQL only); the run logs a warning |
+| `projects` | bool | `false` | Back up the owner's Projects (v2): projects, fields, items with field values |
+| `packages` | bool | `false` | Back up GitHub Packages metadata for the target user or organisation |
+| `include_repos` | string array | `[]` | Only back up repos whose **name** (not `owner/name`) matches one of these glob patterns; a TOML array (`["a-*", "b"]`), not a comma-separated string |
+| `exclude_repos` | string array | `[]` | Exclude repos whose name matches one of these glob patterns (a TOML array) |
 | `since` | string | — | Expert override, same as `--since`: a date (`2026-01-01`) or timestamp.  Applied to every run and never stored; leave it unset and the tool tracks its own per-repository watermarks |
 
 ### Mirror Destination
@@ -336,6 +337,6 @@ set one of them is rejected as an unknown key.
 `github-backup --print-config-template` prints an annotated file that lists all
 63 keys, commented out.  Some of its comments are outdated: it marks `output`
 as required (it defaults to `.`), says that command-line flags always override
-the file (see [Precedence](#precedence)), suggests `discussions = true` and
-`projects = true` (they have no effect) and says that an unset `since` inherits
+the file (see [Precedence](#precedence)), suggests `discussions = true` (it has
+no effect yet) and says that an unset `since` inherits
 the previous run's timestamp (each repository has its own watermark).

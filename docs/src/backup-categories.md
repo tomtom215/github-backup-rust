@@ -107,9 +107,18 @@ repositories the token can see, as before.
 
 Issues and pull requests share one number space, and GitHub's issues API lists
 pull requests too, so `--issue-comments` and `--issue-events` also write
-`issue_comments/<n>.json` and `issue_events/<n>.json` for pull requests.  The
-events come from `/issues/<n>/events`; the richer `/timeline` (cross-references,
-commits, reviews) is not fetched.
+`issue_comments/<n>.json` and `issue_events/<n>.json` for pull requests.  This
+also holds for a repository with Issues switched off: GitHub then answers the
+issues listing with `410 Gone` (no `issues.json`, not a failure), and the
+conversation and events of every pull request are still fetched.  The events
+come from `/issues/<n>/events`; the richer `/timeline` (cross-references,
+commits, reviews) is not fetched.  The issue count in the summary does not
+include pull requests.
+
+An issue whose comments or events cannot be fetched is recorded as a failure
+and the other issues are still backed up; an issue deleted in the meantime
+(404/410) is skipped.  See [Issues and Pull Requests](issues-and-prs.md) for
+the incremental behaviour.
 
 Output: `<output>/<owner>/json/repos/<repo>/issues.json`, `issue_comments/<n>.json`, `issue_events/<n>.json`
 
@@ -121,13 +130,19 @@ Output: `<output>/<owner>/json/repos/<repo>/issues.json`, `issue_comments/<n>.js
 |------|-------------|
 | `--pulls` | PR metadata (title, body, state, head/base refs) |
 | `--pull-comments` | Inline review comments on PRs |
-| `--pull-commits` | List of commits in each PR (GitHub lists at most 250) |
+| `--pull-commits` | List of commits in each PR (beyond GitHub's 250, see below) |
 | `--pull-reviews` | PR reviews (approve/request changes/comment) |
 
 Output: `<output>/<owner>/json/repos/<repo>/pulls.json`, `pull_comments/<n>.json`, `pull_commits/<n>.json`, `pull_reviews/<n>.json`
 
 A pull request's conversation thread and events are written by
 `--issue-comments` / `--issue-events` (see Issues above).
+
+GitHub's commit list of a pull request stops at 250 commits.  When it returns
+250, the commits are taken from the comparison of the pull request's base and
+head commits instead (`GET /repos/<owner>/<repo>/compare/<base>...<head>`,
+every page), which has no such limit; if that comparison fails, the pull
+request is recorded as a failure rather than stored truncated.
 
 ---
 
@@ -140,7 +155,7 @@ A pull request's conversation thread and events are written by
 
 > **Warning**: `--release-assets` can consume significant disk space for projects with large binary releases.
 
-Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_assets/<tag>/<file>` (+ `<file>.sha256`)
+Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_assets/<tag>/<file>`, their checksums in `release_checksums/<tag>/<file>.sha256` (see [Releases](releases.md))
 
 ---
 
@@ -149,6 +164,9 @@ Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_a
 | Flag | Description |
 |------|-------------|
 | `--wikis` | Clone repository wikis as bare mirror repos |
+
+The wiki is cloned the same way as the repository: over SSH with
+`--prefer-ssh`, and with `--clone-host` applied.
 
 Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 
@@ -161,20 +179,34 @@ Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 | `--labels` | Repository label definitions |
 | `--milestones` | Repository milestones |
 | `--hooks` | Webhook configurations (requires admin access) |
-| `--security-advisories` | Published security advisories |
-| `--topics` | Repository topics (tags) |
-| `--branches` | Branch list with tip SHAs and protection status; detailed protection rules of protected branches in `branch_protections.json` (admin access) |
+| `--security-advisories` | Security advisories (unpublished ones need a security manager or admin) |
+| `--topics` | Repository topics (tags), taken from the repository object (no extra request) |
+| `--branches` | Branch list with tip SHAs and protection status; detailed protection rules of protected branches in `branch_protections.json` (admin access); the repository rulesets, including those an organisation applies, in `rulesets.json` |
 | `--deploy-keys` | Deploy keys attached to the repository (requires admin access) |
-| `--collaborators` | Collaborator list with permissions (requires admin access) |
+| `--collaborators` | Collaborator list with permissions (requires write access; `read:org` too for an organisation's repository) |
 
-Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, `deploy_keys.json`, `collaborators.json`, etc.
+`--all` also saves the comments made on commits (`commit_comments.json`).
 
-> **Note**: `--hooks`, `--deploy-keys`, `--collaborators`, `--security-advisories`, the protection rules of
-> `--branches`, `--actions` and `--environments` need admin or equivalent access.  When GitHub answers
-> **403 or 404** for a repository the tool treats it as "not available to this token", writes an `INFO`
-> line and skips that file.  This is **not** counted as a failure and does not change the exit status, so
-> a token without the needed permission yields a backup without those files and exit status `0`.
-> Look for the file in the output (or for `skipping` in the log) when you rely on these categories.
+Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `topics.json`, `branches.json`, `rulesets.json`, `deploy_keys.json`, `collaborators.json`, etc.
+
+`info.json` is the repository as `GET /repos/<owner>/<repo>` returns it, with
+`parent`, `source`, `template_repository` and the merge settings that the
+repository listing leaves out (`temp_clone_token`, a short-lived credential, is
+removed).  If that request fails, the listed object is stored instead and the
+failure is reported.
+
+### When GitHub answers 403, 404 or 410
+
+* **404 or 410** for a category means it does not exist for that repository
+  (Issues switched off, no rulesets API on an older GitHub Enterprise Server,
+  ...): it is skipped with an `INFO` line and is not a failure.
+* **403** means the token is not permitted to read it (for example webhooks
+  without admin access).  For a category you asked for with its own flag, this
+  is a **failure** that names the missing permission, so the run exits with
+  status `3`.  With `--all`, which asks for everything that is available rather
+  than for that category, the category is skipped and **one warning per
+  category per run** names the missing permission; the exit status is not
+  affected.  Rate limits are not 403s for this purpose: they are waited out.
 
 ---
 
@@ -188,7 +220,11 @@ Output: `<output>/<owner>/json/repos/<repo>/labels.json`, `milestones.json`, `to
 Output:
 - Git (owned gists only): `<output>/<owner>/git/gists/<gist-id>.git/`
 - Metadata: `<output>/<owner>/json/gists/<gist-id>.json`, `index.json`
+- Comments (owned gists that have any): `<output>/<owner>/json/gists/<gist-id>.comments.json`
 - Starred gists: `<output>/<owner>/json/gists/<gist-id>.starred.json`, `starred_index.json`
+
+A gist id that is not a safe file name is never used as one (the gist is
+reported as a failure), for owned and starred gists alike.
 
 `--starred-gists` records the gist objects GitHub lists (description, owner,
 file names and sizes, URLs); it does not clone their contents.
@@ -215,6 +251,8 @@ Output: `<output>/<owner>/json/starred.json`, `watched.json`, `org_members.json`
 Cloned starred repos: `<output>/<owner>/git/starred/<upstream-owner>/<repo>.git`
 
 > **Note**: `--org-members` and `--org-teams` are silently skipped for user targets. `--clone-starred` is intentionally omitted from `--all` due to its potentially large footprint.
+> Each of these lists is fetched on its own: one that fails is recorded and the
+> others are still written.
 
 ---
 
@@ -232,13 +270,17 @@ IDs, states, badge URLs).
 
 `--action-runs` writes one file per workflow (`workflow_runs_<id>.json`) with
 the workflow's runs; every page of GitHub's response is fetched, so this is the
-full retained history.  This can be **very large** for active repositories;
-opt in deliberately. It is omitted from `--all`.
+full retained history.  GitHub deletes runs after its retention period; both
+files accumulate (merged by `id`), so runs GitHub has deleted stay in the
+backup.  This can be **very large** for active repositories; opt in
+deliberately. It is omitted from `--all`.
 
 Output: `<output>/<owner>/json/repos/<repo>/workflows.json`, `workflow_runs_<id>.json`
 
 > **Token scope**: `actions:read` or a classic `repo` token is sufficient.
 > Repositories with Actions disabled return 404, which is logged and skipped.
+> A workflow whose runs cannot be fetched is recorded as a failure; the other
+> workflows are still backed up.
 
 ---
 
@@ -264,29 +306,32 @@ Output: `<output>/<owner>/json/repos/<repo>/environments.json`
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | **Not functional on github.com** |
+| `--discussions` | **Nothing is backed up yet** |
 
-> **Not supported by the GitHub REST API.**  GitHub exposes Discussions through
-> GraphQL only; the REST route this flag calls
-> (`GET /repos/<owner>/<repo>/discussions`) does not exist in GitHub's published
-> API description (github.com, GHEC, GHES 3.17-3.19) and answers 404.  The flag
-> is accepted, a single warning per run says that nothing is backed up, and no
-> `discussions.json` is written.  Do not rely on it for a backup of Discussions.
+> **Not available through the GitHub REST API.**  GitHub serves Discussions
+> through its GraphQL API only; its published REST description has no
+> repository discussions route, and this version does not back up through
+> GraphQL.  The flag is accepted, **one warning per run** says that no
+> discussion data is saved, and nothing is written.  `--all` does not include
+> it.
 
 ---
 
-## Classic Projects
+## Projects
 
 | Flag | Description |
 |------|-------------|
-| `--projects` | **Not functional on github.com** |
+| `--projects` | The owner's Projects (v2): every project, its fields and its items with their field values |
 
-> **Not supported by the GitHub REST API.**  GitHub sunset Classic Projects; the
-> REST routes this flag calls (`/repos/<owner>/<repo>/projects`,
-> `/projects/<id>/columns`) are absent from GitHub's published API description
-> and answer 404/410.  The flag is accepted, a single warning per run says that
-> nothing is backed up, and no `projects.json` is written.  Projects v2 are not
-> implemented.
+Projects (v2) belong to a user or an organisation, so they are owner-level
+data, fetched through `GET /users/<owner>/projectsV2` or
+`GET /orgs/<org>/projectsV2`, then each project's `fields` and `items`; the
+items are asked for with the value of every field (GitHub returns at most 50
+fields' values; a project with more is reported).  A classic token needs the
+`read:project` scope.  Classic projects (v1) were sunset by GitHub and are not
+backed up.
+
+Output: `<output>/<owner>/json/projects/projects.json`, `projects/<number>/fields.json`, `projects/<number>/items.json`
 
 ---
 
@@ -294,26 +339,41 @@ Output: `<output>/<owner>/json/repos/<repo>/environments.json`
 
 | Flag | Description |
 |------|-------------|
-| `--packages` | GitHub Packages metadata for the target user |
+| `--packages` | GitHub Packages metadata for the target user or organisation |
 
 Iterates over the supported package ecosystems (container, npm, maven,
 rubygems, nuget, docker) and saves the package list and version metadata to
-the owner's JSON directory.  Requires the `read:packages` OAuth scope.
+the owner's JSON directory.  Requires the `read:packages` OAuth scope.  An
+organisation's packages are listed under `/orgs/<org>`; when the token belongs
+to the user being backed up, `/user/packages` is used, which includes private
+packages; for anybody else only what `/users/<user>/packages` shows.  A
+package type or package whose listing fails is recorded and the others are
+still backed up.
 
-Output: `<output>/<owner>/json/packages_<type>.json`
+Output: `<output>/<owner>/json/packages_<type>.json`, `package_versions_<type>_<name>.json`
+
+In `<name>` every character other than ASCII letters, digits, `.`, `-` and
+`_` is percent-encoded (`team/image` becomes `team%2Fimage`), so two packages
+never share a file.  Names made only of those characters keep the file name
+earlier versions used; a scoped or nested name (`@scope/pkg`, `team/image`)
+gets a new one, and the file written under the old name stays as it was.
 
 ---
 
 ## The `--all` Flag
 
-`--all` enables every category above (including the non-functional `--discussions` and `--projects`, which
-log a warning) except:
+`--all` enables every category above, and commit comments, except:
 - `--lfs` (requires git-lfs to be installed)
 - `--prefer-ssh` (requires SSH keys to be set up)
 - `--prune` (affects update behaviour)
 - `--action-runs` (can be very large for active repositories)
 - `--clone-starred` (can consume substantial disk space)
+- `--discussions` (nothing is backed up yet)
 - `--concurrency` (set separately)
+
+With `--all`, a category the token is not permitted to read (HTTP 403) is a
+warning, once per category per run, not a failure (see
+[When GitHub answers 403, 404 or 410](#when-github-answers-403-404-or-410)).
 
 `--forks` and `--private` **are** part of `--all`.  The excluded options can be given next to `--all` and are
 honoured (`--all --clone-starred`, `--all --action-runs`, `--all --lfs`).  Individual category flags cannot be

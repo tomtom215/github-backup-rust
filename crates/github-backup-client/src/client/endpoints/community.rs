@@ -79,7 +79,7 @@ impl GitHubClient {
     }
 
     /// Lists the items of one project with the values of `field_ids` (at most
-    /// [`MAX_PROJECT_FIELDS`]; without `fields` GitHub returns only the title).
+    /// 50, GitHub's limit; without `fields` GitHub returns only the title).
     ///
     /// # Errors
     ///

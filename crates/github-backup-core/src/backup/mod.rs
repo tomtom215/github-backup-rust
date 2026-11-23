@@ -12,7 +12,7 @@
 //! A category is one engine *step*; an error it returns fails the step.  A
 //! category made of many items (an issue's comments, a release's assets, a
 //! package's versions) does not give up at the first item that fails:
-//! [`Outcome::item_error`] records it and the loop carries on, and the engine
+//! `Outcome::item_error` records it and the loop carries on, and the engine
 //! records every entry of [`Outcome::failed`] as a failure, so the run still
 //! ends with exit status 3.  A sub-resource that answers 404 or 410 is gone
 //! (deleted since it was listed) and is not a failure.  Fatal errors

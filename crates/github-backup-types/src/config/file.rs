@@ -150,10 +150,12 @@ pub struct ConfigFile {
     /// TOML array of strings).
     pub exclude_repos: Option<Vec<String>>,
 
-    /// Treat items last updated before this ISO 8601 timestamp as already
-    /// backed up: issue and pull request lists are still fetched in full and
-    /// merged, but the comments, events, commits and reviews of items not
-    /// changed since then (whose files exist) are not fetched again.
+    /// Expert override, like `--since`: treat items last updated before this
+    /// date (`2026-01-01`) or ISO 8601 timestamp as already backed up, for
+    /// every repository, instead of the per-repository watermarks.  Issue and
+    /// pull request lists are still fetched in full and merged; only the
+    /// comments, events, commits and reviews of items not changed since then
+    /// (whose files exist) are not fetched again.  Never stored.
     pub since: Option<String>,
 
     /// Override the hostname used in git clone URLs.

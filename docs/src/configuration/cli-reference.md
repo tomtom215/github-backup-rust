@@ -126,13 +126,13 @@ See [GitHub Enterprise Server](github-enterprise.md).
 | `--action-runs` | Run history per workflow.  Requires `--actions`; can be very large; not part of `--all`. |
 | `--environments` | Deployment environments with protection rules. |
 
-## Discussions, Classic Projects, Packages
+## Discussions, Projects, Packages
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | **Not functional.**  GitHub has no REST endpoint for Discussions; nothing is saved and a warning is logged.  Still part of `--all`. |
-| `--projects` | **Not functional.**  Classic Projects are gone from GitHub's REST API; nothing is saved and a warning is logged.  Still part of `--all`. |
-| `--packages` | Package metadata of the target user (needs `read:packages`). |
+| `--discussions` | **Nothing is backed up yet.**  GitHub serves Discussions through GraphQL only; one warning per run says so.  Not part of `--all`. |
+| `--projects` | The owner's Projects (v2): projects, fields and items with their field values (needs `read:project`). |
+| `--packages` | Package metadata of the target user or organisation (needs `read:packages`). |
 
 ## Organisation Data
 

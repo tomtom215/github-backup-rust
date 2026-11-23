@@ -78,7 +78,9 @@ failures it reports.
 | `--followers`, `--following` | none (public data) | none |
 | `--gists`, `--starred-gists` | `gist` | not available to fine-grained tokens |
 | `--packages` | `read:packages` | not available to fine-grained tokens |
-| `--discussions`, `--projects` | n/a | n/a: nothing is backed up (no REST endpoint) |
+| `--projects` | `read:project` | Projects: read (organisation permission) |
+| `--discussions` | n/a | n/a: nothing is backed up yet (GraphQL only) |
+| commit comments (`--all`) | `repo` (private) | Contents: read |
 | `--restore` | `repo` (write) | Issues: read and write |
 
 Notes:
@@ -89,9 +91,11 @@ Notes:
 * For organisation targets (`--org`) the token's owner must be able to see the
   repositories.  If the organisation enforces SAML single sign-on, authorise the
   token for it (Settings → token → *Configure SSO*), otherwise GitHub answers 403.
-* When a category is not permitted (HTTP 403 or 404) the tool skips that item
-  with an `INFO` line instead of failing; see
-  [Repository Metadata](../backup-categories.md#repository-metadata).  A repository
+* When GitHub refuses a category (HTTP 403), a category you asked for with its
+  own flag is a failure naming the missing permission (exit status `3`); under
+  `--all` it is skipped with one warning per category per run.  A category that
+  does not exist for a repository (404/410) is skipped without a failure; see
+  [When GitHub answers 403, 404 or 410](../backup-categories.md#when-github-answers-403-404-or-410).  A repository
   that cannot be listed or cloned at all is a failure (exit status `3`).
 * `github-backup --list-scopes <flags>` prints suggested scopes for the flags you
   give, but it does not expand `--all` (it prints only `public_repo repo`) and it
@@ -154,7 +158,7 @@ github.com (see [GitHub Enterprise](../configuration/github-enterprise.md#authen
 ### Scopes
 
 The default `--oauth-scopes` is `"repo gist read:org"`.  It does **not** cover
-`--packages` (add `read:packages`).  Narrow it if you back up fewer categories;
+`--packages` (add `read:packages`) or `--projects` (add `read:project`).  Narrow it if you back up fewer categories;
 see the table above.
 
 ---
