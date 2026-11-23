@@ -326,8 +326,12 @@ jobs:
           file out/github-backup
           # Must be a static executable: no glibc symbol-version floor at all.
           file out/github-backup | grep -Eq 'statically linked|static-pie linked'
-          if ldd out/github-backup 2>&1 | grep -q 'not a dynamic executable\|statically linked'; then :; else
-            echo "::error::binary is dynamically linked"; ldd out/github-backup || true; exit 1
+          # ldd exits non-zero for a static binary on some architectures
+          # (aarch64), so capture its output first: under pipefail a pipe
+          # from ldd would fail even when grep matches.
+          ldd_out=$(ldd out/github-backup 2>&1 || true)
+          if ! grep -q 'not a dynamic executable\|statically linked' <<<"$ldd_out"; then
+            echo "::error::binary is dynamically linked"; echo "$ldd_out"; exit 1
           fi
 
       # ── macOS / Windows: native cargo build ──
