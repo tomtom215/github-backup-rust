@@ -189,8 +189,9 @@ github-backup octocat --output /var/backup/github --verify
 This compares the SHA-256 of every data file under `json/` (not the history, state,
 checkpoint and lock files) with
 `json/backup_manifest.json` and exits `1` if a file is missing, changed or
-unexpected.  It does **not** examine the git clones: check those with
-`git -C <repo>.git fsck`.  The manifest protects against accidental damage and
+unexpected.  It does **not** examine the git clones: run a backup with
+`--verify-git` (for example weekly) to check every clone with `git fsck`, or
+check one by hand with `git -C <repo>.git fsck`.  The manifest protects against accidental damage and
 casual edits only: it is stored next to the files it describes and is not
 signed, so someone who can write the directory can rewrite both.
 

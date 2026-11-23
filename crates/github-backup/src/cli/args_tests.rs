@@ -840,3 +840,48 @@ fn every_parses_an_interval() {
     assert_eq!(args.every, Some(std::time::Duration::from_secs(6 * 3600)));
     assert!(try_parse(&["github-backup", "--every", "6"]).is_err());
 }
+
+#[test]
+fn verify_git_and_git_timeout_come_from_the_flag_or_the_config_file() {
+    let args = parse(&[
+        "github-backup",
+        "o",
+        "--verify-git",
+        "--git-timeout",
+        "1200",
+    ]);
+    assert!(args.verify_git);
+    assert_eq!(args.git_timeout, Some(1200));
+
+    let mut args = parse(&["github-backup", "o"]);
+    assert!(!args.verify_git);
+    assert_eq!(args.git_timeout, None);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        verify_git: Some(true),
+        git_timeout: Some(900),
+        ..Default::default()
+    });
+    assert!(args.verify_git);
+    assert_eq!(args.git_timeout, Some(900));
+
+    // The command line wins over the file; a 0 in the file means "default".
+    let mut args = parse(&["github-backup", "o", "--git-timeout", "60"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        git_timeout: Some(900),
+        ..Default::default()
+    });
+    assert_eq!(args.git_timeout, Some(60));
+    let mut args = parse(&["github-backup", "o"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        git_timeout: Some(0),
+        ..Default::default()
+    });
+    assert_eq!(args.git_timeout, None);
+}
+
+#[test]
+fn a_zero_git_timeout_on_the_command_line_is_a_usage_error() {
+    let err =
+        try_parse(&["github-backup", "o", "--git-timeout", "0"]).expect_err("0 must be rejected");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+}

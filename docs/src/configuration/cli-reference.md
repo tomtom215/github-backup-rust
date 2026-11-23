@@ -111,6 +111,8 @@ workflow run history.
 | `--clone-type <TYPE>` | | `mirror` | `mirror`, `bare`, `full` or `shallow:<depth>`; see [Clone types](../backup-categories.md#clone-types-explained). |
 | `--lfs` | | `false` | Also fetch Git LFS objects (`git lfs fetch --all`) after the mirror update.  Needs `git-lfs` installed; overrides `--clone-type`. |
 | `--prune` | | `false` | Delete branches and tags from the clone, and from the `--mirror-to` destination, when they were deleted on GitHub.  Without it they are kept; force-pushed branches are overwritten either way. |
+| `--verify-git` | | `false` | Check every repository with `git fsck --no-dangling` after each clone and update.  A repository that fails is recorded as a failure (exit status `3`), and a fresh clone that fails is discarded.  Reads every object, so it is slow on large repositories. |
+| `--git-timeout SECS` | | `600` | How long a git command may produce no output before it is stopped as stalled (a limit on silence, not on total time).  The same age makes a git `.lock` file left by a killed run count as stale. |
 
 ## Issue and Pull Request Options
 

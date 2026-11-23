@@ -108,6 +108,8 @@
 # prefer_ssh = false       # use SSH URLs (requires ssh-agent)
 # lfs = false              # clone Git LFS objects too
 # prune = false            # true: delete branches and tags that were deleted on GitHub (default: keep them)
+# verify_git = false       # true: check every repository with `git fsck` after each update (slow on big repos)
+# git_timeout = 600        # seconds a git command may stay silent before it is stopped as stalled
 
 # ── Mirror push (Gitea / Codeberg / Forgejo / GitLab) ─────────────────────
 

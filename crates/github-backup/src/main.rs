@@ -367,6 +367,8 @@ async fn run_tui(mut args: Args, matches: &ArgMatches) -> ExitCode {
         (args.diff_with.is_some(), "--diff-with"),
         (args.clone_host.is_some(), "--clone-host / clone_host"),
         (args.device_auth, "--device-auth"),
+        (args.verify_git, "--verify-git / verify_git"),
+        (args.git_timeout.is_some(), "--git-timeout / git_timeout"),
     ]
     .into_iter()
     .filter_map(|(set, flag)| set.then_some(flag))

@@ -424,6 +424,28 @@ pub struct Args {
     #[arg(long, hide = true)]
     pub no_prune: bool,
 
+    /// Check every repository with `git fsck` after each clone and update.
+    ///
+    /// A repository that fails the check is recorded as a failure (exit
+    /// status 3); a fresh clone that fails is discarded rather than kept.
+    /// Off by default because it reads every object of every repository, which
+    /// takes a while on large ones; a weekly run with it on is a good habit.
+    #[arg(help_heading = "Repositories and git", long)]
+    pub verify_git: bool,
+
+    /// Seconds a git command may go without any output before it is stopped
+    /// as stalled (default 600).
+    ///
+    /// Raise it for very slow links or huge repositories.  It is a limit on
+    /// silence, not on total time.
+    #[arg(
+        help_heading = "Repositories and git",
+        long,
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub git_timeout: Option<u64>,
+
     // ── Issue options ──────────────────────────────────────────────────────
     /// Back up issue metadata.
     #[arg(help_heading = "What to back up", long)]

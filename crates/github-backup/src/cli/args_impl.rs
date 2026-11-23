@@ -250,6 +250,10 @@ impl Args {
         // Clone behaviour flags.
         self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
         self.lfs |= cfg.lfs.unwrap_or(false);
+        self.verify_git |= cfg.verify_git.unwrap_or(false);
+        if self.git_timeout.is_none() {
+            self.git_timeout = cfg.git_timeout.filter(|&s| s > 0);
+        }
         // `--no-prune` (deprecated) is the default now; an explicit one still
         // beats a `prune = true` in the file.
         if !self.no_prune {

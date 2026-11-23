@@ -176,6 +176,12 @@ pub struct ConfigFile {
     /// accepted so that existing configuration files keep loading.
     pub no_prune: Option<bool>,
 
+    /// Check every repository with `git fsck` after each clone and update.
+    pub verify_git: Option<bool>,
+
+    /// Seconds a git command may go without output before it is stopped.
+    pub git_timeout: Option<u64>,
+
     // ── Report ────────────────────────────────────────────────────────────
     /// Write a JSON summary report to this file after the backup completes.
     pub report: Option<PathBuf>,

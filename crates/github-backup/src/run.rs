@@ -178,6 +178,8 @@ pub(crate) async fn execute(
     }
     let api_url = args.api_url.clone();
     let defaulted = args.uses_default_categories();
+    let verify_git = args.verify_git;
+    let git_timeout = args.git_timeout;
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
 
@@ -224,13 +226,17 @@ pub(crate) async fn execute(
     }
 
     let clones = opts.repositories;
-    let engine = BackupEngine::new(
+    let mut engine = BackupEngine::new(
         client.clone(),
         FsStorage::new(),
         ProcessGitRunner::new(),
         output.clone(),
         opts,
-    );
+    )
+    .with_git_fsck(verify_git);
+    if let Some(secs) = git_timeout {
+        engine = engine.with_git_stall_timeout(secs);
+    }
     let cancel = engine.cancel_handle();
 
     // Race the backup against a shutdown signal (Ctrl+C, and SIGTERM from

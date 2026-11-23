@@ -239,6 +239,8 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `prefer_ssh` | bool | `false` | Use SSH clone URLs instead of HTTPS |
 | `lfs` | bool | `false` | Also fetch Git LFS objects (needs `git-lfs`) |
 | `prune` | bool | `false` | Delete branches and tags from the clone when they were deleted on GitHub |
+| `verify_git` | bool | `false` | Check every repository with `git fsck` after each clone and update (`--verify-git`) |
+| `git_timeout` | integer | `600` | Seconds a git command may stay silent before it is stopped (`--git-timeout`) |
 | `no_prune` | bool | — | Deprecated and ignored (not pruning is the default); still accepted so old files load |
 
 ### Backup Categories
