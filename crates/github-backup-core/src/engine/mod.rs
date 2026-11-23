@@ -19,9 +19,10 @@
 //!
 //! # Incremental state
 //!
-//! See `incremental`: per-repository watermarks let a run skip the per-item
-//! requests for issues and pull requests that have not changed, advancing only
-//! for repositories that were backed up without any failure.
+//! See `incremental`: per-repository watermarks let a run list only the
+//! issues and pull requests that changed, skip their per-item requests when
+//! they have not, and skip the `git fetch` of a repository nothing was pushed
+//! to; they advance only for repositories backed up without any failure.
 
 mod incremental;
 mod repo;
@@ -37,7 +38,7 @@ use github_backup_types::backup_state::BackupCheckpoint;
 use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
 use github_backup_types::{Page, Raw, Repository};
 
-use self::incremental::{Incremental, RunSummary};
+use self::incremental::{Incremental, RepoSince, RunSummary};
 use self::repo::{backup_one_repo, Refusals, RepoContext, RepoResult};
 use self::steps::{RunControl, Steps};
 use crate::{
@@ -624,7 +625,6 @@ where
             let task_control = control.clone();
             let task_secrets = Arc::clone(secrets);
             let task_refusals = Arc::clone(&refusals);
-            let since = incremental.since_for(&repo.full_name);
             // Clone the event sender so the task can emit per-repo events.
             let event_tx = self.engine_events.clone();
             let name = repo.full_name.clone();
@@ -632,6 +632,11 @@ where
             // never reported as started: it would have no completion event,
             // and a listener would show it as running for ever.
             let attempted = !self.opts.dry_run && should_include(&repo, &self.opts);
+            let since = if attempted {
+                incremental.for_repo(&repo)
+            } else {
+                RepoSince::default()
+            };
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
@@ -655,7 +660,7 @@ where
                     stats: &task_stats,
                     control: &task_control,
                     secrets: &task_secrets,
-                    since: since.as_deref(),
+                    since: &since,
                     refusals: &task_refusals,
                 };
                 let result = backup_one_repo(&ctx, &repo).await;

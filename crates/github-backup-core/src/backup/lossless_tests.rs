@@ -72,6 +72,7 @@ async fn issues_json_is_what_the_api_returned() {
         "Hello-World",
         &opts,
         None,
+        None,
         &meta(),
         &storage,
     )
@@ -101,6 +102,7 @@ async fn one_unparseable_issue_neither_aborts_nor_vanishes_and_the_rest_continue
         "octocat",
         "Hello-World",
         &opts,
+        None,
         None,
         &meta(),
         &storage,
@@ -153,7 +155,7 @@ async fn an_unparseable_issue_with_a_number_still_gets_its_comments_and_events()
         ..Default::default()
     };
 
-    let outcome = backup_issues(&client, "o", "r", &opts, None, &meta(), &storage)
+    let outcome = backup_issues(&client, "o", "r", &opts, None, None, &meta(), &storage)
         .await
         .expect("backup_issues");
 
@@ -181,6 +183,7 @@ async fn comments_are_stored_as_served() {
         "Hello-World",
         &opts,
         None,
+        None,
         &meta(),
         &storage,
     )
@@ -205,6 +208,7 @@ async fn pulls_json_is_what_the_api_returned_and_invents_nothing() {
         "octocat",
         "Hello-World",
         &opts,
+        None,
         None,
         &meta(),
         &storage,

@@ -156,9 +156,10 @@ pub struct ConfigFile {
     /// Expert override, like `--since`: treat items last updated before this
     /// date (`2026-01-01`) or ISO 8601 timestamp as already backed up, for
     /// every repository, instead of the per-repository watermarks.  Issue and
-    /// pull request lists are still fetched in full and merged; only the
-    /// comments, events, commits and reviews of items not changed since then
-    /// (whose files exist) are not fetched again.  Never stored.
+    /// pull request lists are asked only for items updated since then and
+    /// merged into the stored lists (in full when a stored list is missing);
+    /// the comments, events, commits and reviews of items not changed since
+    /// then (whose files exist) are not fetched again.  Never stored.
     pub since: Option<String>,
 
     /// Override the hostname used in git clone URLs.

@@ -26,12 +26,14 @@ only place that lists every file; this page does not repeat it.
 later runs:
 
 - **Git repositories** are updated in place (`git fetch --all` for mirrors)
-  instead of being cloned again.  Deleted branches and tags are kept unless
-  `--prune` is given; force-pushed branches are overwritten.
-- **JSON lists** (`issues.json`, `pulls.json`, `releases.json`, ...) are fetched
-  in full and written again.  `issues.json` and `pulls.json` are **merged** with
-  what is already stored, so an item that has since disappeared from GitHub's
-  listing stays in the backup.
+  instead of being cloned again, and not at all when nothing was pushed since
+  the last clean backup (at most for 7 days).  Deleted branches and tags are
+  kept unless `--prune` is given; force-pushed branches are overwritten.
+- **JSON lists** (`releases.json`, `labels.json`, ...) are fetched in full and
+  written again.  `issues.json` and `pulls.json` are **merged** with what is
+  already stored, so an item that has since disappeared from GitHub's listing
+  stays in the backup; after the first run only the items updated since are
+  asked for.
 - **Per-item files** (`issue_comments/<n>.json`, ...) are fetched again only for
   items that changed since the repository's watermark; see
   [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).

@@ -355,6 +355,39 @@ impl MockBackupClient {
     }
 }
 
+/// With `since`, only the elements of `page` updated at or after it (or
+/// without an `updated_at`), as GitHub's `since` filter answers.
+fn updated_since<T: serde::de::DeserializeOwned>(
+    page: Result<Page<T>, ClientError>,
+    since: Option<&str>,
+) -> Result<Page<T>, ClientError> {
+    let Some(since) = since else {
+        return page;
+    };
+    let page = page?;
+    let unparsed = page.unparsed().to_vec();
+    Ok(Page::from_values(
+        page.into_items()
+            .into_iter()
+            .map(Raw::into_json)
+            .chain(unparsed)
+            .filter(|v| {
+                v.get("updated_at")
+                    .and_then(Value::as_str)
+                    .is_none_or(|updated| updated >= since)
+            }),
+    ))
+}
+
+/// The recorded argument of a list call: the repository, and the `since` a
+/// delta was asked for with.
+fn list_argument(repo: &str, since: Option<&str>) -> String {
+    match since {
+        Some(since) => format!("{repo} since {since}"),
+        None => repo.to_string(),
+    }
+}
+
 /// Boxes a ready result.
 fn ready<'a, T: Send + 'a>(
     result: Result<T, ClientError>,
@@ -431,7 +464,12 @@ impl BackupClient for MockBackupClient {
 
     /// Like GitHub, answers "410 Gone" for a listed repository whose Issues
     /// are switched off.
-    fn list_issues<'a>(&'a self, _owner: &'a str, repo: &'a str) -> Fut<'a, Page<Issue>> {
+    fn list_issues<'a>(
+        &'a self,
+        _owner: &'a str,
+        repo: &'a str,
+        since: Option<&'a str>,
+    ) -> Fut<'a, Page<Issue>> {
         let disabled = self
             .inner
             .lock()
@@ -440,13 +478,16 @@ impl BackupClient for MockBackupClient {
             .iter()
             .any(|r| r.name == repo && !r.has_issues);
         if disabled {
-            let _ = self.call("issues", repo);
+            let _ = self.call("issues", &list_argument(repo, since));
             return ready(Err(ClientError::ApiError {
                 status: 410,
                 body: "Issues are disabled for this repo".into(),
             }));
         }
-        ready(self.page("issues", repo, |m| m.issues.clone()))
+        ready(updated_since(
+            self.page("issues", &list_argument(repo, since), |m| m.issues.clone()),
+            since,
+        ))
     }
 
     fn list_issue_comments<'a>(
@@ -482,8 +523,14 @@ impl BackupClient for MockBackupClient {
         &'a self,
         _owner: &'a str,
         repo: &'a str,
+        updated_since: Option<&'a str>,
     ) -> Fut<'a, Page<PullRequest>> {
-        ready(self.page("pull_requests", repo, |m| m.pull_requests.clone()))
+        ready(self::updated_since(
+            self.page("pull_requests", &list_argument(repo, updated_since), |m| {
+                m.pull_requests.clone()
+            }),
+            updated_since,
+        ))
     }
 
     fn list_pull_comments<'a>(

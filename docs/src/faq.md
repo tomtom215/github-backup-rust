@@ -48,11 +48,13 @@ attachments, LFS objects unless `--lfs`, and the contents of starred gists.
 
 It updates it, and does not lose what the first run captured:
 
-- **Git clones** are updated in place with `git fetch`.  A branch or tag
+- **Git clones** are updated in place with `git fetch` (skipped when nothing
+  was pushed since the last clean backup, at most for 7 days).  A branch or tag
   deleted on GitHub stays in the clone (unless `--prune`), while a force-pushed
   branch is overwritten.
-- **`issues.json` and `pulls.json`** are fetched in full and **merged** into the
-  stored file; an item that disappears from GitHub stays in the backup.
+- **`issues.json` and `pulls.json`** are **merged** into the stored file; an
+  item that disappears from GitHub stays in the backup.  After the first run
+  only the items updated since are listed.
 - **Other JSON lists** are rewritten with the current response.
 - **Per-item files** (comments, events, commits, reviews) are re-fetched only for
   items that changed since the repository's watermark.
@@ -154,7 +156,8 @@ by an Enterprise Cloud organisation get more.  To reduce the load:
 
 - lower `--concurrency` (this slows the consumption, it does not reduce it),
 - enable fewer categories, or split the work with `--include-repos` over several runs,
-- keep the incremental state so per-item requests are skipped.
+- keep the incremental state so the issue and pull request lists are asked
+  only for changes and per-item requests are skipped.
 
 ---
 

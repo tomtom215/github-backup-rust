@@ -37,6 +37,11 @@ How the clone types behave in detail:
   Branches and tags deleted on GitHub are kept in the clone unless `--prune` is
   given; force-pushed branches are overwritten either way (see
   [Clones Follow GitHub](configuration/output-layout.md#clones-follow-github)).
+* **Incremental:** the fetch is skipped when nothing was pushed to the
+  repository since its last clean backup (`pushed_at`), the clone is on disk,
+  and it was fetched in the last 7 days; mirror, shallow and LFS clones also
+  need no pull request updated since (one request).  `--full` always fetches.
+  See [Incremental runs](monitoring.md#incremental-runs-and-the-state-file).
 * A fresh clone is made in a hidden staging directory next to the target and
   renamed into place only when it is complete, so an interrupted clone leaves
   nothing under the real name (the staging directory is removed on the next
@@ -117,8 +122,9 @@ include pull requests.
 
 An issue whose comments or events cannot be fetched is recorded as a failure
 and the other issues are still backed up; an issue deleted in the meantime
-(404/410) is skipped.  See [Issues and Pull Requests](issues-and-prs.md) for
-the incremental behaviour.
+(404/410) is skipped.  Incremental: a later run lists only the issues updated
+since the repository's watermark and merges them into `issues.json`; see
+[Issues and Pull Requests](issues-and-prs.md).
 
 Output: `<output>/<owner>/json/repos/<repo>/issues.json`, `issue_comments/<n>.json`, `issue_events/<n>.json`
 
@@ -166,7 +172,9 @@ Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_a
 | `--wikis` | Clone repository wikis as bare mirror repos |
 
 The wiki is cloned the same way as the repository: over SSH with
-`--prefer-ssh`, and with `--clone-host` applied.
+`--prefer-ssh`, and with `--clone-host` applied.  It is fetched on every run:
+an edit to a wiki does not change the repository's `pushed_at`, so there is
+no cheap way to tell that it is unchanged.
 
 Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 

@@ -57,6 +57,7 @@ labels and milestones that were deleted on GitHub after they were backed up.
 <output>/
 ├── .github-backup.lock                     ← process lock (stays on disk, see below)
 └── <owner>/                                ← GitHub username or org name
+    ├── site/                               ← --render-html: the backup as a website
     ├── git/                                ← Git repositories
     │   ├── repos/
     │   │   ├── <repo>.git/                 ← mirror clone (default); bare, shallow, --lfs too
@@ -161,7 +162,7 @@ new repository is backed up from scratch.
 | File | Meaning |
 |------|---------|
 | `repos.json` | The repositories this backup covers, as GitHub listed them: only the ones the options include, merged with earlier listings so that a repository deleted on GitHub stays recorded.  `--diff-with` compares it between two backups. |
-| `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
+| `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers and `fetched_at`, the last clean run that fetched its clone) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
 | `backup_history.json` | One entry per run (time, repositories backed up, duration, `success`, `failures`, tool version), newest last, at most `--history-size` entries. |
 | `backup_checkpoint.json` | Which repositories an **interrupted** run had finished.  Removed when a run completes (a checkpoint that cannot be removed is a failure of the run).  A later run resumes from it only if it is less than 6 hours old and the run has the same owner and options; otherwise it is ignored. |
 | `backup_manifest.json` | `--manifest`: SHA-256 of every data file under `json/`, except the history, state, checkpoint and lock files and temporary files of an unfinished write (the git clones are not included).  Paths use `/` on every platform. |

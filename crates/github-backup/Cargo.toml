@@ -27,6 +27,7 @@ github-backup-core = { workspace = true }
 github-backup-mirror = { workspace = true }
 github-backup-s3 = { workspace = true }
 github-backup-tui = { workspace = true }
+github-backup-viewer = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

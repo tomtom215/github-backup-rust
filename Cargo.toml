@@ -8,6 +8,7 @@ members = [
     "crates/github-backup-mirror",
     "crates/github-backup-s3",
     "crates/github-backup-tui",
+    "crates/github-backup-viewer",
 ]
 
 [workspace.package]
@@ -76,6 +77,11 @@ github-backup-core   = { path = "crates/github-backup-core"   }
 github-backup-mirror = { path = "crates/github-backup-mirror" }
 github-backup-s3     = { path = "crates/github-backup-s3"     }
 github-backup-tui    = { path = "crates/github-backup-tui"    }
+github-backup-viewer = { path = "crates/github-backup-viewer" }
+
+# Markdown for the static HTML viewer (--render-html).  Only the `html`
+# feature: no command-line parser.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # TOML config file parsing
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse", "display"] }

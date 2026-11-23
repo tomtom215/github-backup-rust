@@ -218,6 +218,104 @@ async fn edited_comments_are_listed_with_an_encoded_since() {
 }
 
 #[tokio::test]
+async fn issues_are_listed_in_full_or_since_a_time() {
+    let api = FakeApi::start(vec![
+        route(
+            "/repos/o/r/issues?state=all&per_page=100",
+            json!([{"number": 1}]),
+        ),
+        route(
+            "/repos/o/r/issues?state=all&since=2024-01-01T00%3A00%3A00Z&per_page=100",
+            json!([]),
+        ),
+    ])
+    .await;
+    let client = api.client();
+    let all = client.list_issues("o", "r", None).await.expect("all");
+    assert_eq!(all.len() + all.unparsed_count(), 1);
+    client
+        .list_issues("o", "r", Some("2024-01-01T00:00:00Z"))
+        .await
+        .expect("since");
+}
+
+fn pulls_updated(from: usize, n: usize, updated_at: &str) -> Value {
+    Value::Array(
+        (from..from + n)
+            .map(|i| json!({"number": i, "updated_at": updated_at}))
+            .collect(),
+    )
+}
+
+const PULLS_BY_UPDATE: &str = "/repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100";
+
+/// `GET /pulls` has no `since`: the list is read newest first, and paging
+/// stops at the first page that reaches back before the watermark.
+#[tokio::test]
+async fn pulls_since_stop_at_the_first_page_reaching_older_ones() {
+    let api = FakeApi::start(vec![
+        route(
+            &format!("{PULLS_BY_UPDATE}&page=1"),
+            pulls_updated(0, 100, "2024-03-01T00:00:00Z"),
+        ),
+        route(
+            &format!("{PULLS_BY_UPDATE}&page=2"),
+            pulls_updated(100, 100, "2023-12-31T23:59:59Z"),
+        ),
+        route(
+            &format!("{PULLS_BY_UPDATE}&page=3"),
+            pulls_updated(200, 100, "2023-01-01T00:00:00Z"),
+        ),
+    ])
+    .await;
+    let pulls = api
+        .client()
+        .list_pull_requests("o", "r", Some("2024-01-01T00:00:00Z"))
+        .await
+        .expect("pulls");
+    assert_eq!(pulls.len() + pulls.unparsed_count(), 200);
+    assert_eq!(api.targets().len(), 2, "page 3 is never asked for");
+}
+
+/// A short page is the last one; a page whose last pull request has no
+/// readable `updated_at` does not end the list.
+#[tokio::test]
+async fn pulls_since_read_on_when_in_doubt_and_stop_at_a_short_page() {
+    let mut first = pulls_updated(0, 100, "2024-03-01T00:00:00Z");
+    first[99] = json!({"number": 99});
+    let api = FakeApi::start(vec![
+        route(&format!("{PULLS_BY_UPDATE}&page=1"), first),
+        route(
+            &format!("{PULLS_BY_UPDATE}&page=2"),
+            pulls_updated(100, 3, "2024-02-01T00:00:00Z"),
+        ),
+    ])
+    .await;
+    let pulls = api
+        .client()
+        .list_pull_requests("o", "r", Some("2024-01-01T00:00:00Z"))
+        .await
+        .expect("pulls");
+    assert_eq!(pulls.len() + pulls.unparsed_count(), 103);
+    assert_eq!(api.targets().len(), 2);
+}
+
+#[tokio::test]
+async fn pulls_without_since_are_listed_in_full() {
+    let api = FakeApi::start(vec![route(
+        "/repos/o/r/pulls?state=all&per_page=100",
+        pulls_updated(0, 2, "2024-03-01T00:00:00Z"),
+    )])
+    .await;
+    let pulls = api
+        .client()
+        .list_pull_requests("o", "r", None)
+        .await
+        .expect("pulls");
+    assert_eq!(pulls.len() + pulls.unparsed_count(), 2);
+}
+
+#[tokio::test]
 async fn the_full_repository_never_carries_a_clone_token() {
     let api = FakeApi::start(vec![route(
         "/repos/o/r",

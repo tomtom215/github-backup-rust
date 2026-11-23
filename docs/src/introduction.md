@@ -26,7 +26,7 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 | User and organisation data | Starred, watched, followers, following, organisation members and teams; optional clone of every starred repository |
 | Private data | A user's own private repositories and secret gists are included when the token belongs to that user |
 | Filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
-| Incremental runs | A watermark per repository; lists are always fetched in full and merged, so a run never loses data; `--full` forces a complete refresh |
+| Incremental runs | A watermark per repository; issue and pull request lists are asked only for changes and merged, so a run never loses data; unchanged repositories are not fetched again; `--full` forces a complete refresh |
 | Honest outcome | Failures never stop the rest of the run; exit status `3` means "finished but incomplete"; report, metrics, webhook and history agree |
 | S3 sync | The JSON metadata (not the clones) to AWS S3, Backblaze B2, MinIO, Cloudflare R2, Spaces or Wasabi, with content-digest skipping |
 | At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |

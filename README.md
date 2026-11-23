@@ -240,12 +240,13 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, advisories, Actions, environments, packages, Discussions (with comments and replies, through GraphQL) |
 | User and org data | Starred, watched, followers, following, org members and teams |
 | Repo filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
-| Incremental | Per-repository watermarks; lists always fetched in full and merged; `--full` to refresh everything |
+| Incremental | Per-repository watermarks; issue and pull request lists asked only for changes and merged; unchanged repositories not fetched again; `--full` to refresh everything |
 | Outcome | Failures never stop the run; exit status `3` = incomplete; report, metrics, webhook and history agree |
 | S3 sync | JSON metadata (not clones) to AWS S3, B2, MinIO, R2, Spaces, Wasabi |
 | At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |
 | Git mirroring | Branches and tags pushed to Gitea, Codeberg, Forgejo or GitLab |
 | Restore | Labels, milestones and issues re-created from the local backup (`--restore`) |
+| HTML viewer | The backup as a static, offline website: issues, pull requests with reviews, releases, gists (`--render-html`) |
 | Auth | Personal access token, OAuth device flow, or anonymous |
 | GitHub Enterprise | `--api-url` and `--clone-host` for GHES |
 | Config file | TOML (the command line wins for single values; switches and lists combine) |
@@ -285,6 +286,7 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 | At-Rest Encryption | [storage/encryption](https://tomtom215.github.io/github-backup-rust/storage/encryption.html) |
 | Mirroring | [mirroring](https://tomtom215.github.io/github-backup-rust/mirroring.html) |
 | Monitoring and Incremental Runs | [monitoring](https://tomtom215.github.io/github-backup-rust/monitoring.html) |
+| HTML Viewer | [viewer](https://tomtom215.github.io/github-backup-rust/viewer.html) |
 | Restore | [restore](https://tomtom215.github.io/github-backup-rust/restore.html) |
 | Operations Runbook | [ops-runbook](https://tomtom215.github.io/github-backup-rust/ops-runbook.html) |
 | Docker | [docker](https://tomtom215.github.io/github-backup-rust/docker.html) |
@@ -380,6 +382,7 @@ crates/
 ├── github-backup-mirror/    Push mirrors to Gitea / Forgejo / Codeberg / GitLab
 ├── github-backup-s3/        S3-compatible storage (pure-Rust SigV4), encryption
 ├── github-backup-tui/       Ratatui TUI front-end (--tui flag)
+├── github-backup-viewer/    Static HTML site from a backup (--render-html)
 └── github-backup/           CLI binary (clap)
 docs/                        mdBook documentation source
 ```
