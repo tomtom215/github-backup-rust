@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Repository metadata listing and asset download endpoints.
+//! Repository metadata listing endpoints.
 //!
-//! Covers labels, milestones, releases, hooks, security advisories, topics,
-//! branches, and release asset downloads.
+//! Covers labels, milestones, releases, hooks, security advisories,
+//! branches, branch protection, rulesets and commit comments.
 
-use tracing::info;
+use serde_json::Value;
 
 use github_backup_types::{
-    Branch, BranchProtection, Hook, Label, Milestone, Page, Raw, Release, SecurityAdvisory,
+    Branch, CommitComment, Hook, Label, Milestone, Page, Release, Ruleset, SecurityAdvisory,
 };
 
 use crate::error::ClientError;
 
 use super::super::{GitHubClient, PER_PAGE};
+use super::encode_path;
 
 impl GitHubClient {
     // ── Repository metadata ───────────────────────────────────────────────
@@ -88,30 +89,6 @@ impl GitHubClient {
         self.get_all_pages(&url).await
     }
 
-    /// Returns the topics (tags) configured on a repository.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_repo_topics(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<String>, ClientError> {
-        let api = self.api();
-        let url = format!("{api}/repos/{owner}/{repo}/topics");
-
-        #[derive(serde::Deserialize)]
-        struct TopicsResponse {
-            names: Vec<String>,
-        }
-        // Through the shared retry loop: a rate-limit 403 must be waited out,
-        // not mistaken for "no access" by the caller.
-        let (parsed, _) = self.get_json_with_link::<TopicsResponse>(&url).await?;
-        info!(owner, repo, count = parsed.names.len(), "fetched topics");
-        Ok(parsed.names)
-    }
-
     /// Lists all branches for a repository.
     ///
     /// Returns branch names, their tip commit SHAs, and whether each branch
@@ -130,29 +107,75 @@ impl GitHubClient {
         self.get_all_pages(&url).await
     }
 
-    /// Returns the detailed branch-protection rules for a single branch.
+    /// Returns the protection rules of one branch exactly as the API sends them
+    /// (`GET /repos/{owner}/{repo}/branches/{branch}/protection`).
     ///
-    /// Calls `GET /repos/{owner}/{repo}/branches/{branch}/protection`.
-    ///
-    /// Returns `Err(ClientError::ApiError { status: 403, .. })` when the
-    /// authenticated token lacks admin access to the repository, and
-    /// `Err(ClientError::ApiError { status: 404, .. })` when the branch does
-    /// not have protection enabled.  Callers should handle both gracefully.
+    /// The branch name is percent-encoded except for `/`, which GitHub
+    /// declares part of the route (`release#2` must not request `release`).
+    /// GitHub answers 403 without admin access and 404 for a branch without
+    /// protection.
     ///
     /// # Errors
     ///
-    /// Propagates [`ClientError`] on network, TLS, or other API errors.
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn get_branch_protection(
         &self,
         owner: &str,
         repo: &str,
         branch: &str,
-    ) -> Result<Raw<BranchProtection>, ClientError> {
+    ) -> Result<Value, ClientError> {
         let api = self.api();
+        let branch = encode_path(branch);
         let url = format!("{api}/repos/{owner}/{repo}/branches/{branch}/protection");
-        let (protection, _) = self
-            .get_json_with_link::<Raw<BranchProtection>>(&url)
-            .await?;
-        Ok(protection)
+        Ok(self.get_json_with_link::<Value>(&url).await?.0)
+    }
+
+    /// Lists the rulesets that apply to a repository, its own and those it
+    /// inherits from its organisation (`GET /repos/{owner}/{repo}/rulesets`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_rulesets(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Page<Ruleset>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/rulesets?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
+    }
+
+    /// Returns one ruleset with its rules and conditions
+    /// (`GET /repos/{owner}/{repo}/rulesets/{ruleset_id}`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn get_ruleset(
+        &self,
+        owner: &str,
+        repo: &str,
+        ruleset_id: u64,
+    ) -> Result<Value, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/rulesets/{ruleset_id}");
+        Ok(self.get_json_with_link::<Value>(&url).await?.0)
+    }
+
+    /// Lists the comments on commits of a repository
+    /// (`GET /repos/{owner}/{repo}/comments`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_commit_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Page<CommitComment>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}/comments?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
     }
 }

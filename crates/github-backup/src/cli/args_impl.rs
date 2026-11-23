@@ -372,6 +372,10 @@ impl Args {
             output,
             BackupOptions {
                 target,
+                // No `--commit-comments` flag yet; explicitly chosen categories
+                // treat a refusal as a failure (`--all` tolerates it).
+                commit_comments: false,
+                tolerate_forbidden: false,
                 repositories: self.repositories,
                 forks: self.forks,
                 private: self.private,

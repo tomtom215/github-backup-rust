@@ -13,7 +13,11 @@ use tracing::info;
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{
+    backup::{all_json, describe_unparsed, json_u64, merge::merge_and_write, Outcome},
+    error::CoreError,
+    storage::Storage,
+};
 
 /// Backs up GitHub Actions workflow metadata for a single repository.
 ///
@@ -24,18 +28,25 @@ use crate::{error::CoreError, storage::Storage};
 /// workflow: `meta_dir/workflow_runs_<id>.json`.  This can produce large files
 /// for active repositories; opt in deliberately.
 ///
+/// Both files **accumulate**: they are merged by `id` with what earlier runs
+/// stored.  GitHub deletes workflow runs after the retention period and a
+/// workflow disappears with its file, and that history is exactly what a
+/// backup should keep.
+///
 /// The actual YAML workflow files are already preserved by the git clone.
 /// This function captures the API-level metadata which is not part of the
 /// repository tree.
 ///
-/// Admin access is **not** required — any token with `repo` scope (or a
-/// fine-grained token with `actions:read`) can read workflow data.  When the
-/// API returns 403 or 404 (Actions disabled or token lacks permissions) the
-/// function logs a message and returns `Ok(())`.
+/// A workflow whose runs cannot be fetched is recorded in
+/// [`Outcome::failed`]; the other workflows are still backed up.
+///
+/// Returns the number of workflows.
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from storage writes or non-403/404 API errors.
+/// Propagates [`CoreError`] from the workflow listing (including a 403 or 404
+/// answer, which the engine interprets) or storage writes, and any fatal
+/// error.
 pub async fn backup_actions(
     client: &impl BackupClient,
     owner: &str,
@@ -43,68 +54,51 @@ pub async fn backup_actions(
     opts: &BackupOptions,
     meta_dir: &Path,
     storage: &impl Storage,
-) -> Result<u64, CoreError> {
+) -> Result<Outcome, CoreError> {
+    let mut outcome = Outcome::default();
     if !opts.actions {
-        return Ok(0);
+        return Ok(outcome);
     }
 
-    let workflows = match client.list_workflows(owner, repo_name).await {
-        Ok(wf) => wf,
-        Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping actions workflows (not available or insufficient permissions)"
-            );
-            return Ok(0);
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let count = workflows.len() as u64;
+    let workflows = client.list_workflows(owner, repo_name).await?;
+    outcome.count = (workflows.len() + workflows.unparsed_count()) as u64;
     info!(
         owner,
         repo = repo_name,
-        count,
+        count = outcome.count,
         "backing up actions workflows"
     );
-    storage.write_json(&meta_dir.join("workflows.json"), &workflows)?;
+    merge_and_write(storage, &meta_dir.join("workflows.json"), &workflows, "id")?;
 
-    // Optionally back up workflow run history.
-    if opts.action_runs {
-        for workflow in &workflows {
-            let runs = match client
-                .list_workflow_runs(owner, repo_name, workflow.id)
-                .await
-            {
-                Ok(r) => r,
-                Err(github_backup_client::ClientError::ApiError {
-                    status: 403 | 404, ..
-                }) => {
-                    info!(
-                        repo = format!("{owner}/{repo_name}"),
-                        workflow_id = workflow.id,
-                        "skipping workflow runs (not available)"
-                    );
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
+    if !opts.action_runs {
+        return Ok(outcome);
+    }
 
-            let filename = format!("workflow_runs_{}.json", workflow.id);
-            storage.write_json(&meta_dir.join(&filename), &runs)?;
-            info!(
-                owner,
-                repo = repo_name,
-                workflow_id = workflow.id,
-                runs = runs.len(),
-                "saved workflow runs"
+    for workflow in all_json(&workflows) {
+        let Some(id) = json_u64(workflow, "id") else {
+            outcome.fail(
+                format!("workflow ({})", describe_unparsed(workflow)),
+                "the API object has no `id`, so its runs cannot be fetched",
             );
+            continue;
+        };
+        match client.list_workflow_runs(owner, repo_name, id).await {
+            Ok(runs) => {
+                let path = meta_dir.join(format!("workflow_runs_{id}.json"));
+                merge_and_write(storage, &path, &runs, "id")?;
+                info!(
+                    owner,
+                    repo = repo_name,
+                    workflow_id = id,
+                    runs = runs.len(),
+                    "saved workflow runs"
+                );
+            }
+            Err(e) => outcome.item_error(format!("workflow {id} runs"), e)?,
         }
     }
 
-    Ok(count)
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -147,7 +141,8 @@ mod tests {
             &storage,
         )
         .await
-        .expect("backup_actions");
+        .expect("backup_actions")
+        .count;
 
         assert_eq!(count, 0);
         assert_eq!(storage.len(), 0);
@@ -172,7 +167,8 @@ mod tests {
             &storage,
         )
         .await
-        .expect("backup_actions");
+        .expect("backup_actions")
+        .count;
 
         assert_eq!(count, 1);
         assert!(
@@ -201,7 +197,8 @@ mod tests {
             &storage,
         )
         .await
-        .expect("backup_actions");
+        .expect("backup_actions")
+        .count;
 
         assert_eq!(count, 0);
         assert!(storage

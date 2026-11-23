@@ -3,30 +3,28 @@
 
 //! Repository security-advisory backup.
 //!
-//! Saves `security_advisories.json` containing all security advisories for
-//! the repository.  Requires admin access or the repository must have
-//! vulnerability alerts enabled; 403/404 responses are treated as "no access"
-//! and silently skipped rather than treated as errors.
+//! Saves `security_advisories.json`: the repository's security advisories,
+//! merged by `ghsa_id` with what earlier runs stored, so an advisory that is
+//! withdrawn or deleted stays in the backup.  Unpublished advisories are only
+//! visible to security managers and administrators.
 
 use std::path::Path;
 
 use tracing::info;
 
-use github_backup_client::{BackupClient, ClientError};
+use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{backup::merge::merge_and_write, error::CoreError, storage::Storage};
 
 /// Backs up repository security advisories to `meta_dir/security_advisories.json`.
 ///
 /// Skipped when `opts.security_advisories` is `false` or `opts.dry_run` is `true`.
 ///
-/// When the API returns 403 or 404 (missing admin access or advisories not enabled)
-/// the error is logged as informational and the function returns `Ok(())`.
-///
 /// # Errors
 ///
-/// Propagates [`CoreError`] for all other API or storage errors.
+/// Propagates [`CoreError`] from the API call (including a 403 refusal) or
+/// the storage write.
 pub async fn backup_security_advisories(
     client: &impl BackupClient,
     owner: &str,
@@ -40,18 +38,13 @@ pub async fn backup_security_advisories(
     }
 
     info!(owner, repo, "fetching security advisories");
-    match client.list_security_advisories(owner, repo).await {
-        Ok(advisories) => {
-            storage.write_json(&meta_dir.join("security_advisories.json"), &advisories)?;
-        }
-        Err(ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(owner, repo, "skipping security advisories (not available)");
-        }
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
+    let advisories = client.list_security_advisories(owner, repo).await?;
+    merge_and_write(
+        storage,
+        &meta_dir.join("security_advisories.json"),
+        &advisories,
+        "ghsa_id",
+    )
 }
 
 #[cfg(test)]

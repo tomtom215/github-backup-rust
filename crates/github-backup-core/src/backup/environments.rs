@@ -22,13 +22,13 @@ use crate::{error::CoreError, storage::Storage};
 /// Backing up their metadata makes it possible to audit and reproduce
 /// deployment gate configurations without a live GitHub connection.
 ///
-/// The API returns 404 for repositories that have no environments configured,
-/// and 403 when the token lacks the required permissions.  Both cases are
-/// treated as informational non-errors.
+/// The file is a snapshot of the current configuration, replaced on every
+/// run.  How a 404 (nothing to back up) or a 403 refusal is reported is
+/// decided by the engine.
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from storage writes or non-403/404 API errors.
+/// Propagates [`CoreError`] from the API call or the storage write.
 pub async fn backup_environments(
     client: &impl BackupClient,
     owner: &str,
@@ -41,28 +41,14 @@ pub async fn backup_environments(
         return Ok(());
     }
 
-    match client.list_environments(owner, repo_name).await {
-        Ok(envs) => {
-            info!(
-                owner,
-                repo = repo_name,
-                count = envs.len(),
-                "backed up deployment environments"
-            );
-            storage.write_json(&meta_dir.join("environments.json"), &envs)?;
-        }
-        Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping environments (not configured or insufficient permissions)"
-            );
-        }
-        Err(e) => return Err(e.into()),
-    }
-
-    Ok(())
+    let envs = client.list_environments(owner, repo_name).await?;
+    info!(
+        owner,
+        repo = repo_name,
+        count = envs.len(),
+        "backed up deployment environments"
+    );
+    storage.write_json(&meta_dir.join("environments.json"), &envs)
 }
 
 #[cfg(test)]

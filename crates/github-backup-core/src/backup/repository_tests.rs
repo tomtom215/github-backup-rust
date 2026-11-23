@@ -387,6 +387,28 @@ fn rewrite_host_ssh_url_scheme() {
     assert_eq!(result, "ssh://git@other.example.com/owner/repo.git");
 }
 
+/// `--clone-host host:port` used to be ignored silently (the URL parser
+/// refuses a port in the host).
+#[test]
+fn rewrite_host_with_a_port_sets_the_port() {
+    assert_eq!(
+        rewrite_host("https://github.example.com/o/r.git", "git.example.com:8443"),
+        "https://git.example.com:8443/o/r.git"
+    );
+    assert_eq!(
+        rewrite_host(
+            "ssh://git@github.example.com/o/r.git",
+            "git.example.com:2222"
+        ),
+        "ssh://git@git.example.com:2222/o/r.git"
+    );
+    assert_eq!(
+        rewrite_host("git@github.example.com:o/r.git", "git.example.com:2222"),
+        "ssh://git@git.example.com:2222/o/r.git",
+        "the scp-like form cannot carry a port"
+    );
+}
+
 #[test]
 fn rewrite_host_preserves_unknown_format() {
     // Malformed URL — should be returned unchanged.

@@ -3,15 +3,16 @@
 
 //! Repository webhook configuration backup.
 //!
-//! Saves `hooks.json` containing webhook configurations for the repository.
-//! Requires admin access; 403/404 responses are treated as "no access" and
-//! silently skipped rather than treated as errors.
+//! Saves `hooks.json` containing webhook configurations for the repository:
+//! a snapshot of the current configuration, replaced on every run.  Requires
+//! admin access; how a refusal is reported is decided by the engine (see
+//! `BackupOptions::tolerate_forbidden`).
 
 use std::path::Path;
 
 use tracing::info;
 
-use github_backup_client::{BackupClient, ClientError};
+use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
 use crate::{error::CoreError, storage::Storage};
@@ -20,12 +21,10 @@ use crate::{error::CoreError, storage::Storage};
 ///
 /// Skipped when `opts.hooks` is `false` or `opts.dry_run` is `true`.
 ///
-/// When the API returns 403 or 404 (missing admin access or hooks not enabled)
-/// the error is logged as informational and the function returns `Ok(())`.
-///
 /// # Errors
 ///
-/// Propagates [`CoreError`] for all other API or storage errors.
+/// Propagates [`CoreError`] from the API call (including a 403 refusal) or
+/// the storage write.
 pub async fn backup_hooks(
     client: &impl BackupClient,
     owner: &str,
@@ -39,18 +38,8 @@ pub async fn backup_hooks(
     }
 
     info!(owner, repo, "fetching webhooks");
-    match client.list_hooks(owner, repo).await {
-        Ok(hooks) => {
-            storage.write_json(&meta_dir.join("hooks.json"), &hooks)?;
-        }
-        Err(ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(owner, repo, "skipping hooks (no admin access)");
-        }
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
+    let hooks = client.list_hooks(owner, repo).await?;
+    storage.write_json(&meta_dir.join("hooks.json"), &hooks)
 }
 
 #[cfg(test)]

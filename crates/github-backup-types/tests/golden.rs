@@ -5,7 +5,7 @@
 //!
 //! The fixtures under `tests/fixtures/<endpoint>/` are
 //!
-//! * `example.json` - for each of the 32 endpoints the client calls, the
+//! * `example.json` - for each of 31 endpoints the client calls, the
 //!   example response from GitHub's OpenAPI description (`@octokit/openapi`
 //!   23.0.2), and
 //! * the other files - the same payloads with the `null` / absent properties
@@ -34,10 +34,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use github_backup_types::{
-    Branch, BranchProtection, Collaborator, DeployKey, Environment, Gist, Hook, Issue,
-    IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion, Page, PullRequest,
-    PullRequestComment, PullRequestCommit, PullRequestReview, Raw, Release, Repository,
-    SecurityAdvisory, Team, User, Workflow, WorkflowRun,
+    Branch, Collaborator, DeployKey, Environment, Gist, Hook, Issue, IssueComment, IssueEvent,
+    Label, Milestone, Package, PackageVersion, Page, PullRequest, PullRequestComment,
+    PullRequestCommit, PullRequestReview, Raw, Release, Repository, SecurityAdvisory, Team, User,
+    Workflow, WorkflowRun,
 };
 
 // ── Harness ──────────────────────────────────────────────────────────────────
@@ -96,18 +96,6 @@ fn decode_single<T: DeserializeOwned>(json: &Value) -> Decoded {
     }
 }
 
-/// `{"names": ["a", "b"]}`: the topics response has no model, the client reads
-/// the `names` array directly.
-fn decode_names(json: &Value) -> Decoded {
-    let names: Vec<String> =
-        serde_json::from_value(json["names"].clone()).expect("names is an array of strings");
-    Decoded {
-        typed: names.len(),
-        unparsed: 0,
-        written: json.clone(),
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Shape {
     /// A JSON array of objects.
@@ -116,8 +104,6 @@ enum Shape {
     Wrapped(&'static str),
     /// One object.
     Single,
-    /// The topics response.
-    Names,
 }
 
 struct Endpoint {
@@ -162,16 +148,11 @@ fn endpoints() -> Vec<Endpoint> {
         list("releases", decode_list::<Release>),
         list("hooks", decode_list::<Hook>),
         list("security_advisories", decode_list::<SecurityAdvisory>),
-        Endpoint {
-            dir: "topics",
-            shape: Shape::Names,
-            decode: decode_names,
-        },
         list("branches", decode_list::<Branch>),
         Endpoint {
             dir: "branch_protection",
             shape: Shape::Single,
-            decode: decode_single::<BranchProtection>,
+            decode: decode_single::<Value>,
         },
         list("deploy_keys", decode_list::<DeployKey>),
         list("collaborators", decode_list::<Collaborator>),
@@ -216,7 +197,6 @@ fn payload(shape: Shape, json: &Value) -> &Value {
 fn element_count(shape: Shape, payload: &Value) -> usize {
     match shape {
         Shape::Single => 1,
-        Shape::Names => payload["names"].as_array().map_or(0, Vec::len),
         Shape::List | Shape::Wrapped(_) => payload.as_array().map_or(0, Vec::len),
     }
 }
@@ -268,15 +248,15 @@ fn every_fixture_parses_and_is_written_back_exactly() {
         }
     }
     assert!(
-        checked >= 54,
-        "expected at least 54 fixtures, saw {checked}"
+        checked >= 53,
+        "expected at least 53 fixtures, saw {checked}"
     );
 }
 
 #[test]
 fn there_is_one_base_example_per_endpoint_and_no_orphan_fixture_directory() {
     let table: BTreeSet<&str> = endpoints().iter().map(|e| e.dir).collect();
-    assert_eq!(table.len(), 32, "32 endpoints are called by the client");
+    assert_eq!(table.len(), 31, "31 endpoints with fixtures");
 
     let on_disk: BTreeSet<String> = fs::read_dir(fixtures_dir())
         .expect("fixtures dir")
@@ -467,19 +447,6 @@ fn workflow_run_with_a_null_status() {
 
     assert_eq!(page.unparsed_count(), 0);
     assert!(page[0].status.is_none());
-}
-
-#[test]
-fn branch_protection_without_strict_parses() {
-    // The documented example (and the minimal variant) have no `strict`; this
-    // failed with "missing field `strict`" before it became optional.
-    for name in ["example", "minimal_no_strict"] {
-        let raw: Raw<BranchProtection> =
-            Raw::from_value(read_json("branch_protection", name)).expect(name);
-
-        let checks = raw.required_status_checks.as_ref().expect("status checks");
-        assert_eq!(checks.strict, None, "{name}");
-    }
 }
 
 #[test]

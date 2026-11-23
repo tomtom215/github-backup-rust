@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use github_backup_types::{
     config::{glob_match, BackupOptions, CloneType},
@@ -62,33 +62,45 @@ pub async fn backup_repository(
     Ok(())
 }
 
-/// Rewrites the hostname in a URL, returning the modified URL string.
-/// Exported as `pub(crate)` so that sibling backup modules (e.g. `wiki`) can
-/// apply the same `--clone-host` override without duplicating this logic.
+/// Rewrites the host (and, for a `host:port` value, the port) in a clone
+/// URL, returning the modified URL string.  Exported as `pub(crate)` so that
+/// sibling backup modules (e.g. `wiki`) can apply the same `--clone-host`
+/// override without duplicating this logic.
 ///
 /// Used to support GHES deployments where the API host and clone host differ.
-/// Returns the original URL unchanged if parsing or rewriting fails.
+/// `git@host:path` with a port becomes `ssh://git@host:port/path`: the scp-like
+/// form cannot carry a port.  A URL that cannot be rewritten is returned
+/// unchanged with a warning (never silently).
 pub(crate) fn rewrite_host(url: &str, new_host: &str) -> String {
-    // Handle ssh:// URLs and git@ URLs differently from HTTPS.
-    // For git@host:path syntax we do a simple prefix replacement.
+    let (host, port) = match new_host.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => match port.parse::<u16>() {
+            Ok(port) => (host, Some(port)),
+            Err(_) => (new_host, None),
+        },
+        _ => (new_host, None),
+    };
+    // git@<host>:<path>  →  git@<new_host>:<path>
     if let Some(rest) = url.strip_prefix("git@") {
-        // git@<host>:<path>  →  git@<new_host>:<path>
-        if let Some(colon_pos) = rest.find(':') {
-            return format!("git@{}:{}", new_host, &rest[colon_pos + 1..]);
+        if let Some((_, path)) = rest.split_once(':') {
+            return match port {
+                Some(port) => format!("ssh://git@{host}:{port}/{path}"),
+                None => format!("git@{host}:{path}"),
+            };
         }
-        return url.to_string();
     }
-    // HTTPS / SSH URLs: parse and replace host.
-    match Url::parse(url) {
-        Ok(mut parsed) => {
-            if parsed.set_host(Some(new_host)).is_ok() {
-                parsed.to_string()
-            } else {
-                url.to_string()
-            }
+    // HTTPS / ssh:// URLs: parse and replace host and port.
+    if let Ok(mut parsed) = Url::parse(url) {
+        if parsed.set_host(Some(host)).is_ok() && (port.is_none() || parsed.set_port(port).is_ok())
+        {
+            return parsed.to_string();
         }
-        Err(_) => url.to_string(),
     }
+    warn!(
+        url,
+        clone_host = new_host,
+        "cannot apply --clone-host to this URL; using it unchanged"
+    );
+    url.to_string()
 }
 
 /// Performs the git clone / update for a repository, dispatching on

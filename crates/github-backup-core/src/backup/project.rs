@@ -1,130 +1,139 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! GitHub Classic Projects (v1) backup.
+//! GitHub Projects (v2) backup.
 //!
-//! # Currently not functional against github.com
+//! Projects v2 belong to a user or an organisation, not to a repository, so
+//! this is owner-level data.  Through the REST API
+//! (`/users/{username}/projectsV2`, `/orgs/{org}/projectsV2`) it saves, under
+//! `<owner>/json/projects/`:
 //!
-//! GitHub sunset Classic Projects; the REST routes this module calls
-//! (`/repos/{owner}/{repo}/projects`, `/projects/{id}/columns`) are not part
-//! of the published API description of github.com, GHEC or GHES 3.17-3.19 and
-//! answer 404/410, so **nothing is backed up** there.  That is reported with
-//! one warning per run instead of passing silently; no project data is
-//! written.  (Projects v2 have different routes and are not implemented.)
-//! `projects.json` and per-project column files are only written if a server
-//! still implements the classic routes.
+//! - `projects.json` – every project;
+//! - `<number>/fields.json` – the project's fields (columns), built-in and
+//!   custom, with their options;
+//! - `<number>/items.json` – its items (issues, pull requests, draft issues)
+//!   with the value of every field.
+//!
+//! All three accumulate: they are merged by `id` with what earlier runs
+//! stored, so a deleted project, field or item stays in the backup.  Classic
+//! projects (v1) were sunset by GitHub and are not backed up.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use github_backup_client::BackupClient;
-use github_backup_types::config::BackupOptions;
+use github_backup_types::config::{BackupOptions, BackupTarget};
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{
+    backup::{
+        all_json, describe_unparsed, is_forbidden, is_gone, json_u64, merge::merge_and_write,
+        refused, Outcome,
+    },
+    error::CoreError,
+    storage::Storage,
+};
 
-/// Set once the "not supported" warning has been logged in this process.
-static WARNED: AtomicBool = AtomicBool::new(false);
+/// The most field ids one item listing can ask for (GitHub's limit).
+const MAX_FIELDS: usize = 50;
 
-/// Reports that `repo` has no classic-projects endpoint: one `warn!` per
-/// process, a `debug!` for every further repository.  Returns `true` for the
-/// call that warned.
-fn report_unsupported(warned: &AtomicBool, repo: &str) -> bool {
-    if warned.swap(true, Ordering::Relaxed) {
-        debug!(repo, "classic projects not backed up (no REST endpoint)");
-        false
-    } else {
-        warn!(
-            repo,
-            "--projects is not supported by the GitHub REST API: Classic Projects \
-             were sunset and Projects v2 are not implemented, so no projects are \
-             backed up (this warning is shown once per run)"
-        );
-        true
-    }
-}
+/// What a classic token needs to read projects.
+const NEEDS: &str = "the `read:project` scope";
 
-/// Backs up Classic Projects for a single repository.
+/// Backs up the Projects (v2) of `owner` into `json_dir/projects/`.
 ///
-/// When `opts.projects` is enabled:
-/// - Writes `meta_dir/projects.json` with all project objects.
-/// - For each project, writes `meta_dir/project_columns_<id>.json` with the
-///   columns and their cards.
-///
-/// Returns the number of projects backed up.
+/// Returns the number of projects.  A project whose fields or items cannot
+/// be fetched is recorded in [`Outcome::failed`] and the others are still
+/// backed up.  When the listing answers 404 (no projects API, e.g. an old
+/// GitHub Enterprise Server) nothing is written.  A 403 refusal is handled as
+/// described for [`BackupOptions::tolerate_forbidden`].
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from storage writes or non-403/404 API errors.
+/// Propagates [`CoreError`] from the project listing or storage writes, and
+/// any fatal error.
 pub async fn backup_projects(
     client: &impl BackupClient,
     owner: &str,
-    repo_name: &str,
     opts: &BackupOptions,
-    meta_dir: &Path,
+    json_dir: &Path,
     storage: &impl Storage,
-) -> Result<u64, CoreError> {
-    if !opts.projects {
-        return Ok(0);
+) -> Result<Outcome, CoreError> {
+    let mut outcome = Outcome::default();
+    if !opts.projects || opts.dry_run {
+        return Ok(outcome);
     }
+    let org = opts.target == BackupTarget::Org;
 
-    let projects = match client.list_repo_projects(owner, repo_name).await {
-        Ok(p) => p,
-        Err(github_backup_client::ClientError::ApiError {
-            status: 404 | 410, ..
-        }) => {
-            report_unsupported(&WARNED, &format!("{owner}/{repo_name}"));
-            return Ok(0);
+    let projects = match client.list_projects(owner, org).await {
+        Ok(projects) => projects,
+        Err(e) => {
+            let e = CoreError::from(e);
+            if is_gone(&e) {
+                info!(owner, "no Projects (v2) API here; skipping projects");
+                return Ok(outcome);
+            }
+            if is_forbidden(&e) {
+                refused(opts, "projects", NEEDS, e, true)?;
+                return Ok(outcome);
+            }
+            return Err(e);
         }
-        Err(github_backup_client::ClientError::ApiError { status: 403, .. }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping classic projects (insufficient permissions)"
-            );
-            return Ok(0);
-        }
-        Err(e) => return Err(e.into()),
     };
+    outcome.count = (projects.len() + projects.unparsed_count()) as u64;
+    let dir = json_dir.join("projects");
+    merge_and_write(storage, &dir.join("projects.json"), &projects, "id")?;
 
-    let count = projects.len() as u64;
-    info!(
-        owner,
-        repo = repo_name,
-        count,
-        "backing up classic projects"
-    );
-    storage.write_json(&meta_dir.join("projects.json"), &projects)?;
+    for project in all_json(&projects) {
+        let Some(number) = json_u64(project, "number") else {
+            outcome.fail(
+                format!("project ({})", describe_unparsed(project)),
+                "the API object has no `number`, so its fields and items cannot be fetched",
+            );
+            continue;
+        };
+        let project_dir = dir.join(number.to_string());
 
-    // Back up columns for each project.
-    for project in &projects {
-        let columns = match client.list_project_columns(project.id).await {
-            Ok(c) => c,
-            Err(github_backup_client::ClientError::ApiError {
-                status: 403 | 404 | 410,
-                ..
-            }) => {
-                info!(
-                    project_id = project.id,
-                    "skipping project columns (not available)"
-                );
+        let fields = match client.list_project_fields(owner, org, number).await {
+            Ok(fields) => fields,
+            Err(e) => {
+                outcome.item_error(format!("project {number} fields"), e)?;
                 continue;
             }
-            Err(e) => return Err(e.into()),
         };
+        merge_and_write(storage, &project_dir.join("fields.json"), &fields, "id")?;
 
-        let filename = format!("project_columns_{}.json", project.id);
-        storage.write_json(&meta_dir.join(&filename), &columns)?;
-        info!(
-            owner,
-            repo = repo_name,
-            project_id = project.id,
-            column_count = columns.len(),
-            "saved project columns"
-        );
+        let mut field_ids: Vec<u64> = all_json(&fields)
+            .filter_map(|f| json_u64(f, "id"))
+            .collect();
+        if field_ids.len() > MAX_FIELDS {
+            warn!(
+                owner,
+                project = number,
+                fields = field_ids.len(),
+                "project has more fields than one item listing can return"
+            );
+            outcome.fail(
+                format!("project {number} items"),
+                format!(
+                    "the project has {} fields and GitHub returns the values of at most \
+                     {MAX_FIELDS}; the values of the others are not backed up",
+                    field_ids.len()
+                ),
+            );
+            field_ids.truncate(MAX_FIELDS);
+        }
+        match client
+            .list_project_items(owner, org, number, &field_ids)
+            .await
+        {
+            Ok(items) => merge_and_write(storage, &project_dir.join("items.json"), &items, "id")?,
+            Err(e) => outcome.item_error(format!("project {number} items"), e)?,
+        }
     }
 
-    Ok(count)
+    info!(owner, count = outcome.count, "backed up projects");
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -132,135 +141,124 @@ mod tests {
     use super::*;
     use crate::backup::mock_client::MockBackupClient;
     use crate::storage::test_support::MemStorage;
-    use github_backup_types::config::BackupOptions;
-    use github_backup_types::project::{ClassicProject, ProjectColumn};
-    use github_backup_types::user::User;
+    use serde_json::{json, Value};
     use std::path::PathBuf;
 
-    fn make_user() -> User {
-        User {
-            login: "octocat".to_string(),
-            id: 1,
-            avatar_url: "https://github.com/images/error/octocat_happy.gif".to_string(),
-            html_url: "https://github.com/octocat".to_string(),
-            user_type: "User".to_string(),
+    fn opts() -> BackupOptions {
+        BackupOptions {
+            projects: true,
+            ..Default::default()
         }
     }
 
-    fn make_project(id: u64, name: &str) -> ClassicProject {
-        ClassicProject {
-            id,
-            number: id,
-            name: name.to_string(),
-            body: Some("Project body".to_string()),
-            state: "open".to_string(),
-            creator: make_user(),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
-            html_url: format!("https://github.com/octocat/repo/projects/{id}"),
-            open_issues_count: Some(0),
-        }
-    }
-
-    fn make_column(id: u64, name: &str) -> ProjectColumn {
-        ProjectColumn {
-            id,
-            name: name.to_string(),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
-            cards: vec![],
-        }
-    }
-
-    #[test]
-    fn unsupported_warning_is_given_once_per_process() {
-        let flag = AtomicBool::new(false);
-
-        assert!(report_unsupported(&flag, "o/a"), "first repository warns");
-        assert!(!report_unsupported(&flag, "o/b"), "later ones stay quiet");
+    fn read(storage: &MemStorage, path: &str) -> Value {
+        serde_json::from_slice(&storage.get(&PathBuf::from(path)).expect(path)).expect("json")
     }
 
     #[tokio::test]
-    async fn backup_projects_disabled_writes_nothing() {
-        let client = MockBackupClient::new();
+    async fn disabled_writes_nothing() {
         let storage = MemStorage::default();
-        let opts = BackupOptions::default(); // projects: false
-
-        let count = backup_projects(
-            &client,
-            "octocat",
-            "repo",
-            &opts,
-            &PathBuf::from("/meta"),
+        let outcome = backup_projects(
+            &MockBackupClient::new(),
+            "o",
+            &BackupOptions::default(),
+            &PathBuf::from("/json"),
             &storage,
         )
         .await
-        .expect("backup_projects");
-
-        assert_eq!(count, 0);
+        .expect("ok");
+        assert_eq!(outcome, Outcome::default());
         assert_eq!(storage.len(), 0);
     }
 
     #[tokio::test]
-    async fn backup_projects_enabled_writes_json() {
-        let p = make_project(1, "Roadmap");
+    async fn projects_fields_and_items_with_values_are_stored_as_served() {
         let client = MockBackupClient::new()
-            .with_repo_projects(vec![p])
-            .with_project_columns(vec![make_column(10, "To Do"), make_column(11, "Done")]);
+            .with_raw(
+                "projects",
+                vec![json!({"id": 10, "number": 2, "title": "Roadmap"})],
+            )
+            .with_raw(
+                "project_fields",
+                vec![json!({"id": 100, "name": "Status", "data_type": "single_select"})],
+            )
+            .with_raw(
+                "project_items",
+                vec![json!({"id": 7, "content_type": "Issue",
+                            "fields": [{"id": 100, "name": "Status", "value": "Done"}]})],
+            );
         let storage = MemStorage::default();
-        let opts = BackupOptions {
-            projects: true,
-            ..Default::default()
-        };
+        let outcome = backup_projects(&client, "o", &opts(), &PathBuf::from("/json"), &storage)
+            .await
+            .expect("ok");
 
-        let count = backup_projects(
-            &client,
-            "octocat",
-            "repo",
-            &opts,
-            &PathBuf::from("/meta"),
-            &storage,
-        )
-        .await
-        .expect("backup_projects");
-
-        assert_eq!(count, 1);
-        assert!(
-            storage.get(&PathBuf::from("/meta/projects.json")).is_some(),
-            "projects.json should be written"
+        assert_eq!(outcome.count, 1);
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(
+            read(&storage, "/json/projects/projects.json")[0]["title"],
+            "Roadmap"
         );
-        assert!(
-            storage
-                .get(&PathBuf::from("/meta/project_columns_1.json"))
-                .is_some(),
-            "project_columns_1.json should be written"
+        assert_eq!(read(&storage, "/json/projects/2/fields.json")[0]["id"], 100);
+        assert_eq!(
+            read(&storage, "/json/projects/2/items.json")[0]["fields"][0]["value"],
+            "Done"
+        );
+        assert_eq!(
+            client.project_item_field_ids(),
+            vec![vec![100]],
+            "items are asked for with every field's value"
         );
     }
 
     #[tokio::test]
-    async fn backup_projects_empty_list_writes_file() {
-        let client = MockBackupClient::new(); // returns empty projects
-        let storage = MemStorage::default();
-        let opts = BackupOptions {
-            projects: true,
-            ..Default::default()
-        };
-
-        let count = backup_projects(
+    async fn a_refusal_fails_when_requested_and_is_skipped_under_all() {
+        let client = MockBackupClient::new().with_error("projects", 403);
+        let err = backup_projects(
             &client,
-            "octocat",
-            "repo",
-            &opts,
-            &PathBuf::from("/meta"),
-            &storage,
+            "o",
+            &opts(),
+            &PathBuf::from("/json"),
+            &MemStorage::default(),
         )
         .await
-        .expect("backup_projects");
+        .expect_err("explicit --projects: failure");
+        assert!(err.to_string().contains("read:project"), "{err}");
 
-        assert_eq!(count, 0);
-        assert!(
-            storage.get(&PathBuf::from("/meta/projects.json")).is_some(),
-            "projects.json should still be written for empty list"
-        );
+        let all = BackupOptions {
+            tolerate_forbidden: true,
+            ..opts()
+        };
+        backup_projects(
+            &client,
+            "o",
+            &all,
+            &PathBuf::from("/json"),
+            &MemStorage::default(),
+        )
+        .await
+        .expect("--all: skipped");
+    }
+
+    #[tokio::test]
+    async fn one_project_that_fails_does_not_stop_the_others() {
+        let client = MockBackupClient::new()
+            .with_raw(
+                "projects",
+                vec![
+                    json!({"id": 1, "number": 1}),
+                    json!({"id": 2, "number": 2}),
+                    json!({"id": 3}),
+                ],
+            )
+            .with_error("project_fields:1", 500);
+        let storage = MemStorage::default();
+        let outcome = backup_projects(&client, "o", &opts(), &PathBuf::from("/json"), &storage)
+            .await
+            .expect("ok");
+        let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(whats, ["project 1 fields", "project (id 3)"]);
+        assert!(storage
+            .get(&PathBuf::from("/json/projects/2/items.json"))
+            .is_some());
     }
 }
