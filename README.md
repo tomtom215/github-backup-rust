@@ -246,6 +246,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |
 | Git mirroring | Branches and tags pushed to Gitea, Codeberg, Forgejo or GitLab |
 | Restore | Labels, milestones and issues re-created from the local backup (`--restore`) |
+| HTML viewer | The backup as a static, offline website: issues, pull requests with reviews, releases, gists (`--render-html`) |
 | Auth | Personal access token, OAuth device flow, or anonymous |
 | GitHub Enterprise | `--api-url` and `--clone-host` for GHES |
 | Config file | TOML (the command line wins for single values; switches and lists combine) |
@@ -286,6 +287,7 @@ The full documentation is in the **[GitHub Book](https://tomtom215.github.io/git
 | At-Rest Encryption | [storage/encryption](https://tomtom215.github.io/github-backup-rust/storage/encryption.html) |
 | Mirroring | [mirroring](https://tomtom215.github.io/github-backup-rust/mirroring.html) |
 | Monitoring and Incremental Runs | [monitoring](https://tomtom215.github.io/github-backup-rust/monitoring.html) |
+| HTML Viewer | [viewer](https://tomtom215.github.io/github-backup-rust/viewer.html) |
 | Restore | [restore](https://tomtom215.github.io/github-backup-rust/restore.html) |
 | Operations Runbook | [ops-runbook](https://tomtom215.github.io/github-backup-rust/ops-runbook.html) |
 | Docker | [docker](https://tomtom215.github.io/github-backup-rust/docker.html) |
@@ -381,6 +383,7 @@ crates/
 ├── github-backup-mirror/    Push mirrors to Gitea / Forgejo / Codeberg / GitLab
 ├── github-backup-s3/        S3-compatible storage (pure-Rust SigV4), encryption
 ├── github-backup-tui/       Ratatui TUI front-end (--tui flag)
+├── github-backup-viewer/    Static HTML site from a backup (--render-html)
 └── github-backup/           CLI binary (clap)
 docs/                        mdBook documentation source
 ```

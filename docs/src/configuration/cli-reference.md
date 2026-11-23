@@ -10,6 +10,7 @@ it.
 ```
 github-backup [OPTIONS] [OWNER]
 github-backup [OWNER] --tui
+github-backup OWNER --render-html[=SITE_DIR]
 github-backup --config <FILE> [OPTIONS]
 github-backup --completions <SHELL>
 github-backup --print-config-template
@@ -18,7 +19,7 @@ github-backup --print-config-template
 With no options at all, `github-backup` backs up **everything** the token can
 reach for the account the token belongs to, into the current directory.  The
 modes `--tui`, `--list-scopes`, `--doctor`, `--check`, `--verify`, `--decrypt`,
-`--restore`, `--every`, `--print-config-template` and `--completions` exclude
+`--render-html`, `--restore`, `--every`, `--print-config-template` and `--completions` exclude
 one another.
 
 ## Arguments
@@ -271,6 +272,12 @@ See the [Restore guide](../restore.md).
 | `--manifest` | `false` | After the run, write `json/backup_manifest.json` with the SHA-256 of every data file under `json/` (not the history, state, checkpoint and lock files, which change on every run, nor temporary files). |
 | `--verify` | `false` | Check the manifest of an existing backup and exit.  Needs OWNER (and `--output` unless the backup is in the current directory); no network.  Covers the files under `json/` only, not the git clones. |
 
+## HTML Viewer
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--render-html[=SITE_DIR]` | off; `SITE_DIR` defaults to `<output>/<owner>/site` | Render the existing backup as a static HTML site that works offline, and exit.  Needs OWNER (and `--output` unless the backup is in the current directory); no network.  The directory is given with `=` only.  An earlier render is replaced; any other non-empty directory is refused.  Exits `3` when some backup files could not be read.  See [Browsing a Backup](../viewer.md). |
+
 ## Monitoring
 
 | Flag | Env var | Default | Description |
@@ -376,9 +383,9 @@ network access.  Supported shells: `bash`, `zsh`, `fish`, `powershell`,
 | Code | Meaning |
 |------|---------|
 | `0` | Everything that was asked for succeeded. |
-| `1` | The run could not be carried out: bad configuration or arguments that the tool detects itself, rejected credentials, the repository list could not be fetched, another run holds the lock, the disk is full, a failed `--verify`, `--doctor` or `--decrypt`, or a restore that could not start. |
+| `1` | The run could not be carried out: bad configuration or arguments that the tool detects itself, rejected credentials, the repository list could not be fetched, another run holds the lock, the disk is full, a failed `--verify`, `--doctor`, `--decrypt` or `--render-html`, or a restore that could not start. |
 | `2` | Usage error reported by the argument parser (unknown flag, missing value, conflicting flags). |
-| `3` | The run finished but something could not be backed up: a repository, an issue list, an S3 upload, a mirror push, the manifest.  The backup is **incomplete**.  Re-running retries only what failed.  `--restore` also exits `3` when some items could not be restored. |
+| `3` | The run finished but something could not be backed up: a repository, an issue list, an S3 upload, a mirror push, the manifest.  The backup is **incomplete**.  Re-running retries only what failed.  `--restore` also exits `3` when some items could not be restored, and `--render-html` when some backup files could not be read. |
 | `130` / `143` | Interrupted by `SIGINT` / `SIGTERM`, during the backup or the post-processing (mirror push, S3 sync, notification).  The history, `--report` and metrics are still written, marked unsuccessful, and the webhook is told `interrupted`.  With `--every`, a signal while waiting for the next run exits `0`. |
 | `64` | Container entrypoint only: refused a malformed `UMASK`, or a `BACKUP_MODE` that does not start with `--`. |
 
