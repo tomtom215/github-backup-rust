@@ -55,9 +55,19 @@ How the clone types behave in detail:
   `git-lfs` on the `PATH`; without `--lfs` the clone holds LFS pointer files
   only, not the large objects.
 * A `git` command that prints no output for 10 minutes is treated as stalled
-  and killed; a clone that keeps making progress can take as long as it needs.
+  and stopped (`SIGTERM`, then `SIGKILL` two seconds later); a clone that keeps
+  making progress can take as long as it needs.  `git lfs` is told to report
+  progress too (`GIT_LFS_FORCE_PROGRESS=1`).
+* Before updating a repository, `.lock` files that a killed `git` left in it
+  (under `refs/`, or `packed-refs.lock`, `index.lock` and the like) are
+  removed when they are older than the stall limit; a younger one fails the
+  update with a hint instead.
 * `--prefer-ssh` clones over SSH; the token is then not used for git and git
-  needs working SSH credentials.
+  needs working SSH credentials.  Unless you set `GIT_SSH_COMMAND`, `GIT_SSH`
+  or `core.sshCommand` yourself, `ssh` runs with `-o BatchMode=yes`: an unknown
+  host key or a key with a passphrase fails the clone instead of waiting for an
+  answer.  Put the host keys in `known_hosts` and use a key without a
+  passphrase (or an agent).
 
 Example:
 ```bash

@@ -192,7 +192,9 @@ the credentials of each profile; add any other variable (for example
   environment variable and a host-scoped credential helper; it is not written to
   a file and not placed in any argument list.
 * **SSH**: `--prefer-ssh` needs keys and a `known_hosts` file; the image ships
-  none.  Mount them and point `GIT_SSH_COMMAND` at them.
+  none.  Mount them and point `GIT_SSH_COMMAND` at them (include
+  `-o BatchMode=yes`: without a `GIT_SSH_COMMAND` the tool adds it itself, with
+  one it uses yours unchanged).
 * **tini as PID 1** forwards `SIGTERM` (`docker stop`, pod eviction) to the
   backup, which stops its `git` processes, releases its locks and exits with `143`
   within a few seconds, well inside Docker's default 10 s grace period.  The

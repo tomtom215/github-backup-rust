@@ -48,6 +48,7 @@ pub(crate) mod spy;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use tracing::{debug, info, warn};
 
@@ -476,6 +477,7 @@ impl Job {
     /// the stale one exists.  Such a fetch is repeated once with `--prune`, so
     /// the repository keeps being backed up; it loses only the stale refs.
     fn fetch(&self, rest: &[&str]) -> Result<(), CoreError> {
+        remove_stale_locks(&self.dest, self.stale_lock_age());
         let run = |prune: bool| {
             let mut args = vec!["fetch", "--progress"];
             if prune {
@@ -498,6 +500,18 @@ impl Job {
             }
             other => other,
         }
+    }
+
+    /// How old a `.lock` file must be to count as left behind by a git that
+    /// was killed.
+    ///
+    /// git holds a lock for the moment it takes to write one file.  The owner
+    /// lock keeps other runs of this tool away from the repository, and any git
+    /// this tool runs is stopped after the stall limit; a lock older than that
+    /// limit therefore belongs to no live git of ours, and removing it is what
+    /// lets the update proceed (git asks for exactly that).
+    fn stale_lock_age(&self) -> Duration {
+        Duration::from_secs(self.opts.stall_timeout_secs)
     }
 
     /// Brings the working tree of a full clone to the commit its checked-out
@@ -599,6 +613,54 @@ const DEST: &str = "\0dest";
 /// Infix of a staging directory's name: `.<repo>.git.partial-<pid>`.
 const STAGING_MARKER: &str = ".partial-";
 
+/// Removes the `.lock` files older than `min_age` from the git directory of
+/// the repository at `repo` (`repo/.git` for a working-tree clone): those at
+/// its top level (`HEAD.lock`, `packed-refs.lock`, `config.lock`,
+/// `shallow.lock`, `index.lock`, ...) and those under `refs/`.
+///
+/// A git that is killed with `SIGKILL` (by the OOM killer, or with the whole
+/// container) leaves its lock files behind, and every later update of the
+/// repository then fails with "Unable to create '...lock': File exists".
+fn remove_stale_locks(repo: &Path, min_age: Duration) {
+    let dot_git = repo.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        repo.to_path_buf()
+    };
+    let mut dirs = vec![(git_dir.clone(), false), (git_dir.join("refs"), true)];
+    while let Some((dir, recurse)) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if recurse {
+                    dirs.push((path, true));
+                }
+                continue;
+            }
+            let is_lock = path.extension().is_some_and(|ext| ext == "lock");
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| SystemTime::now().duration_since(m).ok());
+            if is_lock && age.is_some_and(|age| age >= min_age) {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        warn!(file = %path.display(), "removed a stale git lock file left by a killed git")
+                    }
+                    Err(e) => {
+                        warn!(file = %path.display(), error = %e, "could not remove a stale git lock file")
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Removes every `.<name>.partial-*` sibling in `parent`.
 fn remove_stale_staging(parent: &Path, name: &str) {
     let prefix = format!(".{name}{STAGING_MARKER}");
@@ -668,15 +730,26 @@ fn run_fsck(git: &GitCommand, repo_dir: &Path) {
 
 /// `true` if a failed fetch was blocked by a stale ref occupying the name a
 /// new ref needs (a directory/file clash between `foo` and `foo/bar`).
+///
+/// Only that clash qualifies.  "cannot lock ref" alone also covers a lock
+/// file left by a killed git ("Unable to create '...main.lock': File
+/// exists"), which pruning cannot fix: it would delete kept refs and fail
+/// again.
 fn is_ref_name_conflict(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    lower.contains("cannot lock ref") || lower.contains("git remote prune")
+    stderr.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        (line.contains("cannot lock ref")
+            && (line.contains("' exists; cannot create '") || line.contains("blocking reference")))
+            // git's own advice, printed for this clash only.
+            || line.contains("'git remote prune")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::spy::SpyGitRunner;
     use super::*;
+    use crate::cancel::CancelFlag;
     use std::time::{Duration, Instant};
 
     fn opts() -> CloneOptions {
@@ -1044,6 +1117,7 @@ exit 128"#,
             dir.path(),
             &format!(
                 r#"{{ echo "prompt=$GIT_TERMINAL_PROMPT"; echo "lc=$LC_ALL"; \
+echo "lfs=$GIT_LFS_FORCE_PROGRESS"; echo "ssh=$GIT_SSH_COMMAND"; \
 if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
                 seen.display()
             ),
@@ -1057,6 +1131,122 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
         assert!(text.contains("prompt=0"), "{text}");
         assert!(text.contains("lc=C"), "{text}");
         assert!(text.contains("stdin=none"), "{text}");
+        // git-lfs prints no progress without a terminal, which looked like a
+        // stall to the supervisor.
+        assert!(text.contains("lfs=1"), "{text}");
+        assert!(
+            text.contains("ssh=\n"),
+            "HTTPS needs no SSH command: {text}"
+        );
+    }
+
+    /// Regression: with `--prefer-ssh`, ssh asked about an unknown host key or
+    /// a key passphrase on the controlling terminal, and git, in a background
+    /// process group, was stopped by `SIGTTIN` for good.  ssh now runs in
+    /// batch mode unless the user configured an SSH command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_runs_in_batch_mode_unless_the_user_chose_a_command() {
+        if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return; // the user's choice wins; nothing to observe here
+        }
+        for (configured, expected) in [(false, "ssh -o BatchMode=yes"), (true, "")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let seen = dir.path().join("seen.txt");
+            let config_status = if configured { 0 } else { 1 };
+            let runner = runner_with_script(
+                dir.path(),
+                &format!(
+                    r#"if [ "$1" = config ]; then exit {config_status}; fi
+echo "ssh=$GIT_SSH_COMMAND" > '{}'"#,
+                    seen.display()
+                ),
+            );
+            runner
+                .mirror_clone(
+                    "git@github.com:o/r.git",
+                    &dir.path().join("r.git"),
+                    &with_stall(10),
+                )
+                .await
+                .expect("ok");
+            let text = std::fs::read_to_string(&seen).expect("script output");
+            assert_eq!(
+                text.trim(),
+                format!("ssh={expected}"),
+                "core.sshCommand configured: {configured}"
+            );
+        }
+    }
+
+    /// Regression: a stopped git was sent `SIGKILL` at once, so it never
+    /// removed its `.lock` files and every later update of the repository
+    /// failed.  The process group now gets `SIGTERM` and a grace period.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_git_gets_sigterm_and_time_to_clean_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = dir.path().join("started");
+        let cleaned = dir.path().join("cleaned");
+        let runner = runner_with_script(
+            dir.path(),
+            &format!(
+                "trap 'touch \"{}\"; exit 143' TERM\ntouch '{}'\nsleep 30 &\nwait",
+                cleaned.display(),
+                started.display()
+            ),
+        );
+        let cancel = CancelFlag::new();
+        let opts = CloneOptions {
+            cancel: cancel.clone(),
+            ..with_stall(60)
+        };
+        let dest = dir.path().join("repo.git");
+        let task = {
+            let runner = runner.clone();
+            let dest = dest.clone();
+            let opts = opts.clone();
+            tokio::spawn(async move {
+                runner
+                    .mirror_clone("https://example.invalid/r.git", &dest, &opts)
+                    .await
+            })
+        };
+        let t0 = Instant::now();
+        while !started.exists() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cancel.cancel();
+        let result = task.await.expect("no panic");
+        assert!(matches!(result, Err(CoreError::Interrupted)), "{result:?}");
+        assert!(
+            cleaned.exists(),
+            "the child must get SIGTERM, not only SIGKILL"
+        );
+    }
+
+    /// A child that ignores `SIGTERM` is still stopped, after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_ignoring_sigterm_is_killed_after_the_grace_period() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(dir.path(), "trap '' TERM\nwhile :; do sleep 1; done");
+        let started = Instant::now();
+        let err = runner
+            .mirror_clone(
+                "https://example.invalid/r.git",
+                &dir.path().join("r.git"),
+                &with_stall(1),
+            )
+            .await
+            .expect_err("stopped");
+        assert!(matches!(err, CoreError::GitTimeout { .. }), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// Network operations pass `--progress` so a stall can be told apart from
@@ -1622,15 +1812,117 @@ mod prune_tests {
 
     #[test]
     fn only_ref_name_clashes_trigger_the_pruning_retry() {
+        // What git 2.43 prints for both directions of the clash.
         assert!(is_ref_name_conflict(
-            "error: cannot lock ref 'refs/heads/foo/bar': 'refs/heads/foo' exists"
+            "error: cannot lock ref 'refs/heads/foo/bar': 'refs/heads/foo' exists; cannot create 'refs/heads/foo/bar'"
         ));
         assert!(is_ref_name_conflict(
-            "error: some local refs could not be updated; try running\n 'git remote prune origin'"
+            "error: cannot lock ref 'refs/heads/x': 'refs/heads/x/y' exists; cannot create 'refs/heads/x'"
+        ));
+        assert!(is_ref_name_conflict(
+            "error: cannot lock ref 'refs/heads/x': there is a non-empty directory '/b/refs/heads/x' blocking reference 'refs/heads/x'"
+        ));
+        assert!(is_ref_name_conflict(
+            "error: some local refs could not be updated; try running\n 'git remote prune origin' to remove any old, conflicting branches"
         ));
         assert!(!is_ref_name_conflict("fatal: repository not found"));
         assert!(!is_ref_name_conflict(
             "fatal: unable to access: could not resolve host"
         ));
+        // A lock file left by a killed git is not a name clash: pruning
+        // would delete kept refs and fail again.
+        assert!(!is_ref_name_conflict(
+            "error: cannot lock ref 'refs/heads/main': Unable to create '/b/r.git/./refs/heads/main.lock': File exists.\n\
+             \nAnother git process seems to be running in this repository, e.g.\n\
+             an editor opened by 'git commit'. Please make sure all processes\n\
+             are terminated then try again. If it still fails, a git process\n\
+             may have crashed in this repository earlier:\n\
+             remove the file manually to continue.\n\
+              ! 05e71f7..93011c4  main       -> main  (unable to update local ref)"
+        ));
+    }
+
+    /// Ages `path` by `secs` seconds.
+    fn backdate(path: &Path, secs: u64) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open");
+        file.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .expect("set mtime");
+    }
+
+    /// Regression: a git killed with `SIGKILL` leaves `refs/heads/main.lock`;
+    /// the "cannot lock ref" error was taken for a name clash, the update was
+    /// retried with `--prune` (deleting kept refs) and failed again on every
+    /// run.  A lock older than the stall limit is now removed first; a recent
+    /// one is left alone and the failure is reported, refs intact.
+    #[tokio::test]
+    async fn a_stale_ref_lock_is_removed_and_a_recent_one_is_not_pruned_around() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = origin_with_branches(dir.path(), &["kept"]);
+        let origin = dir.path().join("origin");
+        let dest = dir.path().join("mirror.git");
+        mirror(&url, &dest, false).await.expect("clone");
+        git(&origin, &["branch", "-D", "kept"]);
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "next"]);
+
+        // A lock left by a git that is still (or was very recently) running.
+        let lock = dest.join("refs").join("heads").join("main.lock");
+        std::fs::write(&lock, "").expect("lock");
+        let err = mirror(&url, &dest, false)
+            .await
+            .expect_err("a held lock fails the update");
+        assert!(
+            err.to_string().contains("hint: a git process holds"),
+            "{err}"
+        );
+        assert!(lock.exists(), "a recent lock must not be removed");
+        assert!(
+            refs(&dest).contains(&"kept".to_owned()),
+            "the failure must not be 'fixed' by pruning: {:?}",
+            refs(&dest)
+        );
+
+        // The same lock, left by a git killed long ago.
+        backdate(&lock, 2 * DEFAULT_STALL_TIMEOUT_SECS);
+        mirror(&url, &dest, false).await.expect("update");
+        assert!(!lock.exists());
+        assert_eq!(
+            git(&dest, &["rev-parse", "main"]),
+            git(&origin, &["rev-parse", "main"])
+        );
+        assert!(refs(&dest).contains(&"kept".to_owned()));
+    }
+
+    #[test]
+    fn only_old_lock_files_in_the_git_directory_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("work");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/heads/feature")).expect("mkdir");
+        let old = [
+            git_dir.join("index.lock"),
+            git_dir.join("packed-refs.lock"),
+            git_dir.join("refs/heads/feature/x.lock"),
+        ];
+        let young = git_dir.join("HEAD.lock");
+        let not_a_lock = git_dir.join("refs/heads/main");
+        let outside = repo.join("notes.lock");
+        for path in old.iter().chain([&young, &not_a_lock, &outside]) {
+            std::fs::write(path, "").expect("write");
+        }
+        for path in old.iter().chain([&not_a_lock, &outside]) {
+            backdate(path, 3600);
+        }
+
+        remove_stale_locks(&repo, Duration::from_secs(600));
+
+        for path in &old {
+            assert!(!path.exists(), "{} must be removed", path.display());
+        }
+        assert!(young.exists(), "a recent lock may belong to a live git");
+        assert!(not_a_lock.exists());
+        assert!(outside.exists(), "the working tree is not touched");
     }
 }

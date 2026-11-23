@@ -110,7 +110,9 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   tags, then `reset --hard`; shallow: `--depth`; `--lfs`: mirror update plus
   `git lfs fetch --all`).
   Each `git` runs in its own process group with a **stall** timeout (600 s without
-  output), is killed with its helpers on cancellation, and receives the token only
+  output), is stopped with its helpers on cancellation (`SIGTERM`, `SIGKILL` 2 s
+  later), never waits for a prompt (`ssh -o BatchMode=yes` unless the user set an
+  SSH command), and receives the token only
   through an environment variable and a host-scoped credential helper (`credential.rs`).
   `-c safe.directory=<path>` trusts exactly the repository being worked on.
 - **Cancellation** (`cancel.rs`): a flag that kills running git processes and makes

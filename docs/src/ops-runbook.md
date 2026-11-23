@@ -69,8 +69,11 @@ The operating-system lock is released by the kernel, so **no stale lock
 exists** and nothing has to be deleted before the next run (the lock files
 stay on disk; they are only markers).  A `git` process may keep running for a
 while after its parent was killed (it is not told to stop); it ends on its own,
-and the next run removes leftover staging directories.  Start the next run
-normally.
+and the next run removes leftover staging directories.  A `git` killed with the
+process can leave `.lock` files inside a repository; the next run removes those
+older than the stall limit (10 minutes) before it updates the repository, and
+a run started sooner reports that repository as failed with a hint.  Start the
+next run normally.
 
 ---
 
