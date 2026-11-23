@@ -57,6 +57,7 @@ labels and milestones that were deleted on GitHub after they were backed up.
 <output>/
 ├── .github-backup.lock                     ← process lock (stays on disk, see below)
 └── <owner>/                                ← GitHub username or org name
+    ├── site/                               ← --render-html: the backup as a website
     ├── git/                                ← Git repositories
     │   ├── repos/
     │   │   ├── <repo>.git/                 ← mirror clone (default); bare, shallow, --lfs too

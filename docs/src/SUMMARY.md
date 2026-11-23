@@ -49,6 +49,7 @@
 
 # Restore & Recovery
 
+- [Browsing a Backup (HTML Viewer)](viewer.md)
 - [Restore Guide](restore.md)
 - [Operations Runbook](ops-runbook.md)
 
