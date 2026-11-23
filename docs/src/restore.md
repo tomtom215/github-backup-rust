@@ -3,7 +3,8 @@
 This guide covers getting data back: the automated `--restore` mode (labels,
 milestones, issues), the manual procedures for everything else, and decrypting
 S3 objects.  Read [What Is Not Backed Up](#what-is-not-restored-or-not-backed-up)
-before you rely on any of it.
+before you rely on any of it.  To read a backup rather than restore it, render it
+as a website with `--render-html` (see [Browsing a Backup](viewer.md)).
 
 ---
 

@@ -114,6 +114,33 @@ is bumped.
 
 ### Added
 
+- **`--render-html[=DIR]`** turns a backup into a static website you can read
+  offline (default `<output>/<owner>/site`): repositories, issues and pull
+  requests with comments, events, reviews, review comments and commits,
+  releases linked to their downloaded assets, labels, milestones, discussions,
+  gists, projects and the account lists.  No JavaScript, a strict
+  Content-Security-Policy and escaped HTML make the pages safe to open; a
+  re-render of the same backup is byte-identical.  New crate
+  `github-backup-viewer`.
+- **Discussions** (`--discussions`, part of the default backup) through the
+  GraphQL API: every discussion with labels, poll, reactions and answer, every
+  comment with all its replies, and the categories (`discussions.json`,
+  `discussion_comments/<n>.json`, `discussion_categories.json`).
+- **Attachments** (`--attachments`, part of the default backup): files and
+  images attached to issues, pull requests, discussions, comments, reviews,
+  commit comments and release notes are downloaded to
+  `repos/<repo>/attachments/<sha256>.<ext>` with an `attachments/index.json`.
+  Only GitHub's attachment hosts are contacted, files are capped at 100 MiB and
+  the stored JSON is left as GitHub sent it.  Attachments of private
+  repositories need a classic token; fine-grained and App tokens are reported to
+  get 404, which is recorded as missing and retried after 30 days or with
+  `--full`.
+- **GitHub App authentication** (`--app-id`, `--app-key`,
+  `--app-installation-id`, the `GITHUB_APP_*` variables and `app_*` config keys)
+  for unattended organisation backups.  Installation tokens are renewed before
+  they expire, once for all workers, for API requests and every git process;
+  `--doctor` checks the App, its installation and its permissions.
+
 - **Projects (v2)** of the owner, with their fields and every item's field
   values (`json/projects/`); **repository rulesets** (`rulesets.json`);
   **commit comments** (`--commit-comments`, `commit_comments.json`); **gist
@@ -208,6 +235,15 @@ is bumped.
 - **Docker, Compose and Unraid**: see Packaging below.
 
 ### Changed
+
+- **Repeat runs ask only for what changed.**  Issues are listed with `since`
+  and pull requests newest-updated first until older ones, and both are merged
+  into the stored lists; `git fetch` is skipped for a repository nothing was
+  pushed to since its last clean backup when its clone is on disk and was
+  fetched within the last 7 days (wikis are always fetched).  An unchanged
+  repository costs about 18 requests whatever its size, instead of 15 plus one
+  per 100 issues and pull requests plus a fetch.  `--full` disables every
+  shortcut; the first run after upgrading lists and fetches everything once.
 
 - **Dependencies:** `chrono` (unmaintained) replaced by `jiff`; `fslock` replaced
   by the standard library's file locks.
@@ -351,6 +387,13 @@ is bumped.
   mount.
 
 ### Security
+
+- **GitHub App keys** are signed with `aws-lc-rs` (already part of the build
+  through rustls); the key and the minted tokens are wiped from memory when
+  dropped and never logged.
+- **Attachment downloads** send the token only to `https://github.com`, only
+  from a client configured for github.com, and never to the storage host GitHub
+  redirects to.
 
 - **Encrypted S3 objects** use the STREAM construction over AES-256-GCM in 64 KiB
   segments with a per-object key from HKDF-SHA256 and a random salt (the layout of
