@@ -15,7 +15,7 @@ use github_backup_types::config::BackupOptions;
 use crate::{
     backup::{
         all_json, describe_unparsed, json_str, json_u64,
-        merge::{merge_and_write, reusable},
+        merge::{delta_base, merge_and_write, merge_values, reusable},
         number_after, Outcome,
     },
     error::CoreError,
@@ -30,19 +30,22 @@ use crate::{
 /// - `meta_dir/issue_comments/<number>.json` – comments per issue
 /// - `meta_dir/issue_events/<number>.json` – events per issue
 ///
-/// The issue list is **always fetched in full** and merged into the existing
-/// `issues.json`: an issue that has since been deleted on GitHub stays in the
-/// backup, and an incremental run can never shrink the file.  The comment
-/// and event files are merged too (by comment / event `id`), so a comment
-/// deleted on GitHub stays in the backup.
+/// The issue list is merged into the existing `issues.json`: an issue that
+/// has since been deleted on GitHub stays in the backup, and an incremental
+/// run can never shrink the file.  With `list_since` (the instant the stored
+/// list is vouched for) and an intact `issues.json`, only the issues updated
+/// since are asked for (`since=`), merged in, and the merged list stands for
+/// every issue below; otherwise every issue is listed.  The comment and event
+/// files are merged too (by comment / event `id`), so a comment deleted on
+/// GitHub stays in the backup.
 ///
-/// `since` is the repository's incremental watermark; it only decides which
-/// issues get their comment and event files re-fetched — those are skipped
-/// for issues not updated since the watermark and whose files are already on
-/// disk.  Editing a comment does not change its issue's `updated_at`, so the
-/// repository-wide list of comments created or edited since the watermark is
-/// asked for once, and every issue it names is re-fetched as well.  With
-/// `None` every issue is fetched.
+/// `since` is the repository's watermark for the per-item files; it decides
+/// which issues get their comment and event files re-fetched — those are
+/// skipped for issues not updated since the watermark and whose files are
+/// already on disk.  Editing a comment does not change its issue's
+/// `updated_at`, so the repository-wide list of comments created or edited
+/// since the watermark is asked for once, and every issue it names is
+/// re-fetched as well.  With `None` every issue is fetched.
 ///
 /// Pull requests are issues too, so a pull request `N` gets its conversation
 /// in `issue_comments/N.json` and its events in `issue_events/N.json` like any
@@ -59,18 +62,21 @@ use crate::{
 /// up.
 ///
 /// Returns the number of issues, **not** counting pull requests (those are
-/// counted by the pull request backup).
+/// counted by the pull request backup): in the listing, or, after a delta
+/// listing, in the merged list (which includes issues deleted on GitHub).
 ///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from the issue listing or storage writes, and any
 /// fatal error.
+#[allow(clippy::too_many_arguments)]
 pub async fn backup_issues(
     client: &impl BackupClient,
     owner: &str,
     repo_name: &str,
     opts: &BackupOptions,
     since: Option<&str>,
+    list_since: Option<&str>,
     meta_dir: &Path,
     storage: &impl Storage,
 ) -> Result<Outcome, CoreError> {
@@ -79,17 +85,40 @@ pub async fn backup_issues(
         return Ok(outcome);
     }
 
-    info!(owner, repo = repo_name, "fetching issues");
-    // Never ask the API for a delta: the response is persisted wholesale.
-    let items: Vec<Value> = match client.list_issues(owner, repo_name).await {
+    let path = meta_dir.join("issues.json");
+    // A delta needs the stored list it is merged into.
+    let base = if opts.issues {
+        delta_base(storage, &path, list_since)?
+    } else {
+        None
+    };
+    let delta_since = base.as_ref().map(|(since, _)| since.as_str());
+    info!(
+        owner,
+        repo = repo_name,
+        since = delta_since,
+        "fetching issues"
+    );
+    let items: Vec<Value> = match client.list_issues(owner, repo_name, delta_since).await {
         Ok(issues) => {
-            if opts.issues {
-                merge_and_write(storage, &meta_dir.join("issues.json"), &issues, "number")?;
-            }
-            outcome.count = all_json(&issues)
+            let items = match base {
+                Some((_, stored)) => {
+                    let merged = merge_values(stored, &path, &issues, "number")?;
+                    storage.write_json(&path, &merged)?;
+                    merged
+                }
+                None => {
+                    if opts.issues {
+                        merge_and_write(storage, &path, &issues, "number")?;
+                    }
+                    all_json(&issues).cloned().collect()
+                }
+            };
+            outcome.count = items
+                .iter()
                 .filter(|issue| issue.get("pull_request").is_none_or(Value::is_null))
                 .count() as u64;
-            all_json(&issues).cloned().collect()
+            items
         }
         // "410 Gone": Issues are switched off.  Pull requests keep their
         // conversation, which the same per-number endpoints serve.
@@ -101,7 +130,7 @@ pub async fn backup_issues(
                 repo = repo_name,
                 "issues are disabled; fetching the conversation of the pull requests"
             );
-            let pulls = client.list_pull_requests(owner, repo_name).await?;
+            let pulls = client.list_pull_requests(owner, repo_name, None).await?;
             all_json(&pulls).cloned().collect()
         }
         Err(e) => return Err(e.into()),
@@ -291,6 +320,7 @@ mod tests {
             "Hello-World",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -316,6 +346,7 @@ mod tests {
             "Hello-World",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -340,6 +371,7 @@ mod tests {
             "octocat",
             "Hello-World",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -374,6 +406,7 @@ mod tests {
             "Hello-World",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -407,6 +440,7 @@ mod tests {
             "octocat",
             "Hello-World",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -462,6 +496,7 @@ mod tests {
             "r",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -478,6 +513,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -497,6 +533,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-07-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -524,6 +561,7 @@ mod tests {
             "r",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -538,6 +576,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-01-15T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -577,6 +616,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -623,6 +663,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -653,6 +694,7 @@ mod tests {
             "o",
             "r",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -690,9 +732,18 @@ mod tests {
             vec![serde_json::json!({"number": 5, "updated_at": "2024-01-01T00:00:00Z"})],
         );
         let storage = MemStorage::default();
-        let outcome = backup_issues(&client, "o", "r", &all_threads(), None, &meta(), &storage)
-            .await
-            .expect("410 is not a failure");
+        let outcome = backup_issues(
+            &client,
+            "o",
+            "r",
+            &all_threads(),
+            None,
+            None,
+            &meta(),
+            &storage,
+        )
+        .await
+        .expect("410 is not a failure");
         assert!(outcome.failed.is_empty());
         assert_eq!(outcome.count, 0, "no issues");
         assert!(storage.get(&meta().join("issue_comments/5.json")).is_some());
@@ -712,6 +763,7 @@ mod tests {
             "o",
             "r",
             &opts,
+            None,
             None,
             &meta(),
             &MemStorage::default(),
@@ -734,9 +786,18 @@ mod tests {
             .with_error("issue_comments:1", 500)
             .with_error("issue_events:2", 404);
         let storage = MemStorage::default();
-        let outcome = backup_issues(&client, "o", "r", &all_threads(), None, &meta(), &storage)
-            .await
-            .expect("not fatal");
+        let outcome = backup_issues(
+            &client,
+            "o",
+            "r",
+            &all_threads(),
+            None,
+            None,
+            &meta(),
+            &storage,
+        )
+        .await
+        .expect("not fatal");
 
         let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
         assert_eq!(whats, ["issue #1 comments"], "404 means gone, not failed");
@@ -760,6 +821,7 @@ mod tests {
             "r",
             &all_threads(),
             None,
+            None,
             &meta(),
             &MemStorage::default(),
         )
@@ -777,6 +839,7 @@ mod tests {
             "o",
             "r",
             &all_threads(),
+            None,
             None,
             &meta(),
             &MemStorage::default(),
@@ -802,9 +865,18 @@ mod tests {
                 "issue_comments",
                 vec![serde_json::json!({"id": 2, "body": "new"})],
             );
-        backup_issues(&client, "o", "r", &all_threads(), None, &meta(), &storage)
-            .await
-            .expect("ok");
+        backup_issues(
+            &client,
+            "o",
+            "r",
+            &all_threads(),
+            None,
+            None,
+            &meta(),
+            &storage,
+        )
+        .await
+        .expect("ok");
         let on_disk: serde_json::Value =
             serde_json::from_slice(&storage.get(&meta().join("issue_comments/1.json")).unwrap())
                 .unwrap();
@@ -846,6 +918,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &meta(),
             &storage,
         )
@@ -880,6 +953,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &meta(),
             &storage,
         )

@@ -119,13 +119,22 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   warning per category per run).
 - **Incremental state** (`engine/incremental.rs`): a watermark per repository in
   `backup_state.json`, advanced only for repositories whose every step
-  succeeded, trusted only for the categories it was recorded with, set 15
-  minutes before the run started.  Lists are always fetched in full and merged
-  (`backup/merge.rs`); the watermark only decides which per-item requests
-  (comments, events, commits, reviews) can be skipped.  Discussions are the
-  exception: their GraphQL listing is ordered by `updatedAt` and stops at the
-  watermark, and the stored list is merged with what it returned.  `--full` ignores it; an
-  explicit `--since` replaces it and is never stored.
+  succeeded, trusted only for the categories it was recorded with (per-item
+  categories, the issue and pull request lists, the git update mode), set 15
+  minutes before the run started.  With it, a run lists only the issues
+  (`since=`) and pull requests (`sort=updated`, newest first, until older
+  ones) changed since and merges them into the stored list, if that list is
+  intact (`backup/merge.rs`); skips the per-item requests (comments, events,
+  commits, reviews) of unchanged items; and skips the `git fetch` of a
+  repository whose `pushed_at` is older than the watermark when the clone is
+  on disk, the last fetch (`fetched_at`, cleared when a run that fetched
+  fails for the repository) is under 7 days old and, for clones that hold
+  `refs/pull/*`, no pull request changed since (`engine/repo.rs`).  Wikis are
+  always fetched.  Discussions: their GraphQL listing is ordered by
+  `updatedAt` and stops at the watermark, and the stored list is merged with
+  what it returned.  `--full` ignores the watermark; an explicit `--since`
+  replaces it for the lists and per-item requests (never for git) and is
+  never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
   current run and a fingerprint of the owner and options; a later run resumes
   from it only if it is less than 6 hours old and the fingerprints match.

@@ -232,17 +232,20 @@ pub struct BackupOptions {
     /// example `"2024-01-01T00:00:00Z"`) as already backed up, for every
     /// repository.
     ///
-    /// Issue and pull request **lists are always fetched in full** and merged
-    /// into what is already stored, so this never loses data; it only skips
-    /// re-fetching the comments, events, commits and reviews of items that have
-    /// not changed since the timestamp *and* whose files already exist.  Without
-    /// it the engine uses each repository's own watermark from the previous
-    /// run (see [`BackupState`](crate::BackupState)).
+    /// Issue and pull request lists are asked only for the items updated
+    /// since the timestamp and **merged** into what is already stored (listed
+    /// in full when the stored list is missing or damaged); the comments,
+    /// events, commits and reviews of items that have not changed since the
+    /// timestamp *and* whose files already exist are not fetched again.  It
+    /// never skips a `git fetch`.  Without it the engine uses each
+    /// repository's own watermark from the previous run (see
+    /// [`BackupState`](crate::BackupState)).
     pub since: Option<String>,
 
-    /// Ignore incremental state: fetch every item's comments, events, commits
-    /// and reviews again, whatever the watermarks say.  Takes precedence over
-    /// the stored watermarks (and conflicts with `since` at the CLI).
+    /// Ignore incremental state: list every issue and pull request, fetch
+    /// every item's comments, events, commits and reviews and `git fetch`
+    /// every clone, whatever the watermarks say.  Takes precedence over the
+    /// stored watermarks (and conflicts with `since` at the CLI).
     #[serde(default)]
     pub full: bool,
 

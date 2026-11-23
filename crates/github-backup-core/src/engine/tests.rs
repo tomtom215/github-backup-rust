@@ -1033,3 +1033,373 @@ async fn unreadable_repository_objects_are_kept_and_reported() {
         "only the readable one is cloned"
     );
 }
+
+// ── Repeat runs: list deltas and skipped fetches ─────────────────────────────
+
+/// A nightly run: the clone, issues with comments, pull requests.
+fn nightly() -> BackupOptions {
+    BackupOptions {
+        repositories: true,
+        issues: true,
+        issue_comments: true,
+        pulls: true,
+        concurrency: 1,
+        ..Default::default()
+    }
+}
+
+const LONG_AGO: &str = "2020-06-01T00:00:00Z";
+
+fn pushed(at: &str) -> Repository {
+    Repository {
+        pushed_at: Some(at.to_string()),
+        ..repo("a")
+    }
+}
+
+/// What one run of repository `a` asked for: API calls (repository listing
+/// left out) and git operations.
+#[derive(Debug)]
+struct Run {
+    calls: Vec<String>,
+    git: Vec<String>,
+    stats: BackupStats,
+}
+
+impl Run {
+    /// The API calls with the `since` instants left out.
+    fn shape(&self) -> Vec<String> {
+        self.calls
+            .iter()
+            .map(|c| match c.split_once(" since ") {
+                Some((call, _)) => format!("{call} since"),
+                None => c.clone(),
+            })
+            .map(|c| match c.split_once(':') {
+                Some((endpoint, arg)) if arg.starts_with("20") => format!("{endpoint}:<since>"),
+                _ => c,
+            })
+            .collect()
+    }
+
+    fn fetched(&self) -> bool {
+        !self.git.is_empty()
+    }
+}
+
+async fn nightly_run(
+    root: &Path,
+    storage: &MemStorage,
+    opts: BackupOptions,
+    client: MockBackupClient,
+    git: SpyGitRunner,
+) -> Run {
+    let stats = engine_with(client.clone(), storage.clone(), git.clone(), root, opts)
+        .run(OWNER)
+        .await
+        .expect("run");
+    Run {
+        calls: client
+            .calls()
+            .into_iter()
+            .filter(|c| !c.starts_with("user_repos:"))
+            .collect(),
+        git: git.recorded_calls().into_iter().map(|c| c.method).collect(),
+        stats,
+    }
+}
+
+fn client_for(
+    repo: Repository,
+    issues: Vec<Issue>,
+    pulls: Vec<serde_json::Value>,
+) -> MockBackupClient {
+    MockBackupClient::new()
+        .with_user_repos(vec![repo])
+        .with_issues(issues)
+        .with_raw("pull_requests", pulls)
+}
+
+fn pull(number: u64, updated_at: &str) -> serde_json::Value {
+    serde_json::json!({"number": number, "updated_at": updated_at})
+}
+
+/// The clone the spy git runner never makes.
+fn make_clone(root: &Path) -> PathBuf {
+    let clone = OutputConfig::new(root).repos_dir(OWNER).join("a.git");
+    std::fs::create_dir_all(&clone).expect("clone dir");
+    clone
+}
+
+/// The first nightly run of an unchanged repository, then the second.
+async fn two_runs(root: &Path, storage: &MemStorage) -> Run {
+    let client = || {
+        client_for(
+            pushed(LONG_AGO),
+            vec![issue(1, LONG_AGO), issue(2, LONG_AGO)],
+            vec![pull(3, LONG_AGO)],
+        )
+    };
+    let first = nightly_run(root, storage, nightly(), client(), SpyGitRunner::default()).await;
+    assert!(!first.stats.has_failures(), "{:?}", first.stats.failures());
+    make_clone(root);
+    nightly_run(root, storage, nightly(), client(), SpyGitRunner::default()).await
+}
+
+/// The request count of a repeat run (measured before and after this change):
+/// the lists are asked only for what changed, and the clone is not fetched.
+#[tokio::test]
+async fn a_repeat_run_of_an_unchanged_repository_asks_only_for_changes() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    let second = two_runs(root.path(), &storage).await;
+    assert!(
+        !second.stats.has_failures(),
+        "{:?}",
+        second.stats.failures()
+    );
+    assert_eq!(
+        second.shape(),
+        [
+            "repository:a",
+            // Did a pull request change (its refs are in the mirror)?  No.
+            "pull_requests:a since",
+            "issues:a since",
+            "repo_issue_comments:<since>",
+            "pull_requests:a since",
+        ]
+    );
+    assert!(!second.fetched(), "nothing was pushed: {:?}", second.git);
+    // The delta (empty) did not shrink the stored lists.
+    let issues: serde_json::Value = serde_json::from_slice(
+        &storage
+            .get(&meta(root.path(), "a", "issues.json"))
+            .expect("issues"),
+    )
+    .expect("json");
+    assert_eq!(issues.as_array().map(Vec::len), Some(2));
+    assert_eq!(second.stats.issues_fetched(), 2);
+}
+
+/// (a) Something changed: the changed issue arrives through the delta and is
+/// merged; a push, or a pull request updated since, means a fetch.
+#[tokio::test]
+async fn a_changed_repository_is_fetched_and_its_changes_merged() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    two_runs(root.path(), &storage).await;
+    let now = crate::time::now_utc();
+
+    // A new issue and a push.
+    let third = nightly_run(
+        root.path(),
+        &storage,
+        nightly(),
+        client_for(
+            pushed(&now),
+            vec![issue(1, LONG_AGO), issue(2, LONG_AGO), issue(9, &now)],
+            vec![pull(3, LONG_AGO)],
+        ),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert!(third.fetched(), "pushed since the last run");
+    assert!(third.calls.contains(&"issue_comments:9".to_string()));
+    assert!(!third.calls.contains(&"issue_comments:1".to_string()));
+    let issues: serde_json::Value = serde_json::from_slice(
+        &storage
+            .get(&meta(root.path(), "a", "issues.json"))
+            .expect("issues"),
+    )
+    .expect("json");
+    let numbers: Vec<u64> = issues
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|i| i["number"].as_u64())
+        .collect();
+    assert_eq!(numbers, [1, 2, 9], "merged, never replaced by the delta");
+
+    // No push, but a pull request was updated: its refs are in the mirror.
+    let fourth = nightly_run(
+        root.path(),
+        &storage,
+        nightly(),
+        client_for(
+            pushed(LONG_AGO),
+            vec![],
+            vec![pull(3, &crate::time::now_utc())],
+        ),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert!(fourth.fetched(), "a pull request changed since");
+}
+
+/// A bare clone holds no `refs/pull/*`, so no pull request check is made.
+#[tokio::test]
+async fn a_bare_clone_needs_no_pull_request_check() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    let bare = BackupOptions {
+        clone_type: github_backup_types::config::CloneType::Bare,
+        pulls: false,
+        ..nightly()
+    };
+    let client = || {
+        client_for(
+            pushed(LONG_AGO),
+            vec![],
+            vec![pull(3, &crate::time::now_utc())],
+        )
+    };
+    nightly_run(
+        root.path(),
+        &storage,
+        bare.clone(),
+        client(),
+        SpyGitRunner::default(),
+    )
+    .await;
+    make_clone(root.path());
+    let second = nightly_run(
+        root.path(),
+        &storage,
+        bare,
+        client(),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert!(!second.fetched());
+    assert!(
+        !second.calls.iter().any(|c| c.starts_with("pull_requests:")),
+        "{:?}",
+        second.calls
+    );
+}
+
+/// (b) What the shortcut relies on is gone: a missing list is fetched in
+/// full, a missing clone is cloned again.
+#[tokio::test]
+async fn a_missing_list_or_clone_is_fetched_in_full() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    two_runs(root.path(), &storage).await;
+    storage
+        .remove_file(&meta(root.path(), "a", "issues.json"))
+        .expect("remove issues.json");
+    storage
+        .write_bytes(&meta(root.path(), "a", "pulls.json"), b"{ damaged")
+        .expect("damage pulls.json");
+    std::fs::remove_dir(make_clone(root.path())).expect("remove clone");
+
+    let third = nightly_run(
+        root.path(),
+        &storage,
+        nightly(),
+        client_for(
+            pushed(LONG_AGO),
+            vec![issue(1, LONG_AGO)],
+            vec![pull(3, LONG_AGO)],
+        ),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert!(
+        third.calls.contains(&"issues:a".to_string()),
+        "{:?}",
+        third.calls
+    );
+    assert!(
+        third.calls.contains(&"pull_requests:a".to_string()),
+        "{:?}",
+        third.calls
+    );
+    assert!(third.fetched(), "the clone is gone");
+}
+
+/// (c) `--full` takes no shortcut.
+#[tokio::test]
+async fn full_takes_no_shortcut() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    two_runs(root.path(), &storage).await;
+    let full = BackupOptions {
+        full: true,
+        ..nightly()
+    };
+    let third = nightly_run(
+        root.path(),
+        &storage,
+        full,
+        client_for(
+            pushed(LONG_AGO),
+            vec![issue(1, LONG_AGO)],
+            vec![pull(3, LONG_AGO)],
+        ),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert_eq!(
+        third.shape(),
+        [
+            "repository:a",
+            "issues:a",
+            "issue_comments:1",
+            "pull_requests:a",
+        ]
+    );
+    assert!(third.fetched());
+}
+
+/// (d) A run that failed for the repository is not built on: a fetch that
+/// failed is repeated although nothing was pushed, and what changed while the
+/// issue listing failed is asked for again (since the last clean run).
+#[tokio::test]
+async fn a_failed_run_for_the_repository_is_not_built_on() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    two_runs(root.path(), &storage).await;
+    let now = crate::time::now_utc();
+
+    // A `--full` run (so it fetches) whose fetch and issue listing fail.
+    let failing = nightly_run(
+        root.path(),
+        &storage,
+        BackupOptions {
+            full: true,
+            ..nightly()
+        },
+        client_for(pushed(LONG_AGO), vec![], vec![]).with_error("issues", 502),
+        SpyGitRunner::default().failing_when_url_contains("a.git", git_failure(128, "boom")),
+    )
+    .await;
+    assert!(failing.fetched() && failing.stats.has_failures());
+
+    let retry = nightly_run(
+        root.path(),
+        &storage,
+        nightly(),
+        client_for(
+            pushed(LONG_AGO),
+            vec![issue(1, LONG_AGO), issue(7, &now)],
+            vec![],
+        ),
+        SpyGitRunner::default(),
+    )
+    .await;
+    assert!(!retry.stats.has_failures(), "{:?}", retry.stats.failures());
+    assert!(retry.fetched(), "the failed fetch is repeated");
+    assert!(retry.calls.contains(&"issue_comments:7".to_string()));
+    let issues: serde_json::Value = serde_json::from_slice(
+        &storage
+            .get(&meta(root.path(), "a", "issues.json"))
+            .expect("issues"),
+    )
+    .expect("json");
+    assert!(issues
+        .as_array()
+        .expect("array")
+        .iter()
+        .any(|i| i["number"] == 7));
+}

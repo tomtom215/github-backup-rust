@@ -3,19 +3,20 @@
 
 //! Helpers for incremental runs.
 //!
-//! # Why the lists are never fetched incrementally
+//! # How the lists stay complete
 //!
 //! `issues.json` and `pulls.json` are single files holding every issue or pull
-//! request of a repository.  GitHub's `since` filter returns *only the items
-//! that changed*, so writing that response over the file would replace the
-//! whole backup with the delta — silently, on every run after the first.
+//! request of a repository.  A listing of only the items changed since the
+//! last run (GitHub's `since` filter for issues, the `sort=updated` order for
+//! pull requests) written over the file would replace the whole backup with
+//! the delta.  So every listing, complete or delta, is **merged** into what an
+//! earlier run stored ([`merge_list`]): an item GitHub no longer returns (a
+//! deleted issue) stays, an item in the listing replaces the stored copy.
 //!
-//! Instead the engine always fetches the **complete** listing (one request per
-//! 100 items), merges it into what an earlier run stored (so an item GitHub
-//! no longer returns, for example a deleted issue, stays in the backup), and
-//! uses the incremental watermark only for the genuinely expensive part: the
-//! per-item comment / event / commit / review requests, which are skipped for
-//! items that have not changed since the last complete run.
+//! A delta is only asked for when [`delta_base`] finds the stored list intact
+//! and the repository's watermark vouches for it; otherwise the complete
+//! listing is fetched.  The watermark also decides which per-item comment /
+//! event / commit / review requests can be skipped ([`reusable`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -30,25 +31,10 @@ use crate::{error::CoreError, storage::Storage};
 /// `path`, matching items on their `key` field (`number` for issues and pull
 /// requests, `id` for most other lists).
 ///
-/// * an item present in both is replaced by the fresh copy;
-/// * an item only in the stored file is **kept** — the backup never forgets
-///   something it has captured, even after it is deleted on GitHub;
-/// * an item only in the fresh listing is added;
-/// * an item without the key cannot be matched: a stored one is kept, and a
-///   fresh one is added unless an identical item is already stored, so it is
-///   never duplicated run after run;
-/// * items with the key come first, ordered by `key` ascending when every
-///   such key is a non-negative integer (otherwise stored order, then new
-///   items); items without the key follow, stored ones first.  Output is
-///   therefore deterministic.
-///
-/// Matching goes through a key-to-position map, so a merge costs time linear
-/// in the two lists plus the final sort, not quadratic.
-///
 /// A missing stored file is simply "nothing to merge".  A stored file that is
 /// unreadable or not a JSON array is reported with a warning and treated the
 /// same way: it was already unusable, and refusing to write would make a
-/// damaged file permanent.
+/// damaged file permanent.  See [`merge_values`] for the merge itself.
 ///
 /// # Errors
 ///
@@ -64,6 +50,102 @@ where
     S: Storage,
     T: Serialize + ?Sized,
 {
+    let stored = read_list(storage, path)?.unwrap_or_default();
+    merge_values(stored, path, fresh, key)
+}
+
+/// The JSON array stored at `path`, or `None` when there is none: the file
+/// is missing, or it is unreadable or not a JSON array (reported with a
+/// warning).
+///
+/// # Errors
+///
+/// Fails if the file cannot be read for a reason other than not existing.
+pub(crate) fn read_list<S: Storage>(
+    storage: &S,
+    path: &Path,
+) -> Result<Option<Vec<Value>>, CoreError> {
+    let Some(bytes) = storage.read(path)? else {
+        return Ok(None);
+    };
+    Ok(match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Array(items)) => Some(items),
+        Ok(other) => {
+            warn!(
+                path = %path.display(),
+                found = type_name(&other),
+                "existing backup file is not a JSON array; replacing it"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "existing backup file is not valid JSON; replacing it"
+            );
+            None
+        }
+    })
+}
+
+/// Whether a delta listing may be asked for, and what it is merged into.
+///
+/// `since` is the instant up to which the stored list at `path` is vouched
+/// for (the repository's watermark, or an explicit `--since`).  A delta is
+/// only safe when that list is intact: with `Some((since, stored))` the
+/// caller asks for the items changed since `since` (normalised to
+/// `YYYY-MM-DDTHH:MM:SSZ`) and merges them into `stored`.  `None` (no
+/// watermark, an unparsable one, or a missing or damaged file) means the
+/// complete listing must be fetched.
+///
+/// # Errors
+///
+/// Fails if the file cannot be read for a reason other than not existing.
+pub(crate) fn delta_base<S: Storage>(
+    storage: &S,
+    path: &Path,
+    since: Option<&str>,
+) -> Result<Option<(String, Vec<Value>)>, CoreError> {
+    let Some(since) = since
+        .and_then(crate::time::parse_rfc3339)
+        .map(crate::time::format_utc)
+    else {
+        return Ok(None);
+    };
+    Ok(read_list(storage, path)?.map(|stored| (since, stored)))
+}
+
+/// Merges `fresh` into `stored` (the list read from `path`, which only names
+/// it in errors), matching items on their `key` field:
+///
+/// * an item present in both is replaced by the fresh copy;
+/// * an item only in the stored list is **kept** — the backup never forgets
+///   something it has captured, even after it is deleted on GitHub;
+/// * an item only in the fresh listing is added;
+/// * an item without the key cannot be matched: a stored one is kept, and a
+///   fresh one is added unless an identical item is already stored, so it is
+///   never duplicated run after run;
+/// * items with the key come first, ordered by `key` ascending when every
+///   such key is a non-negative integer (otherwise stored order, then new
+///   items); items without the key follow, stored ones first.  Output is
+///   therefore deterministic.
+///
+/// Matching goes through a key-to-position map, so a merge costs time linear
+/// in the two lists plus the final sort, not quadratic.
+///
+/// # Errors
+///
+/// Fails if `fresh` does not serialise to a JSON array.
+pub(crate) fn merge_values<T>(
+    stored: Vec<Value>,
+    path: &Path,
+    fresh: &T,
+    key: &str,
+) -> Result<Vec<Value>, CoreError>
+where
+    T: Serialize + ?Sized,
+{
     let fresh = match serde_json::to_value(fresh)? {
         Value::Array(items) => items,
         other => {
@@ -73,29 +155,6 @@ where
                 type_name(&other)
             ))))
         }
-    };
-
-    let stored: Vec<Value> = match storage.read(path)? {
-        None => Vec::new(),
-        Some(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(Value::Array(items)) => items,
-            Ok(other) => {
-                warn!(
-                    path = %path.display(),
-                    found = type_name(&other),
-                    "existing backup file is not a JSON array; replacing it"
-                );
-                Vec::new()
-            }
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "existing backup file is not valid JSON; replacing it"
-                );
-                Vec::new()
-            }
-        },
     };
 
     let mut keyed: Vec<Value> = Vec::with_capacity(stored.len() + fresh.len());
@@ -431,6 +490,33 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// A delta is merged into the stored list, so it needs one that is intact
+    /// and a watermark it can trust.
+    #[test]
+    fn a_delta_needs_an_intact_stored_list_and_a_valid_since() {
+        let storage = MemStorage::default();
+        let since = Some("2026-01-01T01:00:00+01:00");
+        assert!(delta_base(&storage, &path(), since)
+            .expect("read")
+            .is_none());
+
+        storage.write_bytes(&path(), b"{ damaged").expect("seed");
+        assert!(delta_base(&storage, &path(), since)
+            .expect("read")
+            .is_none());
+
+        seed(&storage, &json!([{"number": 1}]));
+        assert!(delta_base(&storage, &path(), None).expect("read").is_none());
+        assert!(delta_base(&storage, &path(), Some("yesterday"))
+            .expect("read")
+            .is_none());
+        let (since, stored) = delta_base(&storage, &path(), since)
+            .expect("read")
+            .expect("delta");
+        assert_eq!(since, "2026-01-01T00:00:00Z", "normalised to UTC");
+        assert_eq!(stored, vec![json!({"number": 1})]);
     }
 
     #[test]
