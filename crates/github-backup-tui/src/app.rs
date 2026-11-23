@@ -733,6 +733,7 @@ fn toggle_category(app: &mut App, idx: usize) {
         32 => app.config.projects = !app.config.projects,
         33 => app.config.packages = !app.config.packages,
         34 => app.config.commit_comments = !app.config.commit_comments,
+        35 => app.config.attachments = !app.config.attachments,
         _ => {}
     }
 }

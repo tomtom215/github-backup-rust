@@ -196,6 +196,7 @@ fn category_labels(cfg: &ConfigState) -> Vec<(&'static str, bool)> {
         ("Projects", cfg.projects),
         ("Packages", cfg.packages),
         ("Commit Comments", cfg.commit_comments),
+        ("Attachments", cfg.attachments),
     ]
 }
 

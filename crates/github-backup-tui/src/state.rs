@@ -81,6 +81,7 @@ pub struct ConfigState {
     pub projects: bool,
     pub packages: bool,
     pub commit_comments: bool,
+    pub attachments: bool,
 
     // ── Clone ─────────────────────────────────────────────────────────────
     pub clone_type: CloneTypeForm,
@@ -199,6 +200,7 @@ impl Default for ConfigState {
             projects: false,
             packages: false,
             commit_comments: false,
+            attachments: false,
             clone_type: CloneTypeForm::Mirror,
             forks: false,
             private: false,
@@ -242,7 +244,7 @@ impl ConfigState {
         match self.active_tab {
             0 => 2,  // Auth: token, api_url
             1 => 5,  // Target: owner, output_dir, org_mode, since, full
-            2 => 35, // Categories: 35 bool flags
+            2 => 36, // Categories: 36 bool flags
             3 => 7,  // Clone: clone_type, forks, private, lfs, prefer_ssh, prune, concurrency
             4 => 2,  // Filter: include, exclude
             5 => 2,  // Output: manifest, dry_run
@@ -306,6 +308,7 @@ impl ConfigState {
             projects,
             packages,
             commit_comments,
+            attachments,
             clone_type,
             forks,
             private,
@@ -366,6 +369,7 @@ impl ConfigState {
         let opts = BackupOptions {
             target,
             commit_comments: *commit_comments,
+            attachments: *attachments,
             tolerate_forbidden: self.all_categories_on(),
             full: *full,
             repositories: *repositories,
@@ -434,6 +438,7 @@ impl ConfigState {
         let BackupOptions {
             target,
             commit_comments,
+            attachments,
             // Follows from the categories (see `to_backup_config`).
             tolerate_forbidden: _,
             full,
@@ -531,6 +536,7 @@ impl ConfigState {
             projects: *projects,
             packages: *packages,
             commit_comments: *commit_comments,
+            attachments: *attachments,
             forks: *forks,
             private: *private,
             prefer_ssh: *prefer_ssh,
@@ -634,6 +640,7 @@ impl ConfigState {
             && self.projects
             && self.packages
             && self.commit_comments
+            && self.attachments
     }
 
     /// Sets every category `--all` selects to `val` (see
@@ -672,6 +679,7 @@ impl ConfigState {
         self.projects = val;
         self.packages = val;
         self.commit_comments = val;
+        self.attachments = val;
     }
 }
 

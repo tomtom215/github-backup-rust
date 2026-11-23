@@ -1240,7 +1240,8 @@ fn results_show_discussions() {
 // ── Select all, commit comments, owner from the token ─────────────────────────
 
 /// `A` selects what `--all` selects, and then a refusal is a warning, as
-/// with `--all`: commit comments included, the opt-in categories left alone.
+/// with `--all`: commit comments and attachments included, the opt-in
+/// categories left alone.
 #[test]
 fn select_all_matches_the_all_flag() {
     use github_backup_types::config::BackupOptions;
@@ -1267,7 +1268,7 @@ fn select_all_matches_the_all_flag() {
         ..BackupOptions::all()
     };
     assert_eq!(format!("{got:?}"), format!("{expected:?}"));
-    assert!(got.commit_comments && got.tolerate_forbidden);
+    assert!(got.commit_comments && got.attachments && got.tolerate_forbidden);
 }
 
 /// Categories picked one by one make a refusal a failure, as on the
@@ -1282,7 +1283,7 @@ fn a_category_picked_by_hand_makes_refusals_failures() {
 }
 
 #[test]
-fn commit_comments_have_a_toggle_that_reaches_the_backup() {
+fn commit_comments_and_attachments_have_toggles_that_reach_the_backup() {
     let mut app = ready_app();
     app.screen = Screen::Configure;
     app.config.active_tab = crate::state::ConfigState::TAB_CATEGORIES;
@@ -1290,8 +1291,13 @@ fn commit_comments_have_a_toggle_that_reaches_the_backup() {
     assert!(!app.config.to_backup_config().2.commit_comments);
     press(&mut app, KeyCode::Char(' '));
     assert!(app.config.to_backup_config().2.commit_comments);
+    app.config.active_field = 35;
+    assert!(!app.config.to_backup_config().2.attachments);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.config.to_backup_config().2.attachments);
     let t = text(&app, 120, 40);
     assert!(t.contains("[x] Commit Comments"), "{t}");
+    assert!(t.contains("[x] Attachments"), "{t}");
 }
 
 #[test]

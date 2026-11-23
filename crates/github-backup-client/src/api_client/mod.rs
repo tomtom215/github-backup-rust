@@ -68,6 +68,16 @@ pub trait AssetSink: Send {
     fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()>;
 }
 
+/// What [`BackupClient::download_attachment`] delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentDownload {
+    /// Bytes handed to the sink.
+    pub bytes: u64,
+    /// The media type of the final response (`Content-Type` without its
+    /// parameters, lower case), if it named one.
+    pub content_type: Option<String>,
+}
+
 /// One page of a GraphQL connection: its nodes, exactly as GitHub sent
 /// them, and the cursor of the next page (`None` on the last page).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -355,6 +365,19 @@ pub trait BackupClient: Send + Sync {
         asset_url: &'a str,
         sink: &'a mut dyn AssetSink,
     ) -> BoxFuture<'a, Result<u64, ClientError>>;
+
+    /// Streams a file attached to an issue, pull request, comment or release
+    /// note into `sink`.
+    ///
+    /// `url` is an attachment URL as it appears in a body.  The credential is
+    /// sent, as HTTP Basic authentication, to `https://github.com` only and
+    /// only by a client for github.com; every other host, and every redirect
+    /// that leaves the origin, gets none.  Nothing is buffered.
+    fn download_attachment<'a>(
+        &'a self,
+        url: &'a str,
+        sink: &'a mut dyn AssetSink,
+    ) -> BoxFuture<'a, Result<AttachmentDownload, ClientError>>;
 
     // ── Deploy keys and collaborators ─────────────────────────────────────
 

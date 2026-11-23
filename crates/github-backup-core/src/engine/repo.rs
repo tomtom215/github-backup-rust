@@ -33,15 +33,15 @@ use super::incremental::RepoSince;
 use super::steps::{RunControl, Steps};
 use crate::{
     backup::{
-        actions::backup_actions, all_json, branches::backup_branches,
-        collaborators::backup_collaborators, commit_comments::backup_commit_comments,
-        deploy_keys::backup_deploy_keys, discussion::backup_discussions,
-        environments::backup_environments, hooks::backup_hooks, is_forbidden, is_gone,
-        issue::backup_issues, json_str, labels::backup_labels, merge::unchanged_since,
-        milestones::backup_milestones, pull_request::backup_pull_requests, refused,
-        release::backup_releases, repository::backup_repository, repository::should_include,
-        security_advisories::backup_security_advisories, topics::backup_topics, wiki::backup_wiki,
-        Outcome,
+        actions::backup_actions, all_json, attachments::backup_attachments,
+        branches::backup_branches, collaborators::backup_collaborators,
+        commit_comments::backup_commit_comments, deploy_keys::backup_deploy_keys,
+        discussion::backup_discussions, environments::backup_environments, hooks::backup_hooks,
+        is_forbidden, is_gone, issue::backup_issues, json_str, labels::backup_labels,
+        merge::unchanged_since, milestones::backup_milestones, pull_request::backup_pull_requests,
+        refused, release::backup_releases, repository::backup_repository,
+        repository::should_include, security_advisories::backup_security_advisories,
+        topics::backup_topics, wiki::backup_wiki, Outcome,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -367,6 +367,18 @@ where
     {
         ctx.stats.add_discussions(n);
     }
+    // Last: it reads the bodies the categories above stored.
+    category(
+        ctx,
+        &mut steps,
+        &listed.full_name,
+        "attachments",
+        "a classic token for private repositories",
+        backup_attachments(client, opts, &meta_dir, storage, &|| {
+            ctx.refusals.first("attachments")
+        }),
+    )
+    .await;
 
     finish(&steps)
 }
