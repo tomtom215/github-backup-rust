@@ -50,3 +50,31 @@ fslock = { workspace = true }
 [dev-dependencies]
 github-backup-client = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+
+# `cargo binstall --git https://github.com/tomtom215/github-backup-rust github-backup`
+# downloads the release binary instead of compiling.  The URLs are the asset
+# names that .github/workflows/release.yml publishes; other targets fall back
+# to a source build.
+[package.metadata.binstall]
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-linux-x86_64"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-linux-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-linux-aarch64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-linux-aarch64"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-macos-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-macos-aarch64"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/github-backup-windows-x86_64.exe"
