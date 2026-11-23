@@ -18,7 +18,9 @@
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
+
+use crate::time::{format_utc, minus};
 use tracing::{info, warn};
 
 use github_backup_types::backup_state::{BackupState, RunRecord};
@@ -34,7 +36,7 @@ use github_backup_types::config::BackupOptions;
 /// a quarter of an hour covers any plausible clock error and the lag of
 /// GitHub's read replicas, at the price of re-fetching the few items changed
 /// in that window.
-pub(crate) const WATERMARK_MARGIN: Duration = Duration::minutes(15);
+pub(crate) const WATERMARK_MARGIN: SignedDuration = SignedDuration::from_mins(15);
 
 /// The incremental state a run starts from.
 #[derive(Debug)]
@@ -48,15 +50,10 @@ pub(crate) struct Incremental {
 /// What the run produced, for [`Incremental::finish`].
 #[derive(Debug)]
 pub(crate) struct RunSummary<'a> {
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     pub clean_repos: &'a [String],
     pub repos_backed_up: u64,
     pub fully_successful: bool,
-}
-
-/// RFC 3339 with a `Z` suffix and whole seconds, the form the state file uses.
-fn rfc3339(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 impl Incremental {
@@ -104,8 +101,8 @@ impl Incremental {
     /// that older items are captured, the engine did not verify it, and
     /// recording it would carry the assertion into every later run.
     pub(crate) fn finish(mut self, path: &Path, run: &RunSummary<'_>) -> Result<(), String> {
-        let started_at = rfc3339(run.started_at);
-        let watermark = rfc3339(run.started_at - WATERMARK_MARGIN);
+        let started_at = format_utc(run.started_at);
+        let watermark = format_utc(minus(run.started_at, WATERMARK_MARGIN));
         let trusted: &[String] = if self.explicit_since.is_some() {
             &[]
         } else {
@@ -127,7 +124,6 @@ impl Incremental {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn opts() -> BackupOptions {
         BackupOptions {
@@ -136,9 +132,9 @@ mod tests {
         }
     }
 
-    fn at(h: u32, m: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 3, 1, h, m, 0)
-            .single()
+    fn at(h: u32, m: u32) -> Timestamp {
+        format!("2026-03-01T{h:02}:{m:02}:00Z")
+            .parse()
             .expect("valid time")
     }
 
@@ -266,7 +262,7 @@ mod tests {
             .finish(
                 &path,
                 &RunSummary {
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 1, 0, 5, 0).single().unwrap(),
+                    started_at: at(0, 5),
                     clean_repos: &clean,
                     repos_backed_up: 1,
                     fully_successful: true,

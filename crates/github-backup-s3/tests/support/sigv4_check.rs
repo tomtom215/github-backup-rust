@@ -14,7 +14,7 @@
 //! The implementation is itself validated against the four worked examples AWS
 //! publishes for S3 (see `tests/sigv4_vectors.rs`).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;

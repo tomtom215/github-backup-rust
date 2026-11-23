@@ -268,14 +268,25 @@ fn hash_file(path: &Path) -> Result<String, String> {
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         }
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(lower_hex(&hasher.finalize()))
 }
 
 /// Returns the hex-encoded SHA-256 digest of `data` bytes.
 #[must_use]
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    format!("{digest:x}")
+    lower_hex(&Sha256::digest(data))
+}
+
+/// Lower-case hexadecimal encoding of `bytes` (two digits per byte).
+#[must_use]
+pub fn lower_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // Writing to a String cannot fail.
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 #[cfg(test)]

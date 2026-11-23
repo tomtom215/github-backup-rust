@@ -38,7 +38,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use chrono::Utc;
 use tracing::{info, warn};
 
 use github_backup_client::BackupClient;
@@ -181,7 +180,7 @@ pub async fn backup_starred_repos(
             let message = "repository name is not a safe owner/name pair; not cloned".to_string();
             warn!(repo = %full_name, "{message}");
             queue.items[idx].state = CloneState::Failed;
-            queue.items[idx].finished_at = Some(Utc::now().to_rfc3339());
+            queue.items[idx].finished_at = Some(crate::time::now_utc());
             queue.items[idx].last_error = Some(message.clone());
             outcome.failed.push((full_name, message));
             starred_queue::save(&mut queue, queue_path)?;
@@ -258,7 +257,7 @@ pub async fn backup_starred_repos(
         }
 
         // ── Record outcome ──────────────────────────────────────────────────
-        let now = Utc::now().to_rfc3339();
+        let now = crate::time::now_utc();
         if success {
             queue.items[idx].state = CloneState::Done;
             queue.items[idx].finished_at = Some(now);

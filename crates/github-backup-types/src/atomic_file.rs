@@ -5,7 +5,7 @@
 //! either the old content or the new content, never a mixture or nothing.
 //!
 //! Every file the tool writes (JSON metadata, the state, checkpoint, history
-//! and starred-queue files) goes through [`write`]:
+//! and starred-queue files) goes through [`write()`]:
 //!
 //! 1. the data is written to a temporary sibling, `.<name>.tmp-<pid>-<n>`,
 //!    unique per process and per write;
@@ -42,7 +42,7 @@ const LEGACY_TEMP_NAMES: &[&str] = &[
 ];
 
 /// A fresh, unique temporary path next to `path` with the given `kind`
-/// (`tmp` for [`write`], `part` for a file written piece by piece):
+/// (`tmp` for [`write()`], `part` for a file written piece by piece):
 /// `.<name>.<kind>-<pid>-<n>`.
 #[must_use]
 pub fn temp_path(path: &Path, kind: &str) -> PathBuf {

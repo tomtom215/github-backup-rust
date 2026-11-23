@@ -93,7 +93,7 @@ daily scheduled workflow:
 |--------|------|
 | Banned crates | `openssl`, `openssl-sys`, `reqwest`, `native-tls` |
 | Allowed licences | MIT, Apache-2.0 (also with the LLVM exception), ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0, Zlib |
-| Advisories | `cargo deny check advisories` (RustSec) must pass; the CI job `rustsec/audit-check` additionally runs with one documented ignore (`RUSTSEC-2026-0097`, a build-time-only dependency) |
+| Advisories | `cargo deny check advisories` (RustSec) must pass, with no ignored advisories |
 | Sources | only crates.io; no unknown registries or git dependencies |
 
 Dependabot proposes weekly updates for Cargo, GitHub Actions and the Docker base

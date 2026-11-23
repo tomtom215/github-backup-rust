@@ -24,7 +24,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use chrono::Utc;
 use tracing::warn;
 
 use github_backup_types::starred_queue::{CloneState, StarredCloneQueue, StarredQueueItem};
@@ -86,7 +85,7 @@ pub fn load_or_create(
     starred: &[Raw<Repository>],
 ) -> Result<StarredCloneQueue, CoreError> {
     let fresh = || {
-        let now = Utc::now().to_rfc3339();
+        let now = crate::time::now_utc();
         StarredCloneQueue {
             version: QUEUE_VERSION,
             owner: owner.to_string(),
@@ -144,7 +143,7 @@ pub fn begin_pass(queue: &mut StarredCloneQueue) {
 ///
 /// Returns [`CoreError`] on I/O or serialisation failure.
 pub fn save(queue: &mut StarredCloneQueue, path: &Path) -> Result<(), CoreError> {
-    queue.updated_at = Utc::now().to_rfc3339();
+    queue.updated_at = crate::time::now_utc();
     let json = serde_json::to_string_pretty(queue)?;
     crate::storage::write_atomic(path, json.as_bytes())
 }

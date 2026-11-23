@@ -7,7 +7,6 @@ rust-version.workspace  = true
 authors.workspace       = true
 license.workspace       = true
 repository.workspace    = true
-homepage.workspace      = true
 documentation.workspace = true
 keywords.workspace      = true
 categories.workspace    = true
@@ -35,9 +34,11 @@ zeroize = { workspace = true }
 # `aes-gcm`'s own `zeroize` feature only wipes the GHASH key.  The expanded AES
 # round keys are wiped on drop only when the `aes` crate's `zeroize` feature is
 # enabled, so it is requested explicitly (see `docs/src/storage/encryption.md`).
-aes = { version = "0.8", features = ["zeroize"] }
+aes = { version = "0.9", features = ["zeroize"] }
 # Constant-time comparison of the stored and the recomputed plaintext digest.
 subtle = "2"
+# Nonces for AES-GCM and retry jitter come straight from the operating system.
+getrandom = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -47,3 +48,8 @@ hyper = { workspace = true, features = ["server"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+
+[package.metadata.cargo-machete]
+# `aes` is not imported: it is listed only to switch on its `zeroize` feature
+# for the copy `aes-gcm` uses (see the comment on the dependency).
+ignored = ["aes"]
