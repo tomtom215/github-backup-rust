@@ -120,10 +120,12 @@ Post-processing: push the cloned repositories to another host.
 - `GiteaClient` (REST v1) and `GitLabClient` (REST v4): check the destination,
   create it (private unless the source is known to be public), and verify that it
   is ours (description marker `GitHub mirror of <owner>/<repo>`) or empty.
-- `push.rs`: `git push --prune` of `refs/heads/*` and `refs/tags/*` only (never
-  `--mirror`), with the token in an environment variable and a credential helper
-  scoped to the destination origin.
-- `runner` / `gitlab_runner`: walk `git/repos/*.git` and report per-repository
+  HTTPS only, with retries of `5xx` and transport failures (`http.rs`).
+- `push.rs`: `git push` of `refs/heads/*` and `refs/tags/*` only (never
+  `--mirror`; `--prune` only with `--prune`), with the token in an environment
+  variable and a credential helper scoped to the destination origin.
+- `runner`: walk `git/repos/*.git`, skip repositories whose backup failed in
+  this run, shallow clones and clones without refs, and report per-repository
   failures.
 
 ### `github-backup-s3`
