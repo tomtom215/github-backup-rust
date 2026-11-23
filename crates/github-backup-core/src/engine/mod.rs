@@ -43,8 +43,8 @@ use self::repo::{backup_one_repo, Refusals, RepoContext, RepoResult};
 use self::steps::{RunControl, Steps};
 use crate::{
     backup::{
-        discussion, gist::backup_gists, merge::merge_list, package::backup_packages,
-        project::backup_projects, repository::should_include, starred_repos::backup_starred_repos,
+        gist::backup_gists, merge::merge_list, package::backup_packages, project::backup_projects,
+        repository::should_include, starred_repos::backup_starred_repos,
         user_data::backup_user_data,
     },
     cancel::CancelFlag,
@@ -239,7 +239,6 @@ where
         // ── Owner-level data ───────────────────────────────────────────────
         {
             let mut steps = Steps::new(owner, &stats, &control, &secrets);
-            discussion::warn_if_requested(&self.opts);
             for (step, outcome) in [
                 (
                     "owner data",

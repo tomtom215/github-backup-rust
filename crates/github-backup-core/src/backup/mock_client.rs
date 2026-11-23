@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use github_backup_client::{AssetSink, BackupClient, BoxFuture, ClientError};
+use github_backup_client::{AssetSink, BackupClient, BoxFuture, ClientError, NodePage};
 use github_backup_types::{
     Branch, Collaborator, CommitComment, DeployKey, Environment, Gist, GistComment, Hook, Issue,
     IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion, Page, ProjectV2,
@@ -71,6 +71,13 @@ struct MockData {
     calls: Vec<String>,
     /// The field ids each `list_project_items` call asked for.
     project_item_field_ids: Vec<Vec<u64>>,
+    /// Pages of discussions: page `i` answers the cursor `page-i` (the
+    /// first page answers no cursor).
+    discussion_pages: Vec<Vec<Value>>,
+    /// Comments (with their replies) by discussion node id.
+    discussion_comments: HashMap<String, Vec<Value>>,
+    /// GraphQL error type to fail with, keyed like `errors`.
+    graphql_errors: HashMap<String, String>,
 }
 
 #[allow(dead_code)]
@@ -295,6 +302,50 @@ impl MockBackupClient {
     pub fn with_packages(self, packages: Vec<Package>) -> Self {
         self.inner.lock().unwrap().packages = packages;
         self
+    }
+
+    /// Serves `pages` as the pages of the discussion listing.
+    pub fn with_discussion_pages(self, pages: Vec<Vec<Value>>) -> Self {
+        self.inner.lock().unwrap().discussion_pages = pages;
+        self
+    }
+
+    /// Serves `comments` as the comments of the discussion with node id `id`.
+    pub fn with_discussion_comments(self, id: &str, comments: Vec<Value>) -> Self {
+        self.inner
+            .lock()
+            .unwrap()
+            .discussion_comments
+            .insert(id.to_string(), comments);
+        self
+    }
+
+    /// Makes `key` (`endpoint` or `endpoint:argument`) fail with a GraphQL
+    /// error of type `kind` (`NOT_FOUND`, `FORBIDDEN`, ...).
+    pub fn with_graphql_error(self, key: &str, kind: &str) -> Self {
+        self.inner
+            .lock()
+            .unwrap()
+            .graphql_errors
+            .insert(key.to_string(), kind.to_string());
+        self
+    }
+
+    /// [`call`](Self::call), then the injected GraphQL error, if any.
+    fn graphql_call(&self, endpoint: &str, argument: &str) -> Result<(), ClientError> {
+        self.call(endpoint, argument)?;
+        let data = self.inner.lock().unwrap();
+        let kind = data
+            .graphql_errors
+            .get(&format!("{endpoint}:{argument}"))
+            .or_else(|| data.graphql_errors.get(endpoint));
+        match kind {
+            Some(kind) => Err(ClientError::GraphQl {
+                message: format!("mock {kind} for {endpoint}:{argument}"),
+                kinds: vec![kind.clone()],
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Pre-loads package versions.
@@ -703,6 +754,62 @@ impl BackupClient for MockBackupClient {
             .project_item_field_ids
             .push(field_ids.to_vec());
         ready(self.page("project_items", &project_number.to_string(), |_| Vec::new()))
+    }
+
+    fn list_discussion_categories<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+    ) -> Fut<'a, Vec<Value>> {
+        ready(self.graphql_call("discussion_categories", "").map(|()| {
+            let data = self.inner.lock().unwrap();
+            data.raw
+                .get("discussion_categories")
+                .cloned()
+                .unwrap_or_default()
+        }))
+    }
+
+    fn list_discussions_page<'a>(
+        &'a self,
+        _owner: &'a str,
+        _repo: &'a str,
+        after: Option<&'a str>,
+    ) -> Fut<'a, NodePage> {
+        let result = self
+            .graphql_call("discussions", after.unwrap_or_default())
+            .and_then(|()| {
+                let data = self.inner.lock().unwrap();
+                let index = match after {
+                    None => 0,
+                    Some(cursor) => cursor
+                        .strip_prefix("page-")
+                        .and_then(|i| i.parse().ok())
+                        .ok_or_else(|| ClientError::ApiError {
+                            status: 400,
+                            body: format!("mock: unknown cursor {cursor}"),
+                        })?,
+                };
+                let pages = &data.discussion_pages;
+                Ok(NodePage {
+                    nodes: pages.get(index).cloned().unwrap_or_default(),
+                    next: (index + 1 < pages.len()).then(|| format!("page-{}", index + 1)),
+                })
+            });
+        ready(result)
+    }
+
+    fn list_discussion_comments<'a>(&'a self, discussion_id: &'a str) -> Fut<'a, Vec<Value>> {
+        ready(
+            self.graphql_call("discussion_comments", discussion_id)
+                .map(|()| {
+                    let data = self.inner.lock().unwrap();
+                    data.discussion_comments
+                        .get(discussion_id)
+                        .cloned()
+                        .unwrap_or_default()
+                }),
+        )
     }
 
     fn list_packages<'a>(

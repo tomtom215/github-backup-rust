@@ -70,7 +70,9 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   slow but steady transfer is not cut off).
 - **GraphQL**: `graphql(query, variables)` posts a query to `/graphql` (GHES:
   `/api/graphql`) with the same handling and fails on a non-empty `errors`
-  array.
+  array.  Discussions are read this way (`client/endpoints/discussions.rs`),
+  every connection followed with its cursor and nested ones completed with
+  `node(id:)` queries.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
   `/gists`, which include private repositories and secret gists.
@@ -108,7 +110,7 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (`GET /repos/{o}/{r}`), repository clone,
   wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
   advisories, branches and rulesets, deploy keys, collaborators, actions,
-  environments, commit comments.  Inside a category an item that fails (one
+  environments, commit comments, discussions.  Inside a category an item that fails (one
   issue's comments) is recorded and the category carries on; a category that
   answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
   warning per category per run).
@@ -125,7 +127,9 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   on disk, the last fetch (`fetched_at`, cleared when a run that fetched
   fails for the repository) is under 7 days old and, for clones that hold
   `refs/pull/*`, no pull request changed since (`engine/repo.rs`).  Wikis are
-  always fetched.  `--full` ignores the watermark; an explicit `--since`
+  always fetched.  Discussions: their GraphQL listing is ordered by
+  `updatedAt` and stops at the watermark, and the stored list is merged with
+  what it returned.  `--full` ignores the watermark; an explicit `--since`
   replaces it for the lists and per-item requests (never for git) and is
   never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the

@@ -16,12 +16,14 @@
 //! | [`org`]         | organisation members and teams                           |
 //! | [`actions`]     | workflows, workflow runs, deployment environments        |
 //! | [`community`]   | Projects (v2) and Packages                               |
+//! | [`discussions`] | Discussions, their comments and categories (GraphQL)     |
 //! | [`mod@assets`]  | release asset downloads                                  |
 //! | [`mod@write`]   | label and milestone creation (used by restore mode)      |
 
 mod actions;
 mod assets;
 mod community;
+mod discussions;
 mod issues;
 mod keys;
 mod org;

@@ -101,7 +101,7 @@ failures it reports.
 | `--gists`, `--starred-gists` | `gist` | not available to fine-grained tokens |
 | `--packages` | `read:packages` | not available to fine-grained tokens |
 | `--projects` | `read:project` | Projects: read (organisation permission) |
-| `--discussions` | n/a | n/a: nothing is backed up yet (GraphQL only) |
+| `--discussions` | `repo` (private); a token is always needed (GraphQL) | Discussions: read |
 | commit comments (`--all`) | `repo` (private) | Contents: read |
 | `--restore` | `repo` (write) | Issues: read and write |
 
