@@ -422,8 +422,8 @@ is bumped.
 - `--help` no longer prints the webhook URL from `BACKUP_NOTIFY_WEBHOOK`.
 - `temp_clone_token`, a short-lived credential GitHub can embed in any
   repository object, is removed from every API response at every depth before
-  anything is stored (it was written to `repos.json`, `info.json`, starred lists
-  and the `head.repo`/`base.repo` of pull requests); configuration and proxy `Debug` output redact secrets; a
+  anything is stored (it was written to `repos.json` and could reach any file
+  holding a nested repository object, such as a pull request's `base.repo`); configuration and proxy `Debug` output redact secrets; a
   next-page link to another origin is not followed with the token; the mirror API
   refuses `http://` URLs and empty tokens.
 - Starred repositories named like a path are refused instead of cloned outside
