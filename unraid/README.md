@@ -19,13 +19,10 @@ The template has been authored against the v7.2.x DockerMan / CA conventions
 documented at <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/>.
 It sets no `<MinVer>`; it has not been tested on Unraid 6.x.
 
-**Image tag.** The template pulls `ghcr.io/tomtom215/github-backup-rust:edge`,
-which is built from `main` on every change to the code or the image.  It does
-not use `:latest` because `:latest` is the last release, v0.3.2, whose image
-has no entrypoint wrapper: started from this form it would only print the help
-text.  Once a release newer than v0.3.2 is published, you can set
-*Repository* to `:latest` (or a version such as `:X.Y.Z`) in the container
-settings for a release build.
+**Image tag.** The template pulls `ghcr.io/tomtom215/github-backup-rust:latest`,
+the most recent release.  To pin a release, set *Repository* to a version such
+as `:0.4` or `:X.Y.Z` in the container settings; `:edge` is built from `main`
+and is not a release.
 
 **Permissions.** The template passes `--user 99:100` (`nobody:users`, the owner of
 Unraid shares), so files the backup writes belong to the same user SMB clients
@@ -43,7 +40,7 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 | Output Directory                  | `/backup` (Path)         | `/mnt/user/backups/github/`      | Required. Point at an Unraid share. |
 | GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Optional. User / org to back up; empty backs up the token's account. |
 | GitHub Token                      | `GITHUB_TOKEN`           | _(empty)_                        | Required, **masked**. |
-| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:edge --tui` from the Unraid terminal. |
+| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:latest --tui` from the Unraid terminal. |
 | Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted; nothing is run through a shell). |
 | GitHub API URL (GHES)             | `GITHUB_API_URL`         | _(empty)_                        | Advanced. |
 | GitHub Clone Host (split GHES)    | `GITHUB_CLONE_HOST`      | _(empty)_                        | Advanced. |
@@ -58,7 +55,7 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 
 CLI / Compose / Kubernetes users invoke the binary directly:
 
-    docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:edge octocat --all
+    docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:latest octocat --all
 
 That continues to work unchanged.
 

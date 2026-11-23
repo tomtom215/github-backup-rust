@@ -10,18 +10,11 @@
 > library.  Every workspace crate is marked `publish = false`, so
 > `cargo install github-backup` from the default registry will not work.
 
-> **Which version does this documentation describe?**  It describes the
-> current development branch (`main`).  The latest published release, v0.3.2,
-> predates a large set of changes; among others it has no `--doctor`,
-> `--check`, `--list-scopes`, `--print-config-template`, `--full`, no exit
-> status `3` and no per-repository incremental state; in v0.3.2 the second and
-> later runs applied the previous run's timestamp automatically, which could
-> overwrite `issues.json` with only the issues that had changed.  The complete list is the `Unreleased`
-> section of the [changelog](../development/changelog.md).  Until the next
-> release is published, use a source build from `main` (below) to get what
-> these pages describe.  `github-backup --version` prints the same number for
-> a release and for a build from `main` before its version is bumped, so check
-> the changelog if in doubt.
+> **Which version does this documentation describe?**  The current
+> development branch (`main`).  A feature added since the latest release is
+> listed in the `Unreleased` section of the
+> [changelog](../development/changelog.md); use a build from `main` (below) to
+> get it before the next release.
 
 ## 1. Pre-built binary
 
@@ -37,9 +30,7 @@ checksum file, plus a combined `SHA256SUMS.txt`:
 | Windows, x86_64 | `github-backup-windows-x86_64.exe` | also runs on Windows on Arm (emulated) |
 
 (The static Linux binaries are built by the release workflow, which checks with
-`file` and `ldd` that they have no dynamic dependencies.  The v0.3.2
-Linux x86_64 binary, by contrast, was linked against glibc and needed glibc 2.39
-or newer.)
+`file` and `ldd` that they have no dynamic dependencies.)
 
 ### Install script (Linux, macOS)
 
@@ -84,8 +75,8 @@ parameters.)
 ### cargo-binstall
 
 With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) the release
-binary is downloaded instead of compiled (for releases after v0.3.2; other
-targets fall back to a source build):
+binary is downloaded instead of compiled (other targets fall back to a source
+build):
 
 ```bash
 cargo binstall --git https://github.com/tomtom215/github-backup-rust github-backup
@@ -134,9 +125,8 @@ downloads do not trigger these warnings.
 
 ### Verify build provenance (optional)
 
-Releases published after v0.3.2 (the first built by the current release
-workflow) attach a signed GitHub **build-provenance attestation** to each of the
-five binaries and to `SHA256SUMS.txt`.  With the [GitHub CLI](https://cli.github.com/):
+Every release from v0.4.0 on attaches a signed GitHub **build-provenance
+attestation** to each of the five binaries and to `SHA256SUMS.txt`.  With the [GitHub CLI](https://cli.github.com/):
 
 ```bash
 gh attestation verify "github-backup-${TARGET}" \
@@ -147,28 +137,25 @@ This proves that GitHub Actions built that file from this repository.  The
 container images are attested too (see [Docker](#2-docker--docker-compose)).
 The `.sha256` files only protect against corrupted downloads; an attacker who
 can replace a binary can replace its checksum, which is what the attestation is
-for.  v0.3.2 and earlier releases have no attestation.
+for.  Releases before v0.4.0 have no attestation.
 
 ## 2. Docker / Docker Compose
 
 Multi-architecture images (`linux/amd64`, `linux/arm64`) are published to GHCR:
 
 ```bash
-docker pull ghcr.io/tomtom215/github-backup-rust:edge     # built from main
 docker pull ghcr.io/tomtom215/github-backup-rust:latest   # latest stable release
 docker pull ghcr.io/tomtom215/github-backup-rust:X.Y.Z    # a specific release
 docker pull ghcr.io/tomtom215/github-backup-rust:X.Y      # latest patch of X.Y
+docker pull ghcr.io/tomtom215/github-backup-rust:edge     # built from main
 ```
 
 `edge` (and `sha-<commit>`) is rebuilt from `main` whenever the code or the
 image changes; it matches this documentation but is not a release.  `latest`
 and `X.Y` are only moved by stable releases; a pre-release has just its own tag.
-**Note:** until the next release, `:latest` is v0.3.2, which lacks the
-entrypoint wrapper, the diagnostics and the other changes described in this
-documentation, so the examples below use `:edge`.  Pin a release in production
-once one newer than v0.3.2 exists.
+Pin a release (`:X.Y` or `:X.Y.Z`) for unattended production runs.
 
-Images from releases after v0.3.2 and every `edge` image carry an SBOM and
+Release images from v0.4.0 on and every `edge` image carry an SBOM and
 build provenance, and a GitHub attestation you can check with
 `gh attestation verify oci://ghcr.io/tomtom215/github-backup-rust:TAG --repo tomtom215/github-backup-rust`.
 A release image contains exactly the attested Linux release binary.
@@ -179,8 +166,8 @@ A release image contains exactly the attested Linux release binary.
 docker run --rm \
   -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:edge \
-  octocat --output /backup --all
+  ghcr.io/tomtom215/github-backup-rust:latest \
+  octocat --output /backup
 ```
 
 `-e GITHUB_TOKEN` (no value) passes the variable from your shell without
@@ -200,7 +187,7 @@ cd github-backup-rust
 cp compose.example.env .env
 chmod 600 .env
 $EDITOR .env            # set GITHUB_TOKEN and what the profile you use needs
-                        # (GITHUB_BACKUP_TAG selects the image tag; default edge)
+                        # (GITHUB_BACKUP_TAG selects the image tag; default latest)
 
 # Local filesystem backup to ./backups/
 docker compose run --rm backup octocat --all

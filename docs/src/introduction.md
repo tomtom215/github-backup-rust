@@ -8,11 +8,8 @@ is `rustls` (no OpenSSL), the S3 client is a pure-Rust SigV4 implementation (no
 AWS SDK), and an optional full-screen TUI is available with `--tui`.
 
 > **Documentation version.**  These pages describe the current development
-> branch (`main`).  The latest release, v0.3.2, predates many of the behaviours
-> described here (exit status `3`, per-repository incremental state, lossless
-> JSON, `--doctor`, restore changes, and more); the `Unreleased` section of the
-> [changelog](development/changelog.md) lists them.  See
-> [Installation](getting-started/installation.md) for how to get a matching build.
+> branch (`main`); a feature added since the latest release is listed in the
+> `Unreleased` section of the [changelog](development/changelog.md).
 
 ## Feature Highlights
 

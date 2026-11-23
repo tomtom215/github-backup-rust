@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "clap",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-client"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-core"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "github-backup-client",
  "github-backup-types",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-mirror"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "github-backup-client",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-s3"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "aead-stream",
  "aes",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-tui"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "github-backup-client",
  "github-backup-core",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-types"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "github-backup-viewer"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "pulldown-cmark",
  "serde_json",

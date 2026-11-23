@@ -42,7 +42,7 @@ backup is running, and not while editing a field).  On narrow terminals the
 title bar shrinks to digits.
 
 ```
- github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
+ github-backup v0.4.0  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
 ```
 
 Terminals smaller than 30x8 show a "Terminal too small" notice instead of a

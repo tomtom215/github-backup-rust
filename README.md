@@ -13,13 +13,6 @@ GitHub user or organisation.  Uses `rustls` (no OpenSSL), a pure-Rust S3 SigV4
 client (no AWS SDK), and ships an optional full-screen interactive TUI.
 
 > **Full documentation** → **[tomtom215.github.io/github-backup-rust](https://tomtom215.github.io/github-backup-rust/)**
->
-> **Version note.**  This README and the documentation describe the current
-> development branch (`main`).  The latest release, v0.3.2, predates many of the
-> behaviours described here (exit status `3`, per-repository incremental state,
-> lossless JSON, `--doctor`, ...); the `Unreleased` section of
-> [CHANGELOG.md](CHANGELOG.md) lists them.  To get a matching build before the
-> next release, use [option 4](#4-build-from-source) below.
 
 ---
 
@@ -67,13 +60,11 @@ install -m 0755 "github-backup-${TARGET}" /usr/local/bin/github-backup
 
 Targets: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`,
 `windows-x86_64.exe`.  The release workflow builds the Linux binaries as static
-(musl) executables with no glibc requirement (the v0.3.2 x86_64 binary was
-glibc-linked and needs glibc 2.39 or newer).  Windows is built but its tests are
-not run in CI.
+(musl) executables with no glibc requirement.  The tests run in CI on Linux,
+macOS and Windows.
 
-Releases after v0.3.2 attach a signed GitHub **build-provenance attestation**
-to each of the five binaries (not to the checksum files or the container
-images); verify one with:
+Each release attaches a signed GitHub **build-provenance attestation** to the
+five binaries and to `SHA256SUMS.txt`; verify one with:
 
 ```bash
 gh attestation verify "github-backup-${TARGET}" \
@@ -84,16 +75,14 @@ gh attestation verify "github-backup-${TARGET}" \
 
 Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR for every
 release (`latest`, `X.Y.Z`, `X.Y`) and as `edge` (plus `sha-<commit>`) from
-`main`.  `:latest` is the last *published release* and lacks the behaviour
-described here until the next release; use `:edge` (not a release: pin a
-release newer than v0.3.2 in production once one exists) or build the image
-yourself (`docker build -t github-backup .`).
+`main`.  Use `:latest` or pin a release (`:X.Y`) in production; `edge` is not a
+release.  You can also build the image yourself (`docker build -t github-backup .`).
 
 ```bash
 docker run --rm \
   -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:edge \
+  ghcr.io/tomtom215/github-backup-rust:latest \
   octocat --output /backup
 ```
 
@@ -180,7 +169,7 @@ The command line and the config file (`--all`, `--private`, `--dry-run`, `--org`
 `--since`, `--concurrency`, `--manifest`, category flags, ...) pre-fill the Configure screen.
 
 ```
- github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
+ github-backup v0.4.0  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
 ┌ Status ──────────────────────────────────────────────────────────────────────┐
 │Owner:  octocat                        Last run: 2026-10-03T23:51:37Z         │
 │Output: /var/backup/github             Repos:    312                          │

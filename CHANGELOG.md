@@ -9,9 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes on `main` since v0.3.2 (2026-04-12).  Nothing here is in a published
-release yet; `github-backup --version` prints `0.3.2` for both until the version
-is bumped.
+## [0.4.0] — 2026-11-23
+
+A full audit of the tool: data-loss fixes, safer defaults that need no
+configuration, new backup categories (Discussions, attachments, Projects,
+rulesets, commit comments), an offline HTML viewer, GitHub App sign-in, faster
+repeat runs, and a refreshed dependency tree.  Read the upgrade notes first.
 
 ### Breaking changes and upgrade notes
 
@@ -54,8 +57,9 @@ is bumped.
   exist for a repository (404/410) is not a failure.
 - **Minimum Rust version 1.89** (building from source only).  CI and the release
   build with the toolchain pinned in `rust-toolchain.toml` (1.100.0).
-- **Container users:** `:latest` is still v0.3.2.  Compose and the Unraid
-  template use the new `:edge` image (built from `main`) until the next release.
+- **Container users:** this is the first release image with the entrypoint
+  wrapper that Compose and the Unraid template rely on; both pull `:latest`
+  again.  An `:edge` image is also built from `main` (not a release).
 
 - **Exit status `3` is new.**  A run that finishes but could not back up
   everything now exits `3` (it used to exit `0` and report success).  Scripts and
@@ -898,7 +902,8 @@ existing configurations and command-line flags are unchanged.
   `cargo-audit`, `cargo-deny`.
 - Dependency policy in `deny.toml`: no OpenSSL, no reqwest, no native-tls.
 
-[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/tomtom215/github-backup-rust/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/tomtom215/github-backup-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tomtom215/github-backup-rust/compare/v0.2.0...v0.3.0
