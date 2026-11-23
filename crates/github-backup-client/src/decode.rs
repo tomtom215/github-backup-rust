@@ -16,6 +16,28 @@ use tracing::warn;
 
 use github_backup_types::Page;
 
+/// The key of the short-lived read credential GitHub can embed in any
+/// repository object (top-level or nested: a fork's `parent`, a pull
+/// request's `head.repo` and `base.repo`, an event's `repo`, ...).
+const CLONE_TOKEN_KEY: &str = "temp_clone_token";
+
+/// Removes `temp_clone_token` from `value` at every depth.
+///
+/// GitHub documents the token as sensitive; a backup must never write a
+/// credential to a file.  Every JSON response passes through here before it
+/// is decoded, so no endpoint can forget it.  Everything else is kept exactly
+/// as received.
+pub(crate) fn drop_credentials(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.shift_remove(CLONE_TOKEN_KEY);
+            object.values_mut().for_each(drop_credentials);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_credentials),
+        _ => {}
+    }
+}
+
 /// Appends the `values` of one API response to `page`.
 ///
 /// An element that does not fit `T` is not an error.  It is kept as received
@@ -60,6 +82,25 @@ fn identify(value: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clone_tokens_are_dropped_at_every_depth_and_nothing_else() {
+        let mut value = json!([{
+            "id": 1,
+            "temp_clone_token": "SECRET1",
+            "parent": {"id": 2, "temp_clone_token": "SECRET2", "size": 7},
+            "base": {"repo": {"temp_clone_token": "SECRET3", "name": "r"}},
+            "list": [{"temp_clone_token": "SECRET4"}, "temp_clone_token"],
+            "body": "text mentioning temp_clone_token stays"
+        }]);
+        drop_credentials(&mut value);
+        let written = value.to_string();
+        assert!(!written.contains("SECRET"), "{written}");
+        assert_eq!(value[0]["parent"]["size"], 7);
+        assert_eq!(value[0]["base"]["repo"]["name"], "r");
+        assert_eq!(value[0]["list"][1], "temp_clone_token");
+        assert_eq!(value[0]["body"], "text mentioning temp_clone_token stays");
+    }
     use serde::Deserialize;
     use serde_json::json;
     use std::io;

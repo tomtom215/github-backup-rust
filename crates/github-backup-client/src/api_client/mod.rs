@@ -93,9 +93,10 @@ pub struct NodePage {
 /// The production implementation is [`crate::GitHubClient`]. Tests substitute
 /// a mock that returns pre-configured data.
 ///
-/// Repository objects (listings and [`get_repository`](Self::get_repository))
-/// never carry `temp_clone_token`, a short-lived credential GitHub may
-/// include: the backup must not write a credential to a file.
+/// No response carries `temp_clone_token`, a short-lived credential GitHub
+/// may embed in any repository object, top-level or nested: the client
+/// removes it before decoding, because the backup must not write a credential
+/// to a file.
 pub trait BackupClient: Send + Sync {
     // ── Repositories ──────────────────────────────────────────────────────
 

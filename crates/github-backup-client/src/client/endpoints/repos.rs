@@ -10,7 +10,6 @@ use github_backup_types::{Page, Raw, Repository};
 use crate::error::ClientError;
 
 use super::super::{GitHubClient, PER_PAGE};
-use super::{strip_clone_token, without_clone_tokens};
 
 impl GitHubClient {
     // ── User & org repos ──────────────────────────────────────────────────
@@ -43,7 +42,7 @@ impl GitHubClient {
         } else {
             format!("{api}/users/{username}/repos?type=all&per_page={PER_PAGE}")
         };
-        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
+        self.get_all_pages(&url).await
     }
 
     /// Lists repositories belonging to an organisation.  A GitHub App
@@ -58,13 +57,13 @@ impl GitHubClient {
         }
         let api = self.api();
         let url = format!("{api}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
-        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
+        self.get_all_pages(&url).await
     }
 
     /// Returns one repository in full (`GET /repos/{owner}/{repo}`): unlike
     /// the listings it has `parent`, `source`, `template_repository`, the
-    /// merge settings and `security_and_analysis`.  `temp_clone_token`, a
-    /// short-lived credential, is removed.
+    /// merge settings and `security_and_analysis`.  (`temp_clone_token`, a
+    /// short-lived credential, is removed from every response.)
     ///
     /// # Errors
     ///
@@ -77,6 +76,6 @@ impl GitHubClient {
         let api = self.api();
         let url = format!("{api}/repos/{owner}/{repo}");
         let (value, _) = self.get_json_with_link::<serde_json::Value>(&url).await?;
-        Ok(Raw::from_value(strip_clone_token(value))?)
+        Ok(Raw::from_value(value)?)
     }
 }

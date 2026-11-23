@@ -26,7 +26,6 @@ use crate::app_auth::{AppAuth, Minted};
 use crate::error::ClientError;
 use crate::token::{GitToken, TokenSource};
 
-use super::endpoints::without_clone_tokens;
 use super::{unix_now, Call, GitHubClient, PER_PAGE};
 
 /// A GitHub App installation, as GitHub describes it.
@@ -234,6 +233,6 @@ impl GitHubClient {
                     .as_str()
                     .is_some_and(|login| login.eq_ignore_ascii_case(owner))
             });
-        Ok(without_clone_tokens(Page::from_values(owned)))
+        Ok(Page::from_values(owned))
     }
 }

@@ -13,7 +13,7 @@ use github_backup_types::{Gist, GistComment, Page, Repository, User};
 use crate::error::ClientError;
 
 use super::super::{GitHubClient, PER_PAGE};
-use super::{encode_segment, without_clone_tokens};
+use super::encode_segment;
 
 impl GitHubClient {
     // ── User social graph ─────────────────────────────────────────────────
@@ -48,7 +48,7 @@ impl GitHubClient {
     pub async fn list_starred(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/starred?per_page={PER_PAGE}");
-        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
+        self.get_all_pages(&url).await
     }
 
     /// Returns repositories watched by `username`.
@@ -59,7 +59,7 @@ impl GitHubClient {
     pub async fn list_watched(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/subscriptions?per_page={PER_PAGE}");
-        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
+        self.get_all_pages(&url).await
     }
 
     // ── Gists ─────────────────────────────────────────────────────────────

@@ -572,7 +572,9 @@ impl GitHubClient {
             .get(header::LINK)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        Ok((serde_json::from_slice(&body)?, link))
+        let mut value: serde_json::Value = serde_json::from_slice(&body)?;
+        crate::decode::drop_credentials(&mut value);
+        Ok((serde_json::from_value(value)?, link))
     }
 
     /// Performs a single POST request with a JSON body and deserialises the
