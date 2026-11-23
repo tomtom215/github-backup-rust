@@ -4,10 +4,9 @@
 # Docker Compose configurations for github-backup-rust.
 #
 # By default, every service pulls the published multi-arch image
-# `ghcr.io/tomtom215/github-backup-rust:edge`, which is built from `main`
-# and so matches this file.  (`:latest` is the last release; v0.3.2 and
-# earlier lack the entrypoint wrapper the profiles below use.  Once a newer
-# release is out, set GITHUB_BACKUP_TAG to it in `.env` for unattended runs.)
+# `ghcr.io/tomtom215/github-backup-rust:latest` (the most recent release).  Set
+# GITHUB_BACKUP_TAG in `.env` to pin a release (`0.4`, or an exact X.Y.Z) for
+# unattended runs, or to `edge` for the image built from `main`.
 #
 # To build from a local checkout instead, uncomment `build: .` below, set
 # `GITHUB_BACKUP_TAG=local` in `.env` (so the build does not overwrite a
@@ -70,7 +69,7 @@
 # Fixed per-profile flags live in `entrypoint:` (after tini and the wrapper),
 # so `docker compose run --rm SERVICE OWNER --all` *appends* your arguments
 # instead of replacing `command:` and silently dropping `--s3-bucket` etc.
-x-image: &image ghcr.io/tomtom215/github-backup-rust:${GITHUB_BACKUP_TAG:-edge}
+x-image: &image ghcr.io/tomtom215/github-backup-rust:${GITHUB_BACKUP_TAG:-latest}
 
 x-backup: &backup
   image: *image

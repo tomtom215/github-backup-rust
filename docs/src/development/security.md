@@ -123,7 +123,7 @@ base images are bumped by hand.
 - Release binaries (five targets) and `SHA256SUMS.txt` carry a GitHub
   **build-provenance attestation** (see [Installation](../getting-started/installation.md#verify-build-provenance-optional));
   the per-file `.sha256` files do not.  The binaries are not code-signed.
-- Container images (releases after v0.3.2, and `edge`) are packaged from the
+- Container images (releases from v0.4.0 on, and `edge`) are packaged from the
   Linux binaries built in the same workflow run, so a release image contains the
   attested release binary.  Each image has an SBOM, max-mode BuildKit
   provenance and a GitHub attestation pushed to the registry.

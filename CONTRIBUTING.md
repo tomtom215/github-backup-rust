@@ -133,10 +133,6 @@ GitHub's own terms.  Do not hard-code version numbers in examples (use
    (`git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin vX.Y.Z`).  The
    workflow creates a draft release, pushes the image, and publishes the release
    only when everything succeeded.
-4. The first release after v0.3.2: switch the default image tag from `edge`
-   back to `latest` in `docker-compose.yml`, `compose.example.env`,
-   `unraid/github-backup.xml`, `unraid/README.md`, `DOCKER.md` and the
-   installation page, and drop the v0.3.2 notes.
 
 ## Reporting Issues
 

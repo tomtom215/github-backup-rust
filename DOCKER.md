@@ -7,21 +7,18 @@ minimal or distroless image: it has a shell (`/bin/sh`) and the Alpine package
 manager.  The linux/amd64 image is about 79 MB unpacked (about 23 MB to
 download), measured for the alpine 3.24 build.
 
-> **Version note.**  Multi-architecture images (`linux/amd64`, `linux/arm64`)
-> are published to GHCR: `latest` (most recent stable release), `X.Y.Z` and
-> `X.Y` for every release, and `edge` (plus `sha-<commit>`) built from `main`
-> whenever the code or the image changes.  `:latest` is the last **published
-> release**; the entrypoint wrapper, `--doctor` and the other behaviour
-> described on this page are not in v0.3.2.  Until the next release, use
-> `:edge` (as the examples below do) or build the image yourself
-> (`docker build -t github-backup .`).  `edge` is not a release: pin a release
-> newer than v0.3.2 in production once one exists.
+Multi-architecture images (`linux/amd64`, `linux/arm64`) are published to
+GHCR: `latest` (most recent stable release), `X.Y.Z` and `X.Y` for every
+release, and `edge` (plus `sha-<commit>`) built from `main` whenever the code or
+the image changes.  `edge` is not a release: pin a release (`:X.Y`) for
+unattended production runs.  You can also build the image yourself
+(`docker build -t github-backup .`).
 
 ```
-ghcr.io/tomtom215/github-backup-rust:edge       # main (not a release)
 ghcr.io/tomtom215/github-backup-rust:latest     # latest stable release
 ghcr.io/tomtom215/github-backup-rust:X.Y.Z      # an exact release
 ghcr.io/tomtom215/github-backup-rust:X.Y        # latest patch of X.Y
+ghcr.io/tomtom215/github-backup-rust:edge       # main (not a release)
 ```
 
 > Running on **Unraid**?  A Community Applications template is bundled: see
@@ -32,22 +29,22 @@ ghcr.io/tomtom215/github-backup-rust:X.Y        # latest patch of X.Y
 
 ```sh
 # Pull the image (or build it: docker build -t github-backup .)
-docker pull ghcr.io/tomtom215/github-backup-rust:edge
+docker pull ghcr.io/tomtom215/github-backup-rust:latest
 
 # Check the setup first: git, output directory, network, token
 docker run --rm -e GITHUB_TOKEN \
-  ghcr.io/tomtom215/github-backup-rust:edge \
+  ghcr.io/tomtom215/github-backup-rust:latest \
   octocat --doctor
 
 # Run a backup of everything the token's account owns
 docker run --rm -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:edge
+  ghcr.io/tomtom215/github-backup-rust:latest
 
 # The same, spelled out: another account or organisation, every category
 docker run --rm -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:edge \
+  ghcr.io/tomtom215/github-backup-rust:latest \
   octocat --output /backup --all
 ```
 
@@ -237,7 +234,7 @@ the credentials of each profile; add any other variable (for example
   checkpoint it leaves lets the next run resume (within 6 hours).
 * **Atomic outputs**: reports, metrics and JSON files are written to a temporary
   name and renamed, so a monitor never reads a half-written file.
-* **Provenance**: release images (after v0.3.2) and `edge` images are packaged
+* **Provenance**: release images (from v0.4.0 on) and `edge` images are packaged
   from the static Linux binaries built earlier in the same workflow run (a
   release image holds exactly the attested release binary), and carry an SBOM,
   BuildKit provenance and a GitHub attestation:
@@ -365,13 +362,13 @@ A job whose backup exits `3` (incomplete) counts as failed and is retried up to
 docker compose --profile doctor run --rm doctor octocat
 
 # Print the OAuth scopes a flag set needs (note: it does not expand --all)
-docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:edge \
+docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:latest \
   octocat --org --repositories --issues --list-scopes
 
 # Validate a config file and connectivity without running a backup
 docker run --rm -e GITHUB_TOKEN \
   -v "$PWD/config.toml:/etc/github-backup/config.toml:ro" \
-  ghcr.io/tomtom215/github-backup-rust:edge \
+  ghcr.io/tomtom215/github-backup-rust:latest \
   --config /etc/github-backup/config.toml --check
 ```
 
