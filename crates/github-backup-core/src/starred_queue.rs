@@ -9,15 +9,23 @@
 //!
 //! # Resuming
 //!
-//! On the next run, [`load_or_create`] reloads the file and merges any newly
-//! starred repositories (by repository ID).  Items already in the queue are
-//! left unchanged — so `Done` and `Failed` items are never reprocessed unless
-//! the user manually edits the file and resets their state to `"pending"`.
+//! On the next run, [`load_or_create`] reloads the file and merges the current
+//! starred list (by repository ID): new repositories are appended as
+//! `Pending`, known ones keep their state but take the current name, URLs and
+//! size (a renamed or transferred repository is cloned under its new name).
+//! While a pass is in progress (some item is `Pending`) it resumes where it
+//! stopped; once nothing is `Pending`, [`begin_pass`] starts a new pass in which
+//! every item, `Failed` ones included, is refreshed again.
+//!
+//! The queue only records progress: a file that cannot be parsed is replaced by
+//! a fresh queue (with a warning), which costs one full pass, instead of
+//! failing the step on every run.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::Utc;
+use tracing::warn;
 
 use github_backup_types::starred_queue::{CloneState, StarredCloneQueue, StarredQueueItem};
 use github_backup_types::{Raw, Repository};
@@ -62,23 +70,22 @@ pub struct QueueStats {
 /// queue.
 ///
 /// New repositories from `starred` are appended in [`CloneState::Pending`].
-/// Repositories already present in the queue (matched by GitHub repo ID) are
-/// left untouched — their state is preserved.  (See [`begin_pass`] for how a
-/// finished queue is refreshed on the next run.)
+/// Repositories already present in the queue (matched by GitHub repo ID) keep
+/// their state and retry count but take the current name, URLs and size.
+/// (See [`begin_pass`] for how a finished queue is refreshed on the next run.)
+///
+/// A file that is not a valid queue is replaced by a new, empty one (with a
+/// warning): it only records progress.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError`] if the file exists but cannot be read or parsed.
+/// Returns [`CoreError`] if the file exists but cannot be read.
 pub fn load_or_create(
     path: &Path,
     owner: &str,
     starred: &[Raw<Repository>],
 ) -> Result<StarredCloneQueue, CoreError> {
-    let mut queue = if path.exists() {
-        let data = std::fs::read_to_string(path)
-            .map_err(|e| CoreError::io(path.display().to_string(), e))?;
-        serde_json::from_str::<StarredCloneQueue>(&data)?
-    } else {
+    let fresh = || {
         let now = Utc::now().to_rfc3339();
         StarredCloneQueue {
             version: QUEUE_VERSION,
@@ -87,6 +94,23 @@ pub fn load_or_create(
             updated_at: now,
             items: vec![],
         }
+    };
+    let mut queue = if path.exists() {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| CoreError::io(path.display().to_string(), e))?;
+        match serde_json::from_str::<StarredCloneQueue>(&data) {
+            Ok(queue) => queue,
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "the starred clone queue is unreadable; starting a new one (every starred repository is refreshed)"
+                );
+                fresh()
+            }
+        }
+    } else {
+        fresh()
     };
 
     merge_starred(&mut queue, starred);
@@ -144,14 +168,20 @@ pub fn compute_stats(queue: &StarredCloneQueue) -> QueueStats {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Appends newly discovered starred repos to the queue.
-///
-/// Items already present (by numeric repo ID) are never modified.
+/// Appends newly discovered starred repos to the queue and refreshes the
+/// name, URLs and size of known ones (matched by numeric repo ID, which
+/// survives renames and transfers); their state is kept.
 fn merge_starred(queue: &mut StarredCloneQueue, repos: &[Raw<Repository>]) {
     let known_ids: HashSet<u64> = queue.items.iter().map(|i| i.id).collect();
 
     for repo in repos {
         if known_ids.contains(&repo.id) {
+            if let Some(item) = queue.items.iter_mut().find(|i| i.id == repo.id) {
+                item.full_name.clone_from(&repo.full_name);
+                item.clone_url.clone_from(&repo.clone_url);
+                item.ssh_url.clone_from(&repo.ssh_url);
+                item.size_kb = repo.size;
+            }
             continue;
         }
         queue.items.push(StarredQueueItem {
@@ -256,6 +286,38 @@ mod tests {
             "existing Done state must not be overwritten"
         );
         assert_eq!(queue.items[1].state, CloneState::Pending);
+    }
+
+    /// Regression: a renamed (or transferred) starred repository kept its old
+    /// name and URL in the queue for ever, so it was fetched from a URL that
+    /// only redirects (or no longer exists).
+    #[test]
+    fn merge_takes_the_current_name_and_urls_of_known_repos() {
+        let mut queue = empty_queue("octocat");
+        merge_starred(&mut queue, &[make_repo(1, "old/name")]);
+        queue.items[0].state = CloneState::Done;
+        queue.items[0].retries = 2;
+
+        merge_starred(&mut queue, &[make_repo(1, "new/renamed")]);
+
+        let item = &queue.items[0];
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(item.full_name, "new/renamed");
+        assert_eq!(item.clone_url, "https://github.com/new/renamed.git");
+        assert_eq!(item.ssh_url, "git@github.com:new/renamed.git");
+        assert_eq!(item.state, CloneState::Done, "the state is kept");
+        assert_eq!(item.retries, 2);
+    }
+
+    /// Regression: a damaged queue file failed the starred step on every run.
+    #[test]
+    fn an_unreadable_queue_is_replaced_by_a_fresh_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        std::fs::write(&path, b"{ not json").expect("write");
+        let queue = load_or_create(&path, "octocat", &[make_repo(7, "a/b")]).expect("load");
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].state, CloneState::Pending);
     }
 
     #[test]
