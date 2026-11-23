@@ -43,7 +43,7 @@ removed deploy key or collaborator must not look as if it were still there.
 
 | Kind | Files (key) |
 |------|-------------|
-| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`); `attachments/index.json` (the URL) |
+| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`); `discussions.json`, `discussion_categories.json`, `discussion_comments/<n>.json` (`id`; replies are kept inside their comment); `attachments/index.json` (the URL) |
 | Snapshot | `info.json`, `topics.json`, `branches.json`, `branch_protections.json`, `rulesets.json`, `hooks.json`, `deploy_keys.json`, `collaborators.json`, `environments.json`, `starred.json`, `watched.json`, `followers.json`, `following.json`, `org_members.json`, `org_teams.json`, `gists/starred_index.json`, `gists/<id>.json`, `gists/<id>.starred.json` |
 
 Within an accumulating file the objects are ordered by their key when it is a
@@ -131,11 +131,15 @@ labels and milestones that were deleted on GitHub after they were backed up.
                 │   └── index.json          ← URL → file, size, type, digest, first seen
                 ├── workflows.json
                 ├── workflow_runs_<id>.json ← one per workflow (--action-runs)
-                └── environments.json
+                ├── environments.json
+                ├── discussions.json        ← GraphQL nodes, most recently updated first
+                ├── discussion_categories.json
+                └── discussion_comments/<n>.json ← comments of discussion <n>, each with its replies
 ```
 
-No discussion files are produced: GitHub serves Discussions through GraphQL
-only, see [Discussions](../backup-categories.md#discussions).
+The discussion files hold GraphQL nodes (camelCase properties such as
+`updatedAt`), not REST objects; see
+[Discussions](../backup-categories.md#discussions).
 Repositories that the options exclude (forks without `--forks`, private
 repositories without `--private`, `--include-repos` / `--exclude-repos`) get
 neither a clone nor a metadata directory.  The include and exclude patterns
@@ -246,8 +250,8 @@ mirror clone plus the LFS objects in the same directory.
 
 ### Attachments
 
-Files attached to issues, pull requests, comments, reviews, commit comments and
-release notes (see [Attachments](../backup-categories.md#attachments)).  The
+Files attached to issues, pull requests, discussions, comments, reviews, commit
+comments and release notes (see [Attachments](../backup-categories.md#attachments)).  The
 stored JSON keeps the original links; `index.json` is an object keyed by the
 link as it appears in the body (`&amp;` read as `&`, without a `#fragment`):
 

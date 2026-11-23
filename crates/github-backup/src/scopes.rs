@@ -74,6 +74,7 @@ fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
         || opts.security_advisories
         || opts.actions
         || opts.action_runs
+        || opts.discussions
         || opts.attachments;
     if touches_repos {
         set.insert("public_repo");

@@ -331,14 +331,13 @@ pub struct Args {
     /// GitHub Actions & environments:
     ///   `--actions` `--environments`
     ///
-    /// Projects, packages, commit comments and attachments:
-    ///   `--projects` `--packages` `--commit-comments` `--attachments`
+    /// Discussions, projects, packages, commit comments and attachments:
+    ///   `--discussions` `--projects` `--packages` `--commit-comments`
+    ///   `--attachments`
     ///
     /// **Not included**:
     ///   `--action-runs`  — full workflow run history (can be very large)
     ///   `--clone-starred` — clone every starred repository (can be very large)
-    ///   `--discussions`  — not backed up yet (GitHub serves them through
-    ///   GraphQL only)
     ///
     /// **Not controlled by `--all`** (output/behaviour flags):
     ///   `--lfs` `--prefer-ssh` `--prune` `--clone-type` `--concurrency`
@@ -606,8 +605,11 @@ pub struct Args {
     pub environments: bool,
 
     // ── GitHub Discussions ─────────────────────────────────────────────────
-    /// Request GitHub Discussions.  Not backed up yet: GitHub serves them
-    /// through GraphQL only, and the run logs a warning saying so.
+    /// Back up GitHub Discussions of each repository that has them enabled.
+    ///
+    /// Saves `discussions.json`, `discussion_categories.json` and
+    /// `discussion_comments/<number>.json` (every comment with its replies),
+    /// read through the GraphQL API.
     #[arg(help_heading = "What to back up", long)]
     pub discussions: bool,
 

@@ -23,7 +23,7 @@
 //! | Rate limiting | A 403/429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message is waited out (at least a minute and doubling when GitHub gives no hint; one wait at most about an hour, all waits of a request about two), pausing every clone of the client, and ends as [`ClientError::RateLimitExceeded`], never as a plain 403 |
 //! | Retries | GETs (and GraphQL queries): up to 3 retries on 500/502/503/504, connection failures, timeouts and stalled bodies, with exponential back-off + jitter; 4xx fail fast |
 //! | Body cap | 16 MiB cap on API responses ([`ClientError::BodyTooLarge`]) to protect against runaway streams |
-//! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports |
+//! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports; Discussions are read through it, every connection followed with cursors |
 //! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
 //! | Attachments | Files attached to issues, comments and release notes, streamed like release assets; the credential (HTTP Basic) goes to `https://github.com` only, and only from a github.com client |
 //! | TLS | rustls with platform CA bundle |
@@ -57,7 +57,7 @@ mod pagination;
 pub mod proxy;
 mod rate_limit;
 
-pub use api_client::{AssetSink, AttachmentDownload, BackupClient, BoxFuture};
+pub use api_client::{AssetSink, AttachmentDownload, BackupClient, BoxFuture, NodePage};
 pub use client::GitHubClient;
 pub use error::ClientError;
 pub use pagination::parse_next_link;

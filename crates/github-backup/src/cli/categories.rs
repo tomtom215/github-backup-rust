@@ -106,10 +106,9 @@ mod tests {
     fn every_category_of_all_is_named_and_none_twice() {
         let all = BackupOptions::all();
         let on = enabled(&all);
-        // `--all` leaves the two opt-in categories and the not-yet-implemented
-        // discussions off.
+        // `--all` leaves the two opt-in categories off.
         let off: Vec<_> = names().filter(|n| !on.contains(n)).collect();
-        assert_eq!(off, ["clone-starred", "action-runs", "discussions"]);
+        assert_eq!(off, ["clone-starred", "action-runs"]);
         let mut sorted: Vec<_> = names().collect();
         sorted.sort_unstable();
         sorted.dedup();

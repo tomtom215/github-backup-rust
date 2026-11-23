@@ -132,8 +132,7 @@ pub struct ConfigFile {
     pub action_runs: Option<bool>,
     /// Back up repository deployment environment configurations.
     pub environments: Option<bool>,
-    /// Request GitHub Discussions.  Nothing is backed up yet (GitHub serves
-    /// them through GraphQL only); the run logs a warning saying so.
+    /// Back up GitHub Discussions (with comments, replies and categories).
     pub discussions: Option<bool>,
     /// Back up the owner's Projects (v2), their fields and items.
     pub projects: Option<bool>,

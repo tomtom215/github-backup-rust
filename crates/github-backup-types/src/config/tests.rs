@@ -177,10 +177,7 @@ fn backup_options_all_enables_new_categories() {
     assert!(opts.commit_comments);
     assert!(opts.projects);
     assert!(opts.tolerate_forbidden, "--all asks for what is available");
-    assert!(
-        !opts.discussions,
-        "discussions are not backed up, so --all must not claim them"
-    );
+    assert!(opts.discussions);
 }
 
 #[test]
@@ -233,4 +230,15 @@ repostiories = true
 fn config_file_rejects_completely_unknown_keys() {
     let toml = r#"unknown_option = "value""#;
     assert!(ConfigFile::from_toml_str(toml).is_err());
+}
+
+/// The discussion listing stops at the watermark, so a watermark recorded
+/// without discussions must not be trusted for them.
+#[test]
+fn a_watermark_vouches_for_discussions_only_when_recorded_with_them() {
+    let opts = BackupOptions {
+        discussions: true,
+        ..Default::default()
+    };
+    assert_eq!(opts.incremental_categories(), ["discussions"]);
 }

@@ -34,10 +34,11 @@ use crate::{
     backup::{
         actions::backup_actions, attachments::backup_attachments, branches::backup_branches,
         collaborators::backup_collaborators, commit_comments::backup_commit_comments,
-        deploy_keys::backup_deploy_keys, environments::backup_environments, hooks::backup_hooks,
-        is_forbidden, is_gone, issue::backup_issues, labels::backup_labels,
-        milestones::backup_milestones, pull_request::backup_pull_requests, refused,
-        release::backup_releases, repository::backup_repository, repository::should_include,
+        deploy_keys::backup_deploy_keys, discussion::backup_discussions,
+        environments::backup_environments, hooks::backup_hooks, is_forbidden, is_gone,
+        issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
+        pull_request::backup_pull_requests, refused, release::backup_releases,
+        repository::backup_repository, repository::should_include,
         security_advisories::backup_security_advisories, topics::backup_topics, wiki::backup_wiki,
         Outcome,
     },
@@ -324,6 +325,19 @@ where
         backup_commit_comments(client, owner, name, opts, &meta_dir, storage),
     )
     .await;
+    if let Some(n) = category(
+        ctx,
+        &mut steps,
+        &listed.full_name,
+        "discussions",
+        "read access to the repository; for a private one the `repo` scope \
+         (classic token) or the Discussions read permission (fine-grained)",
+        backup_discussions(client, owner, repo, opts, since, &meta_dir, storage),
+    )
+    .await
+    {
+        ctx.stats.add_discussions(n);
+    }
     // Last: it reads the bodies the categories above stored.
     category(
         ctx,
@@ -695,5 +709,51 @@ mod tests {
         assert_eq!(failures[0].step, "issues");
         assert!(failures[0].message.starts_with("issue #1 comments: "));
         assert!(fx.file("r/issue_comments/2.json").is_some());
+    }
+
+    /// GraphQL answers for discussions read like the REST statuses: a
+    /// refusal fails the requested category (or is one warning under
+    /// `--all`), `NOT_FOUND` is an absent category, anything else fails.
+    #[tokio::test]
+    async fn graphql_refusals_and_absences_of_discussions() {
+        for (kind, tolerate, clean) in [
+            ("FORBIDDEN", false, false),
+            ("FORBIDDEN", true, true),
+            ("NOT_FOUND", false, true),
+            ("INTERNAL", true, false),
+        ] {
+            let client = MockBackupClient::new().with_graphql_error("discussion_categories", kind);
+            let opts = BackupOptions {
+                discussions: true,
+                tolerate_forbidden: tolerate,
+                ..Default::default()
+            };
+            let fx = Fixture::new(client, opts);
+            let result = fx.run(&listed(1)).await;
+            assert_eq!(
+                result == RepoResult::Clean,
+                clean,
+                "{kind} {tolerate}: {result:?}"
+            );
+            if !clean {
+                assert_eq!(fx.stats.failures()[0].step, "discussions");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discussions_are_stored_and_counted() {
+        let client = MockBackupClient::new().with_discussion_pages(vec![vec![
+            json!({"id": "D_1", "number": 1, "updatedAt": "2024-01-01T00:00:00Z"}),
+        ]]);
+        let opts = BackupOptions {
+            discussions: true,
+            ..Default::default()
+        };
+        let fx = Fixture::new(client, opts);
+        assert_eq!(fx.run(&listed(1)).await, RepoResult::Clean);
+        assert_eq!(fx.stats.discussions_fetched(), 1);
+        assert!(fx.file("r/discussions.json").is_some());
+        assert_eq!(fx.file("r/discussion_comments/1.json"), Some(json!([])));
     }
 }

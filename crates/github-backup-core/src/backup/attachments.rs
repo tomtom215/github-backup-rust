@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Files and images attached to issues, pull requests, comments, reviews and
-//! release notes.
+//! Files and images attached to issues, pull requests, discussions,
+//! comments, reviews and release notes.
 //!
 //! GitHub has no API for attachments: they are links in the Markdown `body`
 //! of an item, pointing at GitHub's own hosts.  The backup reads the bodies
@@ -285,8 +285,9 @@ fn load_index(storage: &impl Storage, path: &Path) -> Result<Index, CoreError> {
 }
 
 /// Every attachment URL in the bodies stored in `meta_dir`: issues, pull
-/// requests, releases and commit comments, and the comment, review comment
-/// and review files of every stored issue and pull request.  A file that
+/// requests, discussions, releases and commit comments, the comment, review
+/// comment and review files of every stored issue and pull request, and the
+/// comments and replies of every stored discussion.  A file that
 /// cannot be read is recorded and the others are still scanned.
 fn stored_urls(
     storage: &impl Storage,
@@ -327,8 +328,12 @@ fn stored_urls(
 
     let issues = numbers(scan("issues.json", outcome)?);
     let pulls = numbers(scan("pulls.json", outcome)?);
+    let discussions = numbers(scan("discussions.json", outcome)?);
     scan("releases.json", outcome)?;
     scan("commit_comments.json", outcome)?;
+    for n in discussions {
+        scan(&format!("discussion_comments/{n}.json"), outcome)?;
+    }
     let conversations: BTreeSet<u64> = issues.iter().chain(&pulls).copied().collect();
     for n in conversations {
         scan(&format!("issue_comments/{n}.json"), outcome)?;
@@ -340,7 +345,8 @@ fn stored_urls(
     Ok(urls)
 }
 
-/// The `body` of every object in a stored list (or of a stored object).
+/// The `body` of every object in a stored list (or of a stored object),
+/// and of the replies a discussion comment holds in `replies.nodes`.
 fn bodies(value: &Value) -> impl Iterator<Item = &str> {
     let items: Vec<&Value> = match value {
         Value::Array(items) => items.iter().collect(),
@@ -348,6 +354,14 @@ fn bodies(value: &Value) -> impl Iterator<Item = &str> {
     };
     items
         .into_iter()
+        .flat_map(|item| {
+            let replies = item
+                .pointer("/replies/nodes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten();
+            std::iter::once(item).chain(replies)
+        })
         .filter_map(|item| item.get("body").and_then(Value::as_str))
 }
 
@@ -781,6 +795,18 @@ mod tests {
             "commit_comments.json",
             &json!([{"id": 4, "body": in_commit}]),
         );
+        let in_discussion = "https://github.com/user-attachments/assets/discussion";
+        let in_reply = "https://github.com/user-attachments/assets/reply";
+        put(
+            &storage,
+            "discussions.json",
+            &json!([{"id": "D_1", "number": 9, "body": in_discussion}]),
+        );
+        put(
+            &storage,
+            "discussion_comments/9.json",
+            &json!([{"id": "DC_1", "body": "", "replies": {"nodes": [{"id": "DC_2", "body": in_reply}]}}]),
+        );
         let client = MockBackupClient::new()
             .with_attachment(IMG, b"png-bytes", Some("image/png"))
             .with_attachment(LOG, b"log text", Some("text/plain"))
@@ -788,15 +814,17 @@ mod tests {
             // The same content under two URLs is stored once.
             .with_attachment(REPO_FILE, b"png-bytes", Some("application/pdf"))
             .with_attachment(in_release, b"r", None)
-            .with_attachment(in_commit, b"c", Some("image/gif"));
+            .with_attachment(in_commit, b"c", Some("image/gif"))
+            .with_attachment(in_discussion, b"d", Some("image/png"))
+            .with_attachment(in_reply, b"e", Some("image/png"));
 
         let outcome = run(&client, &storage).await;
 
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
-        assert_eq!(outcome.count, 6);
-        assert_eq!(downloads(&client), 6, "each URL once");
+        assert_eq!(outcome.count, 8);
+        assert_eq!(downloads(&client), 8, "each URL once");
         let index = index(&storage);
-        assert_eq!(index.len(), 6);
+        assert_eq!(index.len(), 8);
         let img = &index[IMG];
         let digest = crate::manifest::sha256_hex(b"png-bytes");
         assert_eq!(img.file, Some(format!("{digest}.png")));
