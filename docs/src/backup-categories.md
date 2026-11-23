@@ -334,12 +334,13 @@ discussions, or of 50 comments with up to 50 replies each, costs about one
 point.  The cost of every query is logged at debug level (`-v`).
 
 The files accumulate: discussions are merged by `id`, comments by `id`, and a
-reply GitHub no longer returns stays in its comment.  On an incremental run
-discussions are listed most recently updated first and the listing stops at
-the first one not updated since the repository's watermark; only the
-discussions listed get their comments fetched again.  GitHub does not document
+reply GitHub no longer returns stays in its comment.  Every run lists all
+discussions (about one point per 50).  On an incremental run a discussion's
+comments are fetched again only when it was updated since the repository's
+watermark, its `updatedAt` or its number of top-level comments differs from
+the stored copy, or its comments file is missing.  GitHub does not document
 whether a new reply or an edited comment changes the discussion's `updatedAt`;
-if it does not, such a change is picked up when the discussion itself next
+if it does not, such a change alone is picked up when the discussion next
 changes, or by a run with `--full`.
 
 Output: `<output>/<owner>/json/repos/<repo>/discussions.json`, `discussion_categories.json`, `discussion_comments/<number>.json`
