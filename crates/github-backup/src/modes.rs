@@ -44,48 +44,83 @@ pub(crate) fn run_verify(json_dir: &std::path::Path) -> ExitCode {
 }
 
 /// Decrypts `input_path` with `key` and writes plaintext to `output_path`.
+///
+/// A version-1 object is decrypted a segment at a time, so memory stays
+/// bounded whatever its size.  The plaintext goes to a temporary file next to
+/// `output_path`, renamed into place only once the whole object has
+/// authenticated: a truncated or tampered object leaves no output file.
 pub(crate) fn run_decrypt(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     key: &[u8; 32],
 ) -> ExitCode {
-    let ciphertext = match std::fs::read(input_path) {
-        Ok(b) => b,
-        Err(e) => {
-            error!(path = %input_path.display(), "failed to read encrypted file: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let plaintext = match github_backup_s3::encrypt::decrypt(key, &ciphertext) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("decryption failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                error!(path = %parent.display(), "failed to create output directory: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    match std::fs::write(output_path, &plaintext) {
-        Ok(()) => {
+    match decrypt_file(input_path, output_path, key) {
+        Ok(bytes) => {
             info!(
                 input = %input_path.display(),
                 output = %output_path.display(),
-                bytes = plaintext.len(),
+                bytes,
                 "decryption complete"
             );
             ExitCode::SUCCESS
         }
         Err(e) => {
-            error!(path = %output_path.display(), "failed to write decrypted output: {e}");
+            error!("{e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The work of [`run_decrypt`]; returns the plaintext size.
+fn decrypt_file(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    key: &[u8; 32],
+) -> Result<u64, String> {
+    use std::io::{BufReader, BufWriter, Write as _};
+
+    let input = std::fs::File::open(input_path).map_err(|e| {
+        format!(
+            "failed to read encrypted file {}: {e}",
+            input_path.display()
+        )
+    })?;
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "failed to create output directory {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    let tmp = github_backup_types::atomic_file::temp_path(output_path, "part");
+    let result = (|| {
+        let mut out = BufWriter::new(
+            std::fs::File::create_new(&tmp)
+                .map_err(|e| format!("failed to write decrypted output {}: {e}", tmp.display()))?,
+        );
+        let bytes = github_backup_s3::encrypt::decrypt_to(key, BufReader::new(input), &mut out)
+            .map_err(|e| format!("decryption failed: {e}"))?;
+        let write_failed =
+            |e: std::io::Error| format!("failed to write decrypted output {}: {e}", tmp.display());
+        out.flush().map_err(write_failed)?;
+        let file = out.into_inner().map_err(|e| write_failed(e.into_error()))?;
+        file.sync_all().map_err(write_failed)?;
+        drop(file);
+        std::fs::rename(&tmp, output_path).map_err(|e| {
+            format!(
+                "failed to write decrypted output {}: {e}",
+                output_path.display()
+            )
+        })?;
+        Ok(bytes)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Runs the `--doctor` / `--check` pre-flight diagnostic and exits.
@@ -195,4 +230,69 @@ pub(crate) async fn run_doctor(args: &Args) -> ExitCode {
     out.push('\n');
     ui::out(&out);
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [7; 32];
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_multi_segment_object_is_decrypted_to_the_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plaintext: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let input = dir.path().join("asset.bin.enc");
+        std::fs::write(
+            &input,
+            github_backup_s3::encrypt::encrypt(&KEY, &plaintext).unwrap(),
+        )
+        .unwrap();
+        let output = dir.path().join("out").join("asset.bin");
+        assert_eq!(
+            decrypt_file(&input, &output, &KEY).unwrap(),
+            plaintext.len() as u64
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), plaintext);
+        assert_eq!(names(&dir.path().join("out")), ["asset.bin"]);
+    }
+
+    /// Truncation and tampering are found only at the end of the object,
+    /// after earlier segments authenticated: no output file may appear, an
+    /// existing one is left alone, and no temporary file is left behind.
+    #[test]
+    fn a_truncated_or_tampered_object_leaves_no_output_file() {
+        let plaintext = vec![3u8; 200_000];
+        let blob = github_backup_s3::encrypt::encrypt(&KEY, &plaintext).unwrap();
+        let mut tampered = blob.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        for (what, bad) in [
+            ("truncated", blob[..blob.len() - 1000].to_vec()),
+            ("tampered", tampered),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("in.enc");
+            std::fs::write(&input, &bad).unwrap();
+            let fresh = dir.path().join("fresh.bin");
+            let err = decrypt_file(&input, &fresh, &KEY).unwrap_err();
+            assert!(err.contains("decryption failed"), "{what}: {err}");
+            assert!(!fresh.exists(), "{what}");
+            let existing = dir.path().join("existing.bin");
+            std::fs::write(&existing, b"keep me").unwrap();
+            assert!(decrypt_file(&input, &existing, &KEY).is_err());
+            assert_eq!(std::fs::read(&existing).unwrap(), b"keep me", "{what}");
+            assert_eq!(names(dir.path()), ["existing.bin", "in.enc"], "{what}");
+        }
+    }
 }

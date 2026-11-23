@@ -148,7 +148,13 @@ github-backup --decrypt \
 > itself has no download command), then decrypt one file at a time; for many
 > files loop in the shell.
 
-`--decrypt` reads the whole object into memory.
+`--decrypt` decrypts an object of the current format one 64 KiB segment at a
+time, so memory use stays small whatever its size (an object of the earlier
+single-message format is read whole).  The plaintext is written to a
+temporary file next to the output (`.<name>.part-…`) and renamed to the output
+name only after the last segment has authenticated: a truncated, reordered or
+tampered object, or the wrong key, leaves no output file (and an existing one
+untouched), and the command exits with status `1`.
 
 Without the tool, any AES-GCM and HKDF implementation can do it. **`openssl
 enc` cannot:** it refuses AEAD ciphers ("AEAD ciphers not supported"). With

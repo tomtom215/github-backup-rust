@@ -32,14 +32,16 @@
 //!   version byte is part of the `info` string by way of its `v1`, so a blob
 //!   relabelled to another version cannot authenticate.
 //!
-//! Segment-wise sealing is what allows [`EncryptingReader`] to encrypt a file
-//! of any size while holding one segment in memory.
+//! Segment-wise sealing is what allows [`EncryptingReader`] to encrypt, and
+//! [`decrypt_to`] to decrypt, a file of any size while holding one segment in
+//! memory.
 //!
 //! # Legacy format (version 0, read only)
 //!
 //! Objects written by earlier versions are a single AES-256-GCM message under
 //! the user's key: `[ 12-byte random nonce ][ ciphertext + 16-byte tag ]`.
-//! They carry no header, so [`decrypt`] tells the formats apart like this: a
+//! They carry no header, so [`decrypt`] and [`decrypt_to`] tell the formats
+//! apart like this: a
 //! blob that does not start with the 8-byte magic is legacy; a blob that does
 //! is decrypted as version 1 and, **only if that fails authentication**, as
 //! legacy.  A legacy blob starts with a random nonce, so it begins with the
@@ -63,7 +65,7 @@
 //! *Storage / Encryption* has a Python example).  The `openssl enc` command
 //! cannot decrypt GCM: it rejects AEAD ciphers.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use aead_stream::{DecryptorBE32, EncryptorBE32, StreamBE32};
 use aes_gcm::{
@@ -259,35 +261,123 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, S3Error> {
 /// Returns [`S3Error::Encrypt`] if the blob is too short or does not
 /// authenticate under `key` (wrong key or corrupted data).
 pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, S3Error> {
-    let failed = || S3Error::Encrypt("decryption failed (wrong key or corrupt data)".to_string());
-    if blob.starts_with(&MAGIC) {
-        if let Some(plaintext) = decrypt_v1(key, blob) {
-            return Ok(plaintext);
+    let mut plaintext = Vec::with_capacity(blob.len());
+    decrypt_to(key, io::Cursor::new(blob), &mut plaintext)?;
+    Ok(plaintext)
+}
+
+/// Decrypts an object written by this tool from `input` to `output`, in
+/// either format, and returns the number of plaintext bytes written.
+///
+/// A version-1 object is decrypted segment by segment, holding one 64 KiB
+/// segment in memory whatever its size; a legacy object is read whole (it
+/// is a single message).  Only segments that authenticate are written, but
+/// whether the object is **complete** is known only once its last segment
+/// authenticates: after an error, `output` may hold the authenticated start
+/// of a truncated or tampered object and must be discarded.  Write to a
+/// temporary file and rename it into place only when this returns `Ok`.
+///
+/// `input` is rewound for the legacy format, which is tried only when the
+/// first version-1 segment does not authenticate (nothing has been written
+/// then).
+///
+/// # Errors
+///
+/// [`S3Error::Encrypt`] if the object is too short or does not authenticate
+/// under `key` (wrong key, corrupted, truncated or reordered data);
+/// [`S3Error::Io`] if reading or writing fails.
+pub fn decrypt_to<R: Read + Seek, W: Write>(
+    key: &[u8; 32],
+    mut input: R,
+    output: &mut W,
+) -> Result<u64, S3Error> {
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    fill(&mut input, &mut header, HEADER_LEN)?;
+    if header.len() == HEADER_LEN && header.starts_with(&MAGIC) {
+        if let Some(written) = decrypt_v1_to(key, &header[MAGIC.len()..], &mut input, output)? {
+            return Ok(written);
         }
     }
+    input.seek(SeekFrom::Start(0))?;
+    let mut blob = Vec::new();
+    input.read_to_end(&mut blob)?;
     if blob.len() < LEGACY_NONCE_LEN + TAG_LEN {
         return Err(S3Error::Encrypt(
             "encrypted blob is too short to be an encrypted object".to_string(),
         ));
     }
-    decrypt_legacy(key, blob).ok_or_else(failed)
+    let plaintext = decrypt_legacy(key, &blob).ok_or_else(decryption_failed)?;
+    output.write_all(&plaintext)?;
+    Ok(plaintext.len() as u64)
 }
 
-/// Decrypts the version-1 format; `None` unless every segment authenticates.
-fn decrypt_v1(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
-    let body = blob.get(HEADER_LEN..)?;
-    let salt = &blob[MAGIC.len()..HEADER_LEN];
+fn decryption_failed() -> S3Error {
+    S3Error::Encrypt("decryption failed (wrong key or corrupt data)".to_string())
+}
+
+/// Decrypts the version-1 payload that follows the header, writing each
+/// segment once it authenticates.  `Ok(None)` when the first segment does not
+/// authenticate (nothing written: the caller may try the legacy format);
+/// an error for a failure after that.
+fn decrypt_v1_to<R: Read, W: Write>(
+    key: &[u8; 32],
+    salt: &[u8],
+    input: &mut R,
+    output: &mut W,
+) -> Result<Option<u64>, S3Error> {
     let mut decryptor = DecryptorBE32::from_aead(payload_cipher(key, salt), &stream_nonce());
     let sealed_segment = SEGMENT_LEN + TAG_LEN;
-    let mut plaintext = Vec::with_capacity(body.len());
-    let mut rest = body;
-    while rest.len() > sealed_segment {
-        let (segment, tail) = rest.split_at(sealed_segment);
-        plaintext.extend_from_slice(&decryptor.decrypt_next(segment).ok()?);
-        rest = tail;
+    // One sealed segment plus one byte, which tells a full segment that is
+    // the last from one that is not.
+    let mut buf = Vec::with_capacity(sealed_segment + 1);
+    let mut written = 0u64;
+    // A failure means "not version 1" only on the first segment, before
+    // anything is written (every segment but the last holds 64 KiB).
+    let failure = |written: u64| {
+        if written > 0 {
+            Err(decryption_failed())
+        } else {
+            Ok(None)
+        }
+    };
+    loop {
+        fill(input, &mut buf, sealed_segment + 1)?;
+        if buf.len() <= sealed_segment {
+            break;
+        }
+        let Ok(plaintext) = decryptor.decrypt_next(&buf[..sealed_segment]) else {
+            return failure(written);
+        };
+        buf.drain(..sealed_segment);
+        output.write_all(&plaintext)?;
+        written += plaintext.len() as u64;
     }
-    plaintext.extend_from_slice(&decryptor.decrypt_last(rest).ok()?);
-    Some(plaintext)
+    let Ok(plaintext) = decryptor.decrypt_last(buf.as_slice()) else {
+        return failure(written);
+    };
+    output.write_all(&plaintext)?;
+    Ok(Some(written + plaintext.len() as u64))
+}
+
+/// Reads from `input` until `buf` holds `want` bytes or the input ends.
+fn fill<R: Read>(input: &mut R, buf: &mut Vec<u8>, want: usize) -> io::Result<()> {
+    while buf.len() < want {
+        let start = buf.len();
+        buf.resize(want, 0);
+        match input.read(&mut buf[start..]) {
+            Ok(0) => {
+                buf.truncate(start);
+                break;
+            }
+            Ok(n) => buf.truncate(start + n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => buf.truncate(start),
+            Err(e) => {
+                buf.truncate(start);
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decrypts the legacy single-message format.
@@ -460,6 +550,69 @@ mod tests {
         assert!(decrypt(&KEY, &[]).is_err());
         assert!(decrypt(&KEY, &[0u8; 8]).is_err());
         assert!(decrypt(&KEY, &MAGIC).is_err());
+    }
+
+    /// What `decrypt_to` writes, and its outcome.
+    fn decrypt_streamed(key: &[u8; 32], blob: &[u8]) -> (Vec<u8>, Result<u64, S3Error>) {
+        let mut out = Vec::new();
+        let result = decrypt_to(key, io::Cursor::new(blob), &mut out);
+        (out, result)
+    }
+
+    #[test]
+    fn streamed_decryption_matches_whole_decryption_at_segment_boundaries() {
+        for len in [0, 1, SEGMENT_LEN, SEGMENT_LEN + 1, 3 * SEGMENT_LEN + 7] {
+            let pt: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
+            let (out, result) = decrypt_streamed(&KEY, &encrypt(&KEY, &pt).unwrap());
+            assert_eq!(result.unwrap(), len as u64, "len {len}");
+            assert_eq!(out, pt, "len {len}");
+        }
+        let legacy = encrypt_legacy(&KEY, [7; 12], b"old");
+        let (out, result) = decrypt_streamed(&KEY, &legacy);
+        assert_eq!((out.as_slice(), result.unwrap()), (&b"old"[..], 3));
+    }
+
+    /// The first segment is what tells the formats apart: a legacy blob that
+    /// starts with the magic still decrypts, with nothing written first.
+    #[test]
+    fn streamed_decryption_falls_back_to_legacy_only_before_any_output() {
+        let mut nonce = [0u8; 12];
+        nonce[..8].copy_from_slice(&MAGIC);
+        let blob = encrypt_legacy(&KEY, nonce, &[5u8; 100]);
+        let (out, result) = decrypt_streamed(&KEY, &blob);
+        assert_eq!(result.unwrap(), 100);
+        assert_eq!(out, vec![5u8; 100]);
+    }
+
+    /// A truncated or tampered object is an error even though its first
+    /// segments authenticate; the caller must discard what was written.
+    #[test]
+    fn streamed_decryption_rejects_truncation_and_tampering() {
+        let pt: Vec<u8> = vec![9; 3 * SEGMENT_LEN];
+        let blob = encrypt(&KEY, &pt).unwrap();
+        let sealed = SEGMENT_LEN + TAG_LEN;
+        for (what, bad) in [
+            (
+                "dropped last segment",
+                blob[..HEADER_LEN + 2 * sealed].to_vec(),
+            ),
+            ("cut mid-segment", blob[..blob.len() - 100].to_vec()),
+            ("flipped byte in the last segment", {
+                let mut b = blob.clone();
+                let i = b.len() - 1;
+                b[i] ^= 1;
+                b
+            }),
+        ] {
+            let (_, result) = decrypt_streamed(&KEY, &bad);
+            assert!(
+                matches!(result, Err(S3Error::Encrypt(_))),
+                "{what}: {result:?}"
+            );
+        }
+        let (out, result) = decrypt_streamed(&[0xFF; 32], &blob);
+        assert!(result.is_err());
+        assert!(out.is_empty(), "nothing is written under the wrong key");
     }
 
     #[test]
