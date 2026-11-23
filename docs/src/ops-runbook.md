@@ -90,7 +90,7 @@ owner or `post-processing`), the **step** and the error text.
 | `git ... made no progress for 600s and was stopped` | `git` printed nothing for 10 minutes (a stalled connection).  A slow but progressing clone is not interrupted.  Re-run; if it repeats, check the network or a proxy. |
 | `GitHub API error 403 ... rate limit` / `rate limit exceeded` | See [Rate limit](#rate-limit). |
 | `GitHub API error 404` on a category | Feature not available for that repository (no Actions, no environments); informational for most categories. |
-| `no space left on device` | The disk is full: the run stops (`fatal error`, exit `1`). |
+| `no space left on device`, `disk quota exceeded` | The disk is full or the quota is used up (seen by the tool or by `git`): the run stops (`fatal error`, exit `1`). |
 | `S3 ... AccessDenied` / `NoSuchBucket` / `SignatureDoesNotMatch` | See [S3 failures](#s3-failures). |
 
 Re-running retries what failed and keeps everything that succeeded.

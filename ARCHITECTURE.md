@@ -78,7 +78,8 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   step is recorded in `BackupStats` (scope, step, message) and the run carries on,
   so one bad repository or category never costs the rest.  `run` returns `Err`
   only for things that make continuing pointless (`CoreError::is_fatal`:
-  rejected credentials, exhausted rate-limit budget, full disk, cancellation) or
+  rejected credentials, exhausted rate-limit budget, full disk or exhausted quota
+  (also when `git` reports it), cancellation) or
   when the repository list cannot be fetched.  Callers read
   `BackupStats::failures()` and decide the exit status.
 - **Run order**: owner-level data, packages, starred clones, gists, then the

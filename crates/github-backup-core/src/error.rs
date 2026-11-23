@@ -103,14 +103,22 @@ impl CoreError {
     /// * the process is shutting down ([`CoreError::Interrupted`]);
     /// * GitHub rejects the credentials (HTTP 401);
     /// * the rate-limit retry budget is exhausted;
-    /// * the output disk is full.
+    /// * the output disk is full or the disk quota is used up, whether the
+    ///   engine noticed it writing a file or git did.
     #[must_use]
     pub fn is_fatal(&self) -> bool {
         match self {
             Self::Interrupted => true,
             Self::Client(ClientError::ApiError { status: 401, .. }) => true,
             Self::Client(ClientError::RateLimitExceeded { .. }) => true,
-            Self::Io { source, .. } => source.kind() == std::io::ErrorKind::StorageFull,
+            Self::Io { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+            ),
+            Self::GitFailed { stderr, .. } => {
+                let stderr = stderr.to_ascii_lowercase();
+                stderr.contains("no space left on device") || stderr.contains("disk quota exceeded")
+            }
             _ => false,
         }
     }
@@ -123,17 +131,32 @@ impl CoreError {
     /// This is deliberately narrower than "git exited with 128": 128 is also
     /// what git returns for rejected credentials, DNS and TLS failures and
     /// ownership errors, none of which may be mistaken for "nothing to back up".
+    /// Only the remote's own answers count:
+    ///
+    /// * `Repository not found` (GitHub over HTTPS and SSH) and git's
+    ///   `fatal: repository '<url>' not found`;
+    /// * an HTTP 404;
+    /// * `'<path or URL>' does not appear to be a git repository`, but not for
+    ///   a bare remote *name* such as `'origin'`: that means the local clone
+    ///   has lost its remote, a local problem.
+    ///
+    /// Other "not found" texts (a missing object, a path) come from the local
+    /// repository and are real failures.
     #[must_use]
     pub fn is_remote_missing(&self) -> bool {
-        match self {
-            Self::GitFailed { stderr, .. } => {
-                let stderr = stderr.to_ascii_lowercase();
-                stderr.contains("not found")
-                    || stderr.contains("does not appear to be a git repository")
-                    || stderr.contains("returned error: 404")
-            }
-            _ => false,
-        }
+        let Self::GitFailed { stderr, .. } = self else {
+            return false;
+        };
+        stderr.lines().any(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            line.contains("repository not found")
+                || (line.starts_with("fatal: repository '") && line.ends_with("' not found"))
+                || line.contains("returned error: 404")
+                || line
+                    .strip_suffix("' does not appear to be a git repository")
+                    .and_then(|head| head.rsplit_once('\''))
+                    .is_some_and(|(_, remote)| remote.contains(['/', '\\', ':']))
+        })
     }
 
     /// Creates a [`CoreError::Io`] from an [`std::io::Error`] and a path.
@@ -166,6 +189,28 @@ mod tests {
         .is_fatal());
         let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
         assert!(CoreError::io("/backup/x.json", full).is_fatal());
+    }
+
+    /// Regression: a full disk or an exhausted quota seen by git (or as
+    /// `EDQUOT` by the engine) was isolated, so every remaining repository
+    /// failed one by one instead of the run stopping.
+    #[test]
+    fn running_out_of_space_in_git_or_on_quota_is_fatal() {
+        let quota = std::io::Error::from(std::io::ErrorKind::QuotaExceeded);
+        assert!(CoreError::io("/backup/x.json", quota).is_fatal());
+        #[cfg(target_os = "linux")]
+        {
+            // EDQUOT, as the kernel reports it.
+            let edquot = std::io::Error::from_raw_os_error(122);
+            assert!(CoreError::io("/backup/x.json", edquot).is_fatal());
+        }
+        for stderr in [
+            "error: unable to write file objects/ab/cd: No space left on device\nfatal: unpack-objects failed",
+            "fatal: write error: Disk quota exceeded",
+        ] {
+            assert!(git(128, stderr).is_fatal(), "{stderr}");
+        }
+        assert!(!git(128, "fatal: repository not found").is_fatal());
     }
 
     #[test]
@@ -210,7 +255,19 @@ mod tests {
         .is_remote_missing());
         assert!(git(128, "fatal: unable to access 'https://h/r.wiki.git/': The requested URL returned error: 404").is_remote_missing());
 
+        // GitHub over SSH.
+        assert!(git(
+            128,
+            "ERROR: Repository not found.\nfatal: Could not read from remote repository."
+        )
+        .is_remote_missing());
+
         for stderr in [
+            // Regression: these come from the local clone, not from GitHub,
+            // and used to be taken for "the wiki does not exist".
+            "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.",
+            "error: refs/heads/main does not point to a valid object!\nfatal: bad object HEAD: object not found",
+            "fatal: path 'x' not found",
             "fatal: Authentication failed for 'https://github.com/o/r.wiki.git/'",
             "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
             "fatal: unable to access 'https://github.com/o/r.wiki.git/': Could not resolve host: github.com",
