@@ -126,8 +126,19 @@ jq -r '.failures[] | "\(.scope): \(.step)"' /var/log/github-backup/report.json
 
 ## Webhook
 
-`--notify-webhook URL` (or `BACKUP_NOTIFY_WEBHOOK`) sends one JSON `POST` after
-the run, also when the run failed:
+`--notify-webhook URL` (or `BACKUP_NOTIFY_WEBHOOK`) sends one `POST` after
+each run, also when the run failed or was interrupted.  `--notify-format` (or
+`BACKUP_NOTIFY_FORMAT`) chooses the body:
+
+| Format | Request |
+|--------|---------|
+| `json` (default) | the object below |
+| `slack` | `{"text": "<summary>"}`, what a Slack incoming webhook needs |
+| `discord` | `{"content": "<summary>"}` (at most 2000 characters), what a Discord webhook needs |
+| `healthchecks` | the summary as plain text, `POST`ed to the URL on success and to `<URL>/fail` otherwise (healthchecks.io and compatible services: give the ping URL) |
+
+The summary is one line with the owner and outcome, followed by the failed
+items (`scope: step`, at most 20, no messages).  The `json` body:
 
 ```json
 {
@@ -146,6 +157,7 @@ the run, also when the run failed:
 | `success` | nothing failed | `0` |
 | `partial` | finished with failures | `3` |
 | `failure` | the run could not be completed; `error` holds the reason (and `failed` the failure) | `1` |
+| `interrupted` | stopped by `SIGINT` / `SIGTERM` (the notification gets at most 3 seconds) | `130` / `143` |
 
 `failed` lists at most the first 20 failures and never includes messages (they
 can be long and the receiver is an external service); `failure_count` is the

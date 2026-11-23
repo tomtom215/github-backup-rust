@@ -2,7 +2,36 @@
 
 Schedule `github-backup` with cron for periodic backups.  (A
 [systemd timer](systemd.md) gives better logging and failure handling when it is
-available.)
+available, and in a container or anywhere without a scheduler the
+[built-in schedule](#built-in-schedule---every) needs neither.)
+
+## Built-in Schedule (`--every`)
+
+`--every INTERVAL` keeps the process running: it backs up at once, then again
+every INTERVAL (a whole number with a unit: `30m`, `6h`, `24h`, `7d`; at least
+`1m`).
+
+```bash
+github-backup --output /backup --every 24h
+```
+
+- The interval is measured from the start of each run.  A run that takes longer
+  than the interval is followed at once by the next one.
+- Every run is a fresh run: configuration, client and engine are built anew, and
+  each run writes its own history entry, `--report`, metrics and notification.
+  The output lock is held only while a run is in progress.
+- A run that fails (exit status `1`) or is incomplete (`3`) is logged and the
+  loop carries on: the next run retries it.  Watch the `--report` file,
+  `--prometheus-metrics` or `--notify-webhook` (for example
+  `--notify-format healthchecks`) to hear about failures.
+- After each run the log says when the next one is due
+  (`next backup in 23h 58m 12s next_run=...`).
+- `SIGINT` / `SIGTERM` (`docker stop`, `systemctl stop`) while waiting ends the
+  process with status `0`; during a run they interrupt it as usual (status
+  `130` / `143`).
+- The token is read once at startup (from `GITHUB_TOKEN`, `GH_TOKEN`, the
+  config file or the GitHub CLI); a token that expires later makes the later
+  runs fail until the process is restarted with a new one.
 
 ## Keep the Token Out of the Crontab
 
@@ -81,4 +110,5 @@ Save it as `/etc/logrotate.d/github-backup`.
   schedule interval is therefore harmless, but it shows up as a failed run.
 - The user running cron needs write access to `--output` and to the `--report`
   directory.
-- Prefer `systemd` timers where available.
+- Prefer `systemd` timers where available, or `--every` where there is no
+  scheduler at all.

@@ -10,17 +10,21 @@ export GITHUB_TOKEN=ghp_your_token_here
 github-backup octocat --tui
 
 # Flags pre-fill the Configure screen
-github-backup octocat --tui --token "$GITHUB_TOKEN" --output /var/backup/github \
-  --all --private --dry-run --org --concurrency 8 --manifest
+github-backup octocat --tui --output /var/backup/github \
+  --private --dry-run --org --concurrency 8 --manifest
 ```
 
-The command line is resolved exactly as for a normal run, so `--all`,
-`--private`, `--forks`, `--dry-run`, `--org`, `--full`, `--since`,
-`--include-repos`, `--clone-type`, `--concurrency`, `--manifest` and the
-individual category flags all arrive in the Configure screen as initial
-values.  Review and adjust them, then start the backup.  Not carried over:
-`--config` files, `--clone-host`, and every option listed under
-[What the TUI cannot do](#what-the-tui-cannot-do).
+The command line and the config file (`--config`, or
+`~/.config/github-backup/config.toml` when it exists) are resolved exactly as
+for a normal run, so `--all`, `--skip`, `--private`, `--forks`, `--dry-run`,
+`--org`, `--full`, `--since`, `--include-repos`, `--clone-type`,
+`--concurrency`, `--manifest` and the individual category flags all arrive in
+the Configure screen as initial values; with no category selected every
+category starts switched on, as a command-line run would back up everything.
+The token is found as for a normal run (`GITHUB_TOKEN`, `GH_TOKEN`, the config
+file, the GitHub CLI).  Review and adjust, then start the backup.  An option
+the TUI cannot carry out (see [What the TUI cannot do](#what-the-tui-cannot-do))
+is an error together with `--tui` (exit status 2), not silently dropped.
 
 The TUI needs an interactive terminal on stdout.  Without one (a pipe, cron,
 `docker run` without `-t`) it prints a one-line explanation and exits with
@@ -191,8 +195,15 @@ These exist only on the command line, and the TUI does not offer them:
 - mirror push (Gitea/GitLab), S3 sync, JSON report, Prometheus metrics, webhook
   notification;
 - device-flow sign-in (a token is required);
-- `--config` files and `--clone-host`;
+- `--clone-host` and `--diff-with`;
+- `--every` and the other modes (`--restore`, `--doctor`, ...);
 - the CLI-level output lock.
+
+Given together with `--tui`, `--mirror-to`, `--s3-bucket`, `--report`,
+`--prometheus-metrics`, `--notify-webhook`, `--diff-with`, `--clone-host` and
+`--device-auth` (also from the config file, except the webhook, which is only
+refused on the command line) stop the program with exit status 2 and a
+message naming them.
 
 What the TUI does after a run, like the CLI: the engine writes the incremental
 state, the TUI appends a run-history entry (shown on the Dashboard, including

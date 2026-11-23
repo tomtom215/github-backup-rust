@@ -121,17 +121,30 @@ The binary lands in `$CARGO_HOME/bin` (by default `~/.cargo/bin`).
 ## Quick Start
 
 ```bash
-export GITHUB_TOKEN=ghp_your_token_here
+# Log in once with the GitHub CLI (or export GITHUB_TOKEN=ghp_...)
+gh auth login
 
-# Check git, the output directory, the network and the token
-github-backup octocat --output /var/backup/github --doctor
+# Check git, the output directory, the network, the token and the account
+github-backup --output /var/backup/github --doctor
 
-# Back up everything (private repositories and secret gists of your own account included)
-github-backup octocat --output /var/backup/github --all
+# Back up everything your account owns: private repositories and secret gists
+# included.  No OWNER and no category flags needed.
+github-backup --output /var/backup/github
+
+# An organisation, everything but webhooks and packages
+github-backup my-org --output /var/backup/github --skip hooks,packages
+
+# Keep running and back up once a day (containers, services)
+github-backup --output /var/backup/github --every 24h
 
 # Or launch the interactive TUI
 github-backup octocat --tui
 ```
+
+The token is taken from `--token`, `GITHUB_TOKEN`, `GH_TOKEN`, the config file
+(`~/.config/github-backup/config.toml` is read automatically) or the GitHub CLI.
+OWNER defaults to the token's account, and with no category selected
+everything is backed up, as with `--all`.
 
 The exit status tells you whether the backup is complete: `0` yes, `3` it
 finished but something could not be backed up (the summary lists it), `1` it
@@ -140,8 +153,8 @@ could not run.  Run it again to retry only what failed.
 ## Interactive TUI
 
 Pass `--tui` to launch a full-screen terminal interface built with [Ratatui](https://ratatui.rs) 0.30.
-Flags given with `--tui` (`--all`, `--private`, `--dry-run`, `--org`, `--full`, `--since`,
-`--concurrency`, `--manifest`, category flags, ...) pre-fill the Configure screen.
+The command line and the config file (`--all`, `--private`, `--dry-run`, `--org`, `--full`,
+`--since`, `--concurrency`, `--manifest`, category flags, ...) pre-fill the Configure screen.
 
 ```
  github-backup v0.3.2  [1]Dashboard  [2]Configure  [3]Run  [4]Verify  [5]Results
@@ -190,8 +203,8 @@ A run in which anything failed is always reported as **INCOMPLETE**, never as co
 ### What the TUI cannot do
 
 Mirror push, S3 sync, JSON report, Prometheus metrics, webhook notification,
-device-flow sign-in, `--config` files and `--clone-host` are command-line only;
-the Output tab says so.  See the [TUI guide](docs/src/tui.md) for details.
+device-flow sign-in, `--diff-with` and `--clone-host` are command-line only;
+the Output tab says so, and giving them together with `--tui` is an error.  See the [TUI guide](docs/src/tui.md) for details.
 
 ## Feature Summary
 

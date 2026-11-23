@@ -1,15 +1,47 @@
 # Quick Start
 
+## The One-Command Backup
+
+If the [GitHub CLI](https://cli.github.com) is installed and logged in
+(`gh auth login`), or `GITHUB_TOKEN` / `GH_TOKEN` holds a token, this backs up
+**everything your account owns** (repositories with their wikis, issues, pull
+requests, releases with their assets, gists, and the rest of the categories of
+`--all`):
+
+```bash
+github-backup --output ~/github-backup
+```
+
+No OWNER, no category flags, no config file: the token's account is the owner
+(the log says which account it found), and with no category selected
+everything is backed up.  Give an OWNER to back up another user or an
+organisation (an organisation is recognised as one):
+
+```bash
+github-backup my-org --output ~/github-backup
+```
+
+Leave out what you do not want with `--skip`, for example
+`--skip release-assets,packages`.  Without `--output` the backup goes to the
+current directory.
+
 ## 1. Get a GitHub Token
 
-Create a [personal access token](https://github.com/settings/tokens).  For a
+The easiest way is the GitHub CLI: `gh auth login` gives a token with `repo`,
+`read:org` and `gist`, which covers everything except packages (add those with
+`gh auth refresh -s read:packages`).  `github-backup` asks `gh` for its token
+when no other token is set.
+
+Or create a [personal access token](https://github.com/settings/tokens).  For a
 complete backup of your own account a classic token with `repo`, `gist`,
-`read:org` and `read:packages` covers everything; for public data no token is
-needed.  The scopes and fine-grained permissions per category are in
+`read:org` and `read:packages` covers everything (`admin:repo_hook` too for
+webhook settings); for public data no token is needed.  The scopes and
+fine-grained permissions per category are in
 [Authentication](authentication.md#what-each-category-needs).
 
 Export it as an environment variable (not on the command line, where `ps` and
-your shell history can see it):
+your shell history can see it; the tool warns when a secret is on the command
+line):
 
 ```bash
 export GITHUB_TOKEN=ghp_your_token_here
@@ -18,12 +50,14 @@ export GITHUB_TOKEN=ghp_your_token_here
 ## 2. Check the Setup
 
 ```bash
-github-backup octocat --output /var/backup/github --doctor
+github-backup --output /var/backup/github --doctor
 ```
 
-`--doctor` checks that `git` is installed, that the output directory is
-writable, that the API is reachable and that GitHub accepts the token.  It
-does not check disk space or scopes.
+`--doctor` validates the settings exactly as a backup would, then checks that
+`git` is installed, that the output directory is writable, which categories
+would be backed up, that mirror and S3 settings (if any) are complete, that the
+API is reachable, that GitHub accepts the token, and which account will be
+backed up.  It does not check disk space or scopes.
 
 ## 3. Run Your First Backup
 
@@ -33,27 +67,28 @@ does not check disk space or scopes.
 github-backup octocat --tui
 ```
 
-The TUI pre-fills the owner (and token and output directory, if given), shows
-all settings in tabbed panels and lets you start the backup and watch live
-progress.  See the [Interactive TUI guide](../tui.md).
+The TUI pre-fills the owner, token, output directory and categories from the
+command line and the config file, shows all settings in tabbed panels and lets
+you start the backup and watch live progress.  See the
+[Interactive TUI guide](../tui.md).
 
 ### Option B: Command line
 
 Back up everything for a user:
 
 ```bash
-github-backup octocat --output /var/backup/github --all
+github-backup octocat --output /var/backup/github
 ```
 
-(`--all` includes private repositories and secret gists when the token
-belongs to `octocat`; see [Private repositories](../backup-categories.md#private-repositories).)
+(Everything includes private repositories and secret gists when the token
+belongs to `octocat`; see [Private repositories](../backup-categories.md#private-repositories).
+`--all` says the same explicitly.)
 
 Back up only repositories and issues of an organisation:
 
 ```bash
 github-backup my-org \
   --output /var/backup/github \
-  --org \
   --repositories \
   --issues
 ```
@@ -98,8 +133,10 @@ could not run at all.  See [Exit Codes](../configuration/cli-reference.md#exit-c
 
 ## 5. Run It Again
 
-Run the same command again whenever you like (or schedule it with
-[systemd](../deployment/systemd.md) or [cron](../deployment/cron.md)).  Git
+Run the same command again whenever you like, schedule it with
+[systemd](../deployment/systemd.md) or [cron](../deployment/cron.md), or let it
+repeat itself with `--every 24h` (see
+[Built-in schedule](../deployment/cron.md#built-in-schedule---every)).  Git
 clones are updated in place and only changed issues and pull requests are
 re-fetched; nothing already captured is lost.  See
 [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).
@@ -127,7 +164,7 @@ github-backup octocat \
 ### Dry run (preview, writes nothing)
 
 ```bash
-github-backup octocat --output /backup --all --dry-run
+github-backup octocat --output /backup --dry-run
 ```
 
 A dry run lists the repositories it would back up and writes nothing: no files,
@@ -135,6 +172,9 @@ no lock, no state, no report and no network call except the read-only listing.
 Owner-level data and gists are skipped.
 
 ### Using a config file
+
+`~/.config/github-backup/config.toml` is read automatically; any other file is
+passed with `--config`:
 
 ```bash
 mkdir -p /etc/github-backup
@@ -172,7 +212,6 @@ github-backup octocat \
 export AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...
 github-backup octocat \
   --output /backup \
-  --all \
   --s3-bucket my-backup-bucket \
   --s3-region us-east-1
 ```

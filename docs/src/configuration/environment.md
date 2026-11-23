@@ -11,7 +11,12 @@ newline pasted with a token, is trimmed.
 | Variable | Flag equivalent | Description |
 |---------|----------------|-------------|
 | `GITHUB_TOKEN` | `--token` | GitHub personal access token |
+| `GH_TOKEN` | `--token` | The GitHub CLI's variable; used when neither `--token` nor `GITHUB_TOKEN` is set |
 | `GITHUB_OAUTH_CLIENT_ID` | `--oauth-client-id` | OAuth App client ID; ignored unless `--device-auth` is given |
+
+With none of these (and no `token` in the config file), the token of the GitHub
+CLI is used when `gh` is installed and logged in (`gh auth token --hostname
+github.com`, or the host of `--api-url`).
 
 ## GitHub Enterprise
 
@@ -43,7 +48,8 @@ credentials exported for other tools never affect a run that does not use S3.
 
 | Variable | Flag equivalent | Description |
 |---------|----------------|-------------|
-| `BACKUP_NOTIFY_WEBHOOK` | `--notify-webhook` | URL that receives the JSON status after a run |
+| `BACKUP_NOTIFY_WEBHOOK` | `--notify-webhook` | URL that receives the outcome after each run (`--help` never prints its value) |
+| `BACKUP_NOTIFY_FORMAT` | `--notify-format` | `json` (default), `slack`, `discord` or `healthchecks` |
 | `GITHUB_BACKUP_RESTORE_YES` | `--restore-yes` | The value `1` confirms `--restore` without the interactive prompt |
 
 ## Proxy
@@ -94,8 +100,10 @@ github-backup octocat --output /backup --all
 | `NO_COLOR` | Set and non-empty: no ANSI colour. |
 | `CLICOLOR_FORCE` | `1`: colour even when stderr is not a terminal. |
 
-Logs go to **stderr**; the banners, `--doctor`, `--list-scopes` and
-`--print-config-template` print to **stdout**.
+Logs and the plan and summary banners go to **stderr**; `--doctor`,
+`--check`, `--list-scopes`, `--print-config-template` and `--completions`
+print to **stdout**.  A closed pipe (`github-backup --list-scopes | head -1`)
+ends the output quietly.
 
 ```bash
 # Warnings and errors only
@@ -104,6 +112,12 @@ RUST_LOG=warn github-backup ...
 # Debug output of the API client only
 RUST_LOG=github_backup_client=debug github-backup ...
 ```
+
+## Configuration File Location
+
+`XDG_CONFIG_HOME` (else `HOME`; `APPDATA` on Windows) locates the config file
+loaded when `--config` is not given; see
+[Config File](config-file.md#loading-a-config-file).
 
 ## Container Variables
 
