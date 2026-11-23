@@ -26,6 +26,14 @@
 # to anyone who can read the file.
 # token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
+# Or authenticate as a GitHub App (instead of a token): its client ID (or App
+# ID) and the path of its private key; the key itself may instead be put in
+# the GITHUB_APP_PRIVATE_KEY environment variable.  The installation is looked
+# up from `owner` unless app_installation_id is set.
+# app_id = "Iv23li0123456789abcd"
+# app_key_path = "/etc/github-backup/app.pem"
+# app_installation_id = 12345678
+
 # GitHub Enterprise Server API URL (default: https://api.github.com).
 # api_url = "https://github.example.com/api/v3"
 

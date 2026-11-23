@@ -65,3 +65,7 @@ pub use pagination::parse_next_link;
 pub use proxy::{ProxyClient, ProxySettings};
 pub use rate_limit::RateLimitInfo;
 pub use token::{GitToken, TokenSource};
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use app_auth::test_keys;

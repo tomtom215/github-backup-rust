@@ -24,7 +24,9 @@ use crate::notify::NotifyFormat;
 /// The token is taken from `--token`, `GITHUB_TOKEN`, `GH_TOKEN`, the config
 /// file, or the GitHub CLI (`gh auth token`), in that order; `--device-auth`
 /// authenticates interactively via the GitHub OAuth device flow instead
-/// (requires a registered OAuth App — see `--oauth-client-id`).
+/// (requires a registered OAuth App — see `--oauth-client-id`).  For
+/// unattended organisation backups a GitHub App (`--app-id`, `--app-key`)
+/// can be used instead of a token.
 ///
 /// Fine-grained tokens are recommended for long-running or scheduled backups.
 ///
@@ -279,6 +281,47 @@ pub struct Args {
         requires = "device_auth"
     )]
     pub oauth_scopes: String,
+
+    /// Authenticate as a GitHub App instead of with a token: the App's client
+    /// ID (recommended) or numeric App ID.
+    ///
+    /// Needs the App's private key (`--app-key` or `GITHUB_APP_PRIVATE_KEY`).
+    /// The App acts as its installation on OWNER (or `--app-installation-id`),
+    /// and its one-hour installation tokens are renewed during the run.
+    /// Cannot be combined with a token or `--device-auth`.
+    #[arg(
+        help_heading = "Authentication",
+        long,
+        value_name = "ID",
+        env = "GITHUB_APP_ID"
+    )]
+    pub app_id: Option<String>,
+
+    /// Path of the GitHub App's private key (the `.pem` file GitHub issued).
+    ///
+    /// Alternatively, put the key itself in the `GITHUB_APP_PRIVATE_KEY`
+    /// environment variable (for containers).  The key is never accepted as
+    /// a command-line value.
+    #[arg(
+        help_heading = "Authentication",
+        long,
+        value_name = "PATH",
+        env = "GITHUB_APP_PRIVATE_KEY_PATH"
+    )]
+    pub app_key: Option<PathBuf>,
+
+    /// The GitHub App installation to act as.
+    ///
+    /// Default: the App's installation on OWNER, looked up as an organisation
+    /// and then as a user.  With it, OWNER may be left out (it is the
+    /// installation's account).
+    #[arg(
+        help_heading = "Authentication",
+        long,
+        value_name = "ID",
+        env = "GITHUB_APP_INSTALLATION_ID"
+    )]
+    pub app_installation_id: Option<u64>,
 
     // ── Output ─────────────────────────────────────────────────────────────
     /// Root directory where backup artefacts will be written.

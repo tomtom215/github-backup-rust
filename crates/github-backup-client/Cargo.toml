@@ -15,8 +15,9 @@ categories.workspace    = true
 publish                 = false
 
 [features]
-# Exposes `GitHubClient::for_tests_at` (plain HTTP, no proxy) to other crates'
-# tests.  Never enabled in a normal build.
+# Exposes `GitHubClient::for_tests_at` (plain HTTP, no proxy) and `test_keys`
+# (RSA keys generated at test time) to other crates' tests.  Never enabled in
+# a normal build.
 test-support = []
 
 [dependencies]

@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use github_backup_types::config::{AppCredential, Credential};
 
 use super::GitHubClient;
-use crate::app_auth::tests::test_key;
+use crate::app_auth::test_keys::generate as test_key;
 use crate::error::ClientError;
 
 /// One request the fake saw: method, target and `Authorization` value.

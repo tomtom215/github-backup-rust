@@ -234,16 +234,23 @@ impl Minted {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
+/// RSA keys for tests, generated at test time: no key is committed.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_keys {
     use aws_lc_rs::encoding::AsDer as _;
-    use aws_lc_rs::rsa::KeySize;
-    use aws_lc_rs::signature::{KeyPair as _, UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
+    use aws_lc_rs::rsa::{KeyPair, KeySize};
+    use aws_lc_rs::signature::KeyPair as _;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
 
-    /// A fresh 2048-bit key, generated for the test run (no key is committed),
-    /// as `(PKCS#1 PEM, PKCS#8 PEM, public key DER)`.
-    pub(crate) fn test_key() -> (String, String, Vec<u8>) {
+    /// A fresh 2048-bit key as `(PKCS#1 PEM, PKCS#8 PEM, public key DER)`.
+    ///
+    /// # Panics
+    ///
+    /// If key generation fails.
+    #[must_use]
+    pub fn generate() -> (String, String, Vec<u8>) {
         let pair = KeyPair::generate(KeySize::Rsa2048).expect("generate");
         let pkcs8 = pair.as_der().expect("pkcs8").as_ref().to_vec();
         let pkcs1 = pkcs1_from_pkcs8(&pkcs8);
@@ -290,6 +297,13 @@ pub(crate) mod tests {
         assert_eq!(tag, 0x04, "OCTET STRING");
         key.to_vec()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_keys::generate as test_key;
+    use super::*;
+    use aws_lc_rs::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
 
     fn decode_part(part: &str) -> Value {
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).expect("base64url")).expect("json")
