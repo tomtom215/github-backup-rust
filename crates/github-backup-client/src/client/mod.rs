@@ -9,6 +9,8 @@
 
 mod endpoints;
 mod graphql;
+
+pub use endpoints::AccountKind;
 #[cfg(test)]
 mod http_tests;
 mod redirect;

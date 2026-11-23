@@ -7,6 +7,7 @@
 //!
 //! | Module          | Methods                                                  |
 //! |-----------------|----------------------------------------------------------|
+//! | [`account`]     | the token's login, user or organisation                  |
 //! | [`repos`]       | user / org repository lists, one repository              |
 //! | [`social`]      | followers, following, starred, watched, gists, gist comments |
 //! | [`issues`]      | issues, comments, events, repository-wide comments       |
@@ -19,6 +20,7 @@
 //! | [`mod@assets`]  | release asset downloads                                  |
 //! | [`mod@write`]   | label and milestone creation (used by restore mode)      |
 
+mod account;
 mod actions;
 mod assets;
 mod community;
@@ -33,6 +35,8 @@ mod write;
 
 #[cfg(test)]
 mod endpoint_tests;
+
+pub use account::AccountKind;
 
 use github_backup_types::{Page, Raw, Repository};
 use serde_json::Value;

@@ -233,3 +233,38 @@ async fn the_full_repository_never_carries_a_clone_token() {
     assert!(repo.json().get("temp_clone_token").is_none());
     assert_eq!(repo.json()["parent"]["full_name"], "up/r");
 }
+
+#[tokio::test]
+async fn the_token_login_and_account_kinds_are_looked_up() {
+    let api = FakeApi::start(vec![
+        route("/user", json!({"login": "alice", "type": "User"})),
+        route("/users/alice", json!({"login": "alice", "type": "User"})),
+        route(
+            "/users/acme",
+            json!({"login": "acme", "type": "Organization"}),
+        ),
+    ])
+    .await;
+    let client = api.client();
+    assert_eq!(client.account_login().await.expect("login"), "alice");
+    assert_eq!(
+        client.account_kind("alice").await.expect("user"),
+        Some(crate::AccountKind::User)
+    );
+    assert_eq!(
+        client.account_kind("acme").await.expect("org"),
+        Some(crate::AccountKind::Organization)
+    );
+    assert_eq!(client.account_kind("no body").await.expect("404"), None);
+    assert_eq!(
+        api.targets(),
+        ["/user", "/users/alice", "/users/acme", "/users/no%20body"]
+    );
+}
+
+#[tokio::test]
+async fn a_user_answer_without_a_login_is_an_error() {
+    let api = FakeApi::start(vec![route("/user", json!({"id": 1}))]).await;
+    let err = api.client().account_login().await.unwrap_err();
+    assert!(err.to_string().contains("no `login`"), "{err}");
+}

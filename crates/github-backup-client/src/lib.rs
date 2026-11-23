@@ -57,7 +57,7 @@ pub mod proxy;
 mod rate_limit;
 
 pub use api_client::{AssetSink, BackupClient, BoxFuture};
-pub use client::GitHubClient;
+pub use client::{AccountKind, GitHubClient};
 pub use error::ClientError;
 pub use pagination::parse_next_link;
 pub use proxy::{native_tls_config, ProxyClient, ProxyConnector, ProxySettings};
