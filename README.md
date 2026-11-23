@@ -240,7 +240,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, advisories, Actions, environments, packages |
 | User and org data | Starred, watched, followers, following, org members and teams |
 | Repo filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
-| Incremental | Per-repository watermarks; lists always fetched in full and merged; `--full` to refresh everything |
+| Incremental | Per-repository watermarks; issue and pull request lists asked only for changes and merged; unchanged repositories not fetched again; `--full` to refresh everything |
 | Outcome | Failures never stop the run; exit status `3` = incomplete; report, metrics, webhook and history agree |
 | S3 sync | JSON metadata (not clones) to AWS S3, B2, MinIO, R2, Spaces, Wasabi |
 | At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |

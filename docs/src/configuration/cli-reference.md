@@ -196,16 +196,18 @@ github-backup octocat --output /backup --repositories --exclude-repos "*-old,*-f
 
 ## Incremental Behaviour
 
-Issue and pull request **lists are always fetched in full** and merged into
-`issues.json` / `pulls.json`; a run never shrinks them.  What is incremental
-is the per-item data (comments, events, commits, reviews): a repository's own
-watermark from the previous clean run decides which items can be skipped.  See
+Issue and pull request lists are merged into `issues.json` / `pulls.json`;
+a run never shrinks them.  A repository's own watermark from the previous
+clean run decides what a run can skip: it lists only the issues and pull
+requests updated since (when the stored file is intact), skips the per-item
+data (comments, events, commits, reviews) of unchanged items, and skips the
+`git fetch` of a repository nothing was pushed to (at most for 7 days).  See
 [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--since <DATE>` | none | Expert override: treat everything updated before DATE as already backed up.  Accepts `2024-01-01` (midnight UTC) or an RFC 3339 timestamp with any offset.  Never written to the state file. |
-| `--full` | `false` | Ignore all watermarks and fetch every per-item file again.  Conflicts with `--since`. |
+| `--full` | `false` | Ignore all watermarks: list every issue and pull request, fetch every per-item file and `git fetch` every clone.  Conflicts with `--since`. |
 
 ## Push Mirror Options
 

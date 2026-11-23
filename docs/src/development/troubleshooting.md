@@ -75,8 +75,9 @@ checkpoint; run it again after the window resets.  To reduce the pressure:
 1. Lower concurrency: `--concurrency 1`.
 2. Enable fewer categories, or split the work with `--include-repos` over
    several runs.
-3. Leave the incremental state in place (`backup_state.json`): unchanged issues
-   and pull requests then cost no per-item requests.  (`--since` is not needed
+3. Leave the incremental state in place (`backup_state.json`): the issue and
+   pull request lists then cost about one request each, and unchanged issues
+   and pull requests no per-item requests.  (`--since` is not needed
    for this; it is an expert override.)
 
 ---
