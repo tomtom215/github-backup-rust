@@ -167,17 +167,26 @@ fn fixture(root: &Path) -> PathBuf {
     write(
         &repo.join("discussions.json"),
         &json!([{"number": 7, "title": XSS_TITLE, "body": XSS_BODY, "author": {"login": XSS_USER},
-                 "category": {"name": "<Q&A>"}, "created_at": "2024-01-01T00:00:00Z"}]),
+                 "category": {"name": "<Q&A>"}, "createdAt": "2024-01-01T00:00:00Z",
+                 "url": format!("{html}/discussions/7"), "isAnswered": true,
+                 "labels": {"totalCount": 1, "nodes": [{"name": XSS_USER}]}}]),
     );
     write(
         &repo.join("discussion_comments/7.json"),
-        &json!([{"id": 1, "author": user("bob"), "body": "answer",
-                 "replies": {"nodes": [{"author": user("carol"), "body": XSS_BODY}]}}]),
+        &json!([{"id": "DC_1", "author": user("bob"), "body": "answer", "isAnswer": true,
+                 "createdAt": "2024-01-02T00:00:00Z", "authorAssociation": "MEMBER",
+                 "replies": {"totalCount": 1,
+                             "nodes": [{"author": user("carol"), "body": XSS_BODY}]}}]),
     );
     write(
         &repo.join("attachments/index.json"),
         &json!({
-            "https://github.com/user-attachments/assets/abc": "abc.png",
+            "https://github.com/user-attachments/assets/abc": {
+                "file": "abc.png", "size": 70, "first_seen": "2024-01-01T00:00:00Z"
+            },
+            "https://github.com/user-attachments/assets/gone": {
+                "missing": 404, "first_seen": "2024-01-01T00:00:00Z"
+            },
             "https://example.com/escape": "../../../../etc/passwd"
         }),
     );
@@ -612,6 +621,15 @@ fn pages_show_the_backed_up_data() {
     );
     let discussion = read("repos/evil/discussions/7.html");
     assert!(discussion.contains("replied"), "{discussion}");
+    assert!(
+        discussion.contains(">Answered<") && discussion.contains(">Answer<"),
+        "{discussion}"
+    );
+    assert!(
+        discussion.contains("<span class=\"badge\">member</span>"),
+        "{discussion}"
+    );
+    assert!(discussion.contains("2024-01-02 00:00 UTC"), "{discussion}");
 }
 
 #[test]

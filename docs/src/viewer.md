@@ -51,11 +51,12 @@ rest of the site is still written.
 
 ### Images and attachments
 
-A page never loads anything from the internet.  An image in an issue or
-comment is shown when the backup has a local copy of it: a repository's
-`json/repos/<repo>/attachments/index.json`, a JSON object that maps each
-attachment URL to its file relative to that `attachments/` directory, says
-which files exist.  Every other image is shown as a link to the original.
+A page never loads anything from the internet.  An image or file in an
+issue, comment or release note is taken from the backup when it has a local
+copy: the repository's `json/repos/<repo>/attachments/index.json` maps each
+attachment URL to its file in that `attachments/` directory.  Images with a
+local copy are shown, links to attachments lead to the local file, and every
+other image is shown as a link to the original.
 
 ## Safety
 

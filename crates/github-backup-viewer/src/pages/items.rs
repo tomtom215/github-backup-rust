@@ -62,12 +62,9 @@ fn state_badge(item: &Value) -> String {
 /// An item's labels as badges.
 fn labels(item: &Value) -> String {
     let mut out = String::new();
-    for l in item
-        .get("labels")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    // REST: a list; GraphQL (discussions): a connection with `nodes`.
+    let list = item.get("labels").map(|l| l.get("nodes").unwrap_or(l));
+    for l in list.and_then(Value::as_array).into_iter().flatten() {
         let name = l.as_str().or_else(|| s(l, "/name")).unwrap_or_default();
         if !name.is_empty() {
             let _ = write!(out, " <span class=\"label\">{}</span>", esc(name));
@@ -164,8 +161,10 @@ impl Entry<'_> {
 /// A comment (or review, or the item's own text) as an `<article>`.
 fn comment(site: &Site, repo: &Repo, root: &str, c: &Value, verb: &str, anchor: &str) -> String {
     let mut out = String::new();
+    // REST objects are snake_case, the GraphQL nodes of discussions camelCase.
     let when = s(c, "/created_at")
         .or_else(|| s(c, "/submitted_at"))
+        .or_else(|| s(c, "/createdAt"))
         .map(time)
         .unwrap_or_default();
     let id_attr = if anchor.is_empty() {
@@ -183,7 +182,11 @@ fn comment(site: &Site, repo: &Repo, root: &str, c: &Value, verb: &str, anchor: 
     } else {
         let _ = write!(out, "<a href=\"#{}\">{when}</a>", esc(anchor));
     }
-    if let Some(assoc) = s(c, "/author_association").filter(|a| *a != "NONE") {
+    if flag(c, "/isAnswer") {
+        out.push_str(" <span class=\"state state-open\">Answer</span>");
+    }
+    let assoc = s(c, "/author_association").or_else(|| s(c, "/authorAssociation"));
+    if let Some(assoc) = assoc.filter(|a| *a != "NONE") {
         let _ = write!(
             out,
             " <span class=\"badge\">{}</span>",
@@ -196,7 +199,7 @@ fn comment(site: &Site, repo: &Repo, root: &str, c: &Value, verb: &str, anchor: 
             let _ = writeln!(
                 out,
                 "<div class=\"md\">{}</div>",
-                repo.md(site, root, s(c, "/html_url"), body)
+                repo.md(site, root, s(c, "/html_url").or_else(|| s(c, "/url")), body)
             );
         }
         None => out.push_str("<p class=\"empty\">No description provided.</p>\n"),
@@ -526,8 +529,9 @@ fn commit_table(commits: &[Value]) -> String {
 }
 
 /// Discussions, when the backup has `discussions.json` (and, per discussion,
-/// `discussion_comments/<n>.json`): the same layout as issues.  Comments may
-/// carry their replies in `replies` (a list, or GraphQL's `{"nodes": [...]}`).
+/// `discussion_comments/<n>.json`): the same layout as issues.  The files hold
+/// GraphQL nodes (camelCase); a comment carries its replies in
+/// `replies.nodes`.
 fn discussions(site: &Site, repo: &Repo) -> Result<(), RenderError> {
     let path = repo.dir.join("discussions.json");
     if !path.is_file() {
@@ -559,11 +563,13 @@ fn discussions(site: &Site, repo: &Repo) -> Result<(), RenderError> {
                 .unwrap_or_default();
             let _ = writeln!(
                 b,
-                "<li><a href=\"{root}{}discussions/{n}.html\">{}</a> <span class=\"num\">#{n}</span>{category}\
+                "<li>{} <a href=\"{root}{}discussions/{n}.html\">{}</a> <span class=\"num\">#{n}</span>{category}{}\
                  <div class=\"meta\">started {} by {}</div></li>",
+                discussion_state(d),
                 repo.base(),
                 esc(st(d, "/title")),
-                s(d, "/created_at").map(time).unwrap_or_default(),
+                labels(d),
+                s(d, "/createdAt").map(time).unwrap_or_default(),
                 esc(login(d)),
             );
         }
@@ -597,9 +603,18 @@ fn discussions(site: &Site, repo: &Repo) -> Result<(), RenderError> {
             esc(st(d, "/title")),
             tabs(repo, &root, Tab::Discussions)
         );
+        let _ = write!(b, "<p class=\"meta\">{}", discussion_state(d));
         if let Some(c) = s(d, "/category/name") {
-            let _ = writeln!(b, "<p class=\"meta\">Category: {}</p>", esc(c));
+            let _ = write!(b, " Category: {}", esc(c));
         }
+        let l = labels(d);
+        if !l.is_empty() {
+            let _ = write!(b, " ·{l}");
+        }
+        if let Some(url) = s(d, "/url") {
+            let _ = write!(b, " · <a href=\"{0}\">{0}</a>", esc(url));
+        }
+        b.push_str("</p>\n");
         b.push_str(&comment(site, repo, &root, d, "started this", ""));
         if !comments.is_empty() {
             b.push_str("<h2>Comments</h2>\n<ol class=\"timeline\">\n");
@@ -625,4 +640,15 @@ fn discussions(site: &Site, repo: &Repo) -> Result<(), RenderError> {
         }
         site.write(&page)
     })
+}
+
+/// Open, closed or answered, for a discussion (a GraphQL node).
+fn discussion_state(d: &Value) -> &'static str {
+    if flag(d, "/isAnswered") {
+        "<span class=\"state state-merged\">Answered</span>"
+    } else if flag(d, "/closed") {
+        "<span class=\"state state-closed\">Closed</span>"
+    } else {
+        "<span class=\"state state-open\">Open</span>"
+    }
 }

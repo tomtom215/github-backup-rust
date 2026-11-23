@@ -246,9 +246,12 @@ impl Repo {
     }
 }
 
-/// The attachment index of a repository, `attachments/index.json`: a JSON
-/// object mapping each attachment URL to its file, relative to the index's
-/// directory.  Paths that could leave that directory are ignored.
+/// The attachment index of a repository, `attachments/index.json` (written
+/// by `--attachments`): a JSON object mapping each attachment URL to its
+/// entry, whose `file` is the file in that `attachments/` directory (an entry
+/// without one is an attachment that could not be downloaded).  A plain string
+/// value is taken as the file too.  Files that do not exist, and paths that
+/// could leave the directory, are ignored.
 fn attachments(site: &Site, dir: &Path) -> HashMap<String, String> {
     let index = dir.join("attachments").join("index.json");
     let Some(Value::Object(map)) = json::read(&index, &site.warnings) else {
@@ -263,7 +266,7 @@ fn attachments(site: &Site, dir: &Path) -> HashMap<String, String> {
         .collect();
     map.into_iter()
         .filter_map(|(url, path)| {
-            let path = path.as_str()?;
+            let path = path.as_str().or_else(|| s(&path, "/file"))?;
             let parts: Vec<&str> = path.split('/').collect();
             let safe = parts
                 .iter()
