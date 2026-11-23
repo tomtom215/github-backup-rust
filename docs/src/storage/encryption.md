@@ -27,13 +27,14 @@ objects cannot be recovered.**
   detection (any change to an object makes decryption fail).
 * **Not protected:** object **names** (they contain your private repository
   names, for example `.../repos/<repo>/issues.json.enc`), object **sizes**
-  (plaintext size + 28 bytes), and upload timing. Anyone who can list the
-  bucket sees those.
-* **Not protected: swapping and rollback.** No associated data is
+  (plaintext size + 40 bytes + 16 bytes per started 64 KiB), and upload
+  timing. Anyone who can list the bucket sees those.
+* **Not protected: swapping and rollback.** The object name is not
   authenticated, so someone with write access to the bucket (but not the key)
   can swap two encrypted objects, or put back an older valid version of one;
-  decryption accepts both. They cannot forge new content. Use bucket
-  versioning / object lock if that matters to you.
+  decryption accepts both. They cannot forge new content, nor cut, reorder or
+  splice the segments of one object. Use bucket versioning / object lock if
+  that matters to you.
 * **Local files and git clones** are not encrypted by this feature (and clones
   are not uploaded at all).
 * **Enabling encryption later does not remove the earlier plaintext
@@ -55,30 +56,51 @@ cipher (the `aes` crate's `zeroize` feature is enabled). What is **not**
 wiped: the hex string held by the argument parser, the process environment and
 command line, and any copy the operating system makes (swap, core dumps).
 
-The key is used directly as the AES-256 key (no key derivation); if you derive
-it from a passphrase, use a KDF such as Argon2id first. A subkey derived from
-it with HKDF-Expand (RFC 5869) is used for the upload digest below, so the AES
-key itself is never used with another primitive.
+The key is a 256-bit secret, not a password; if you derive it from a
+passphrase, use a KDF such as Argon2id first. It is never used directly to
+encrypt new objects: each object is encrypted under its own key derived from it
+with HKDF-SHA256 (RFC 5869), and the upload digest below uses another
+HKDF-derived subkey, so the key is never used with two primitives.
 
 ## Wire Format
 
+Objects written by this version:
+
 ```
-┌──────────────────────┬────────────────────────────────┐
-│  12-byte random nonce│  ciphertext + 16-byte GCM tag  │
-└──────────────────────┴────────────────────────────────┘
+┌──────────────────┬──────────────────┬───────────┬───────────┬─────┬───────────┐
+│ "GHBKENC" + 0x01 │ 32-byte salt     │ segment 0 │ segment 1 │ ... │ segment n │
+└──────────────────┴──────────────────┴───────────┴───────────┴─────┴───────────┘
+  segment = AES-256-GCM(64 KiB of plaintext) + 16-byte tag; the last may be shorter
 ```
 
-* A fresh random 96-bit nonce (operating-system CSPRNG) is generated for every
-  object; encrypting the same content twice gives different ciphertext.
-* The tag authenticates the ciphertext; there is no additional authenticated
-  data.
+* This is the **STREAM** construction (Hoang, Reyhanitabar, Rogaway and Vizár,
+  CRYPTO 2015) as implemented by RustCrypto's `aead::stream`, laid out like
+  the payload of the [age](https://age-encryption.org/v1) file format, with
+  AES-256-GCM in place of ChaCha20-Poly1305.
+* The salt is random (operating-system CSPRNG) for every object. The object's
+  key is `HKDF-SHA256(salt, your key, "github-backup-rust/s3/payload/v1")`, so
+  every object has its own key and encrypting the same content twice gives
+  different ciphertext.
+* The 12-byte GCM nonce of segment *i* is seven zero bytes, *i* as a 32-bit
+  big-endian number, and one byte that is `1` for the last segment and `0`
+  otherwise. Dropping, reordering or cutting off segments makes decryption
+  fail. There is no additional authenticated data.
+* Because each segment is sealed on its own, a file of any size is encrypted
+  and uploaded while holding one part in memory (see
+  [Memory use](s3.md#memory-use)).
 * Encrypted objects get a `.enc` suffix (`labels.json` becomes
   `labels.json.enc`).
-* The whole file is encrypted as a single message, so it is held in memory
-  while it is processed. NIST allows one key to encrypt up to 2^32 random-nonce
-  messages (collision probability about n^2 / 2^97); a backup tool stays many
-  orders of magnitude below that. A single message is limited to about 64 GiB
-  by the cipher implementation.
+
+**Objects written by earlier versions** are a single AES-256-GCM message
+directly under your key: a 12-byte random nonce, then the ciphertext and a
+16-byte tag. They are still decrypted. They carry no header, so `--decrypt`
+treats a file that does not start with `GHBKENC` + `0x01` as the old format;
+a file that does is decrypted as the new format and, only if that fails
+authentication, as the old one. (An old object starts with the magic only by
+chance, with probability 2^-64, and is then still read correctly.) Nothing is
+ever output that did not authenticate under the key, so the guess cannot yield
+wrong plaintext. The new format has a different size, so the first run of this
+version **uploads every encrypted object once more** in the new format.
 
 ## Skipping Unchanged Files, and Key Rotation
 
@@ -126,31 +148,65 @@ github-backup --decrypt \
 > itself has no download command), then decrypt one file at a time; for many
 > files loop in the shell.
 
-Without the tool, any AES-GCM implementation can do it. **`openssl enc` cannot:**
-it refuses AEAD ciphers ("AEAD ciphers not supported"). With Python and the
-[`cryptography`](https://pypi.org/project/cryptography/) package:
+`--decrypt` reads the whole object into memory.
+
+Without the tool, any AES-GCM and HKDF implementation can do it. **`openssl
+enc` cannot:** it refuses AEAD ciphers ("AEAD ciphers not supported"). With
+Python and the [`cryptography`](https://pypi.org/project/cryptography/)
+package (both formats):
 
 ```python
+import sys
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-key = bytes.fromhex("your_64_hex_char_key")
-with open("labels.json.enc", "rb") as f:
-    blob = f.read()
-plaintext = AESGCM(key).decrypt(blob[:12], blob[12:], None)
-open("labels.json", "wb").write(plaintext)
+MAGIC = b"GHBKENC\x01"
+SEGMENT = 64 * 1024 + 16  # 64 KiB of plaintext plus its tag
+
+
+def decrypt(key: bytes, blob: bytes) -> bytes:
+    if blob.startswith(MAGIC):
+        try:
+            k = HKDF(hashes.SHA256(), 32, salt=blob[8:40],
+                     info=b"github-backup-rust/s3/payload/v1").derive(key)
+            aes, rest, out, i = AESGCM(k), blob[40:], b"", 0
+            while True:
+                last = len(rest) <= SEGMENT
+                nonce = bytes(7) + i.to_bytes(4, "big") + bytes([last])
+                out += aes.decrypt(nonce, rest[:SEGMENT], None)
+                if last:
+                    return out
+                rest, i = rest[SEGMENT:], i + 1
+        except InvalidTag:
+            pass  # not version 1: an object written by an earlier version
+    return AESGCM(key).decrypt(blob[:12], blob[12:], None)
+
+
+key = bytes.fromhex(sys.argv[1])
+blob = open(sys.argv[2], "rb").read()
+plaintext = decrypt(key, blob)
+open(sys.argv[3], "wb").write(plaintext)
+print(len(blob), len(plaintext))
 ```
 
-This snippet was run against a file produced by the tool's `encrypt()`
-(key `42` repeated 32 times, plaintext `{"hello":"world"}\n`, 46-byte object):
+Run it as `python3 decrypt.py <64-hex-key> labels.json.enc labels.json`. It
+was run against two objects produced by the tool's `encrypt()` (key `42`
+repeated 32 times): `{"hello":"world"}\n` (a 74-byte object) and a
+150 000-byte file spanning three segments, and printed:
 
 ```
-46 b'{"hello":"world"}\n'
+74 18
+150088 150000
 ```
 
 ## Security Notes
 
 * **AES-256-GCM** gives 256-bit key strength and authenticated encryption; any
   change to the ciphertext or tag makes decryption fail.
-* **Random nonces** come from `OsRng`.
+* **Random salts** come from `OsRng`. With a fresh 256-bit salt per object,
+  two objects end up with the same key (and so reuse GCM nonces) with
+  negligible probability, which is why the nonce prefix can be fixed.
 * You can combine this with server-side encryption (SSE-S3 / SSE-KMS) for
   defence in depth; that protects the disks, not the names.

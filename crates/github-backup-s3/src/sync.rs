@@ -43,10 +43,15 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-use crate::client::{HeadOutcome, S3Client};
+use std::fs::File;
+use std::io::Read;
+
+use bytes::Bytes;
+
+use crate::client::{HeadOutcome, PartSource, S3Client};
 use crate::config::S3Config;
-use crate::digest::{self, digests_equal, METADATA_NAME};
-use crate::encrypt;
+use crate::digest::{self, digests_equal, DigestingReader, METADATA_NAME};
+use crate::encrypt::{self, EncryptingReader};
 use crate::error::S3Error;
 
 /// Maximum number of concurrent S3 upload tasks.
@@ -255,7 +260,7 @@ impl<'a> SyncOptions<'a> {
 ///
 /// Walks `options.backup_root` recursively and uploads each regular file
 /// under `<prefix>/<key_root>/<relative path>`.  Release assets (anything
-/// below a `release_assets` directory) are only uploaded with
+/// below `repos/<repo>/release_assets/`) are only uploaded with
 /// [`SyncOptions::include_binary_assets`]; objects for assets that are merely
 /// excluded this time are never treated as stale.
 ///
@@ -325,7 +330,7 @@ pub async fn sync_to_s3(
                 continue;
             }
         };
-        if !options.include_binary_assets && is_binary_asset(file) {
+        if !options.include_binary_assets && is_binary_asset(&relative) {
             debug!(path = %file.display(), "skipping release asset (--s3-include-assets not set)");
             // An asset that is only excluded this time must survive
             // `--s3-delete-stale`: never delete data merely because a flag
@@ -628,48 +633,149 @@ async fn sync_one(ctx: &Ctx, job: &FileJob) -> Result<FileOutcome, S3Error> {
     if ctx.dry_run {
         return Ok(FileOutcome::WouldUpload(reason));
     }
-    upload_file(ctx, job).await?;
+    upload_file(ctx, job, local_digest).await?;
     Ok(FileOutcome::Uploaded)
 }
 
+/// The bytes of a local file as they are uploaded — plain or encrypted — with
+/// the digest of the plaintext computed on the way.
+enum UploadBody {
+    Plain(DigestingReader<File>),
+    Encrypted(Box<EncryptingReader<DigestingReader<File>>>),
+}
+
+impl UploadBody {
+    fn open(path: &Path, key: Option<&[u8; 32]>) -> std::io::Result<Self> {
+        let plain = DigestingReader::new(File::open(path)?, key);
+        Ok(match key {
+            Some(key) => Self::Encrypted(Box::new(EncryptingReader::new(key, plain))),
+            None => Self::Plain(plain),
+        })
+    }
+
+    /// Reads up to `limit` bytes; fewer only at the end of the file.
+    fn read_up_to(&mut self, limit: usize) -> std::io::Result<Vec<u8>> {
+        let mut data = Vec::with_capacity(limit);
+        self.take(limit as u64).read_to_end(&mut data)?;
+        Ok(data)
+    }
+
+    /// The digest of the plaintext read so far.
+    fn finish(self) -> String {
+        match self {
+            Self::Plain(reader) => reader.finish(),
+            Self::Encrypted(reader) => reader.into_inner().finish(),
+        }
+    }
+}
+
+impl Read for UploadBody {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(reader) => reader.read(buf),
+            Self::Encrypted(reader) => reader.read(buf),
+        }
+    }
+}
+
+/// The parts of a multipart upload, read from the file one at a time.
+struct FileParts {
+    /// The part that was read to decide that a multipart upload is needed.
+    first: Option<Bytes>,
+    /// `None` once the end of the file was reached.
+    body: Option<UploadBody>,
+    part_size: usize,
+    /// The digest the object is tagged with; the file must still match it.
+    expected_digest: String,
+}
+
+impl PartSource for FileParts {
+    async fn next_part(&mut self) -> Result<Option<Bytes>, S3Error> {
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
+        let Some(mut body) = self.body.take() else {
+            return Ok(None);
+        };
+        let part_size = self.part_size;
+        let (body, data) = blocking(move || {
+            let data = body.read_up_to(part_size)?;
+            Ok((body, data))
+        })
+        .await?;
+        if !data.is_empty() {
+            self.body = Some(body);
+            return Ok(Some(Bytes::from(data)));
+        }
+        // The metadata was sent when the upload was created; refuse to
+        // complete an object whose content does not match it.
+        if !digests_equal(&body.finish(), &self.expected_digest) {
+            return Err(S3Error::Io(std::io::Error::other(
+                "the file changed while it was being uploaded; the upload was abandoned and the \
+                 file is uploaded again on the next run",
+            )));
+        }
+        Ok(None)
+    }
+}
+
 /// Uploads `job.path` (encrypting when a key is set), tagging the object with
-/// the digest of what is uploaded.
-async fn upload_file(ctx: &Ctx, job: &FileJob) -> Result<(), S3Error> {
+/// the digest of its plaintext.
+///
+/// Memory: one part ([`S3Client::part_size_for`], 16 MiB by default) per
+/// upload, whatever the size of the file.  A file whose upload fits in one
+/// part is sent with `PutObject` and tagged with the digest of exactly the
+/// bytes sent; a larger one is streamed part by part, tagged with
+/// `local_digest`, and the upload is abandoned if the file no longer matches
+/// that digest when its end is reached.
+async fn upload_file(ctx: &Ctx, job: &FileJob, local_digest: String) -> Result<(), S3Error> {
     let key = ctx.key.clone();
     let path = job.path.clone();
-    let (body, digest, content_type) = blocking(move || {
-        let plaintext = std::fs::read(&path)?;
-        // The digest describes exactly the bytes that are uploaded, even if
-        // the file changed since it was first hashed.
-        let digest = digest::digest_bytes(&plaintext, key.as_deref().map(|k| &**k));
-        match key.as_deref() {
-            Some(k) => Ok((
-                encrypt::encrypt(k, &plaintext)?,
-                digest,
-                "application/octet-stream",
-            )),
-            None => Ok((plaintext, digest, guess_content_type(&path))),
-        }
+    let plain_len = tokio::fs::metadata(&path).await?.len();
+    let body_len = if key.is_some() {
+        encrypt::encrypted_len(plain_len)
+    } else {
+        plain_len
+    };
+    let part_size = ctx.client.part_size_for(body_len)?;
+    let content_type = if key.is_some() {
+        "application/octet-stream"
+    } else {
+        guess_content_type(&job.path)
+    };
+    let (body, first) = blocking(move || {
+        let mut body = UploadBody::open(&path, key.as_deref().map(|k| &**k))?;
+        let first = body.read_up_to(part_size)?;
+        Ok((body, first))
     })
     .await?;
 
     debug!(
         path = %job.path.display(),
         key = %job.key,
-        bytes = body.len(),
+        bytes = body_len,
         encrypted = ctx.key.is_some(),
         "uploading to S3"
     );
-    let metadata = [(METADATA_NAME, digest.as_str())];
-    if body.len() > ctx.client.options().part_size {
-        ctx.client
-            .multipart_upload(&job.key, &body, content_type, &metadata)
-            .await
-    } else {
-        ctx.client
-            .put_object(&job.key, body, content_type, &metadata)
-            .await
+    if first.len() < part_size {
+        // The whole file was read: tag it with the digest of these bytes.
+        let digest = body.finish();
+        let metadata = [(METADATA_NAME, digest.as_str())];
+        return ctx
+            .client
+            .put_object(&job.key, first, content_type, &metadata)
+            .await;
     }
+    let metadata = [(METADATA_NAME, local_digest.as_str())];
+    let parts = FileParts {
+        first: Some(Bytes::from(first)),
+        body: Some(body),
+        part_size,
+        expected_digest: local_digest.clone(),
+    };
+    ctx.client
+        .multipart_upload_from(&job.key, content_type, &metadata, parts)
+        .await
 }
 
 /// Why stale-object deletion must not run, if it must not.
@@ -891,9 +997,17 @@ fn walk_files(dir: &Path) -> Walk {
 }
 
 /// Returns `true` if the file is a release asset: anything below a
-/// `release_assets` directory (these can be very large binaries).
-fn is_binary_asset(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == "release_assets")
+/// `release_assets` directory of a repository (these can be very large
+/// binaries).  `relative` is the `/`-separated path below the backup root
+/// (`<output>/<owner>/json`), so only `repos/<repo>/release_assets/**`
+/// matches — never a repository named `release_assets`, nor a directory of
+/// that name above the backup root.
+fn is_binary_asset(relative: &str) -> bool {
+    let mut parts = relative.split('/');
+    parts.next() == Some("repos")
+        && parts.next().is_some()
+        && parts.next() == Some("release_assets")
+        && parts.next().is_some()
 }
 
 /// Guesses the `Content-Type` for a file based on its extension.
@@ -997,22 +1111,41 @@ mod tests {
 
     #[test]
     fn is_binary_asset_returns_true_for_release_assets() {
-        let path = PathBuf::from("/backup/owner/json/repos/my-repo/release_assets/v1.0/app.zip");
-        assert!(is_binary_asset(&path));
+        assert!(is_binary_asset("repos/my-repo/release_assets/v1.0/app.zip"));
     }
 
     #[test]
     fn is_binary_asset_returns_false_for_json() {
-        let path = PathBuf::from("/backup/owner/json/repos/my-repo/info.json");
-        assert!(!is_binary_asset(&path));
+        assert!(!is_binary_asset("repos/my-repo/info.json"));
     }
 
+    /// Everything below `release_assets/` is an asset, at any depth: JSON
+    /// files, checksum sidecars, and sidecars in a sub-directory.
     #[test]
-    fn json_named_release_assets_are_still_assets() {
-        let path = PathBuf::from("/b/o/json/repos/r/release_assets/v1/schema.json");
-        assert!(is_binary_asset(&path));
-        let sidecar = PathBuf::from("/b/o/json/repos/r/release_assets/v1/app.zip.sha256");
-        assert!(is_binary_asset(&sidecar));
+    fn everything_below_release_assets_is_an_asset() {
+        for relative in [
+            "repos/r/release_assets/v1/schema.json",
+            "repos/r/release_assets/v1/app.zip.sha256",
+            "repos/r/release_assets/v1/checksums/app.zip.sha256",
+        ] {
+            assert!(is_binary_asset(relative), "{relative}");
+        }
+    }
+
+    /// Only `repos/<repo>/release_assets/` counts: not a repository named
+    /// `release_assets`, nor an output directory of that name above the
+    /// backup root (the path is relative to the root).
+    #[test]
+    fn release_assets_elsewhere_in_the_path_is_not_an_asset() {
+        for relative in [
+            "repos/release_assets/issues.json",
+            "repos/release_assets/pulls.json",
+            "release_assets/x.json",
+            "repos/r/release_assets",
+            "gists/release_assets/v1/a.json",
+        ] {
+            assert!(!is_binary_asset(relative), "{relative}");
+        }
     }
 
     #[test]

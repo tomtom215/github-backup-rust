@@ -36,6 +36,10 @@ zeroize = { workspace = true }
 # round keys are wiped on drop only when the `aes` crate's `zeroize` feature is
 # enabled, so it is requested explicitly (see `docs/src/storage/encryption.md`).
 aes = { version = "0.8", features = ["zeroize"] }
+# The STREAM construction (`aead::stream`) for segment-wise encryption of
+# large files; `aead` is already in the tree through `aes-gcm`, this only
+# turns on its `stream` module.
+aead = { version = "0.5", features = ["stream"] }
 # Constant-time comparison of the stored and the recomputed plaintext digest.
 subtle = "2"
 

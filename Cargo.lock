@@ -1003,6 +1003,7 @@ dependencies = [
 name = "github-backup-s3"
 version = "0.3.2"
 dependencies = [
+ "aead",
  "aes",
  "aes-gcm",
  "bytes",
