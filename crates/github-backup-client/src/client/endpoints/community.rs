@@ -5,8 +5,8 @@
 //!
 //! - **Projects (v2)** – `GET /users/{username}/projectsV2` and
 //!   `GET /orgs/{org}/projectsV2`, each project's `fields` and `items`.  The
-//!   routes are in GitHub's OpenAPI description for API version 2022-11-28
-//!   (the version this client requests) as well as 2026-03-10; they paginate
+//!   requests are sent with `X-GitHub-Api-Version: 2026-03-10`, the version
+//!   docs.github.com documents them under, instead of the client default; they paginate
 //!   with cursors carried in the `Link` header.
 //! - **Packages** – require the `read:packages` scope.  An organisation's
 //!   packages are listed under `/orgs/{org}`; the token owner's own packages
@@ -21,11 +21,16 @@ use github_backup_types::{
 
 use crate::error::ClientError;
 
-use super::super::{GitHubClient, PER_PAGE};
+use super::super::{GitHubClient, API_VERSION_HEADER, PER_PAGE};
 use super::encode_segment;
 
 /// The most field ids one item listing may name (`fields` has `maxItems: 50`).
 pub(crate) const MAX_PROJECT_FIELDS: usize = 50;
+
+/// The API version the Projects (v2) requests are sent with: the one
+/// docs.github.com documents these routes under (they are also in the
+/// 2022-11-28 OpenAPI description, which the rest of the client uses).
+const PROJECTS_API: &[(&str, &str)] = &[(API_VERSION_HEADER, "2026-03-10")];
 
 impl GitHubClient {
     // ── Projects (v2) ─────────────────────────────────────────────────────
@@ -52,7 +57,7 @@ impl GitHubClient {
     ) -> Result<Page<ProjectV2>, ClientError> {
         let base = self.owner_base(owner, org);
         let url = format!("{base}/projectsV2?per_page={PER_PAGE}");
-        let all = self.get_all_pages(&url).await?;
+        let all = self.get_all_pages_with_headers(&url, PROJECTS_API).await?;
         info!(owner, count = all.len(), "fetched projects");
         Ok(all)
     }
@@ -70,7 +75,7 @@ impl GitHubClient {
     ) -> Result<Page<ProjectV2Field>, ClientError> {
         let base = self.owner_base(owner, org);
         let url = format!("{base}/projectsV2/{project_number}/fields?per_page={PER_PAGE}");
-        self.get_all_pages(&url).await
+        self.get_all_pages_with_headers(&url, PROJECTS_API).await
     }
 
     /// Lists the items of one project with the values of `field_ids` (at most
@@ -98,7 +103,7 @@ impl GitHubClient {
             url.push_str("&fields=");
             url.push_str(&encode_segment(&ids.join(",")));
         }
-        self.get_all_pages(&url).await
+        self.get_all_pages_with_headers(&url, PROJECTS_API).await
     }
 
     // ── GitHub Packages ───────────────────────────────────────────────────
