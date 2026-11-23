@@ -68,6 +68,16 @@ pub trait AssetSink: Send {
     fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()>;
 }
 
+/// One page of a GraphQL connection: its nodes, exactly as GitHub sent
+/// them, and the cursor of the next page (`None` on the last page).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodePage {
+    /// The nodes of this page.
+    pub nodes: Vec<Value>,
+    /// The cursor to ask for the next page with, if there is one.
+    pub next: Option<String>,
+}
+
 /// All GitHub API operations required by the backup engine.
 ///
 /// The production implementation is [`crate::GitHubClient`]. Tests substitute
@@ -420,6 +430,38 @@ pub trait BackupClient: Send + Sync {
         project_number: u64,
         field_ids: &'a [u64],
     ) -> BoxFuture<'a, Result<Page<ProjectV2Item>, ClientError>>;
+
+    // ── Discussions (GraphQL) ─────────────────────────────────────────────
+
+    /// Lists the discussion categories of a repository (GraphQL `Repository.discussionCategories`,
+    /// every page).
+    ///
+    /// GraphQL failures are [`ClientError::GraphQl`]; its `kinds` tell a
+    /// repository that cannot be seen (`NOT_FOUND`) from a refusal
+    /// (`FORBIDDEN`).
+    fn list_discussion_categories<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Value>, ClientError>>;
+
+    /// Returns one page of a repository's discussions, most recently updated
+    /// first (`orderBy: {field: UPDATED_AT, direction: DESC}`), after the
+    /// cursor `after` (`None`: the first page).  Each discussion's labels and
+    /// poll options are complete; its comments are only counted.
+    fn list_discussions_page<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        after: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<NodePage, ClientError>>;
+
+    /// Lists every comment of the discussion with GraphQL node id
+    /// `discussion_id`, each with all of its replies.
+    fn list_discussion_comments<'a>(
+        &'a self,
+        discussion_id: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Value>, ClientError>>;
 
     // ── GitHub Packages ───────────────────────────────────────────────────
 

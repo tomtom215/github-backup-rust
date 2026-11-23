@@ -20,7 +20,7 @@ use github_backup_types::{
 use crate::error::ClientError;
 use crate::GitHubClient;
 
-use super::{AssetSink, BackupClient, BoxFuture};
+use super::{AssetSink, BackupClient, BoxFuture, NodePage};
 
 /// `Result` of a boxed client future.
 type Fut<'a, T> = BoxFuture<'a, Result<T, ClientError>>;
@@ -312,6 +312,29 @@ impl BackupClient for GitHubClient {
             project_number,
             field_ids,
         ))
+    }
+
+    fn list_discussion_categories<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> Fut<'a, Vec<Value>> {
+        Box::pin(GitHubClient::list_discussion_categories(self, owner, repo))
+    }
+
+    fn list_discussions_page<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        after: Option<&'a str>,
+    ) -> Fut<'a, NodePage> {
+        Box::pin(GitHubClient::list_discussions_page(
+            self, owner, repo, after,
+        ))
+    }
+
+    fn list_discussion_comments<'a>(&'a self, discussion_id: &'a str) -> Fut<'a, Vec<Value>> {
+        Box::pin(GitHubClient::list_discussion_comments(self, discussion_id))
     }
 
     fn list_packages<'a>(
