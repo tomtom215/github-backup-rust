@@ -43,12 +43,15 @@ use crate::{
 /// Nothing is fetched when `--discussions` is off, or when the repository
 /// object says `"has_discussions": false`.
 ///
-/// Discussions are listed most recently updated first.  `since` is the
-/// repository's incremental watermark: with it (and an earlier
-/// `discussions.json` to merge into) the listing stops at the first
-/// discussion not updated since the watermark, and only the discussions
-/// listed get their comments fetched again.  Without it every discussion
-/// and its comments are fetched.
+/// Every run lists all discussions (one GraphQL query per 50, about one
+/// point each).  `since` is the repository's incremental watermark: with it,
+/// a discussion's comments are fetched again only when something suggests
+/// they changed — the discussion was updated since the watermark, its
+/// `updatedAt` or its number of top-level comments differs from the stored
+/// copy, or its comments file is missing.  GitHub does not document whether
+/// a new reply or an edited comment updates the discussion's `updatedAt`, so
+/// such a change alone may wait for the discussion's next update or a
+/// `--full` run.  Without `since` every discussion's comments are fetched.
 ///
 /// A comment list that cannot be fetched is recorded in
 /// [`Outcome::failed`] and the other discussions are still backed up; one
@@ -89,10 +92,8 @@ pub async fn backup_discussions(
     )?;
 
     let list_path = meta_dir.join("discussions.json");
-    // Stopping at the watermark is only safe when the older discussions are
-    // already stored.
-    let since = since.filter(|_| holds_list(storage, &list_path));
-    let fresh = list_changed(client, owner, name, since).await?;
+    let stored = change_markers(storage, &list_path);
+    let fresh = list_all(client, owner, name).await?;
     merge_and_write(storage, &list_path, &fresh, "id")?;
     outcome.count = fresh.len() as u64;
 
@@ -108,26 +109,59 @@ pub async fn backup_discussions(
             );
             continue;
         };
+        let path = meta_dir
+            .join("discussion_comments")
+            .join(format!("{number}.json"));
+        // The watermark only advances after a run without failures, so a
+        // discussion whose comments failed last time is refetched even if the
+        // stored list already shows its new state.
+        let unchanged = stored.get(id) == Some(&change_marker(discussion))
+            && unchanged_since(json_str(discussion, "updatedAt").unwrap_or_default(), since)
+            && storage.exists(&path);
+        if unchanged {
+            continue;
+        }
         match client.list_discussion_comments(id).await {
-            Ok(comments) => {
-                let path = meta_dir
-                    .join("discussion_comments")
-                    .join(format!("{number}.json"));
-                write_comments(storage, &path, comments)?;
-            }
+            Ok(comments) => write_comments(storage, &path, comments)?,
             Err(e) => outcome.item_error(format!("discussion #{number} comments"), e)?,
         }
     }
     Ok(outcome)
 }
 
-/// The discussions updated since `since` (all of them without it), most
-/// recently updated first, following the listing page by page.
-async fn list_changed(
+/// What tells a discussion's comments may have changed: its `updatedAt` and
+/// its number of top-level comments.
+type ChangeMarker = (Option<String>, Option<u64>);
+
+fn change_marker(discussion: &Value) -> ChangeMarker {
+    (
+        json_str(discussion, "updatedAt").map(str::to_owned),
+        discussion
+            .pointer("/comments/totalCount")
+            .and_then(Value::as_u64),
+    )
+}
+
+/// The [`ChangeMarker`] of every discussion stored at `path`, by `id`.
+fn change_markers(storage: &impl Storage, path: &Path) -> HashMap<String, ChangeMarker> {
+    let stored: Vec<Value> = storage
+        .read(path)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    stored
+        .iter()
+        .filter_map(|d| Some((json_str(d, "id")?.to_owned(), change_marker(d))))
+        .collect()
+}
+
+/// Every discussion of the repository, most recently updated first,
+/// following the listing page by page.
+async fn list_all(
     client: &impl BackupClient,
     owner: &str,
     name: &str,
-    since: Option<&str>,
 ) -> Result<Vec<Value>, CoreError> {
     let mut fresh = Vec::new();
     let mut after: Option<String> = None;
@@ -135,12 +169,7 @@ async fn list_changed(
         let page = client
             .list_discussions_page(owner, name, after.as_deref())
             .await?;
-        for node in page.nodes {
-            if unchanged_since(json_str(&node, "updatedAt").unwrap_or_default(), since) {
-                return Ok(fresh);
-            }
-            fresh.push(node);
-        }
+        fresh.extend(page.nodes);
         match page.next {
             None => return Ok(fresh),
             Some(next) if after.as_deref() == Some(next.as_str()) => {
@@ -151,14 +180,6 @@ async fn list_changed(
             Some(next) => after = Some(next),
         }
     }
-}
-
-/// `true` if `path` holds a JSON array.
-fn holds_list(storage: &impl Storage, path: &Path) -> bool {
-    matches!(
-        storage.read(path),
-        Ok(Some(bytes)) if serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| v.is_array())
-    )
 }
 
 /// Merges `fresh` comments into the file at `path` by `id`, first adding to
@@ -320,21 +341,36 @@ mod tests {
         );
     }
 
-    /// With a watermark the listing stops at the first discussion not
-    /// updated since; the stored older discussions are kept and only the
-    /// changed one gets its comments again.
-    #[tokio::test]
-    async fn an_incremental_run_stops_at_the_watermark_and_keeps_the_rest() {
-        let storage = MemStorage::default();
+    /// Seeds the stored list and an existing comments file for each of
+    /// `discussions`, as an earlier complete run would have left them.
+    fn seed(storage: &MemStorage, discussions: &[Value]) {
         storage
-            .write_json(
-                &meta().join("discussions.json"),
-                &json!([
-                    discussion(1, "2024-01-01T00:00:00Z"),
-                    discussion(2, "2024-01-02T00:00:00Z")
-                ]),
-            )
-            .expect("seed");
+            .write_json(&meta().join("discussions.json"), &json!(discussions))
+            .expect("seed list");
+        for d in discussions {
+            let n = d["number"].as_u64().unwrap();
+            storage
+                .write_json(
+                    &meta().join(format!("discussion_comments/{n}.json")),
+                    &json!([]),
+                )
+                .expect("seed comments");
+        }
+    }
+
+    /// With a watermark every discussion is still listed, but only the ones
+    /// that changed get their comments fetched again.
+    #[tokio::test]
+    async fn an_incremental_run_refetches_only_changed_discussions() {
+        let storage = MemStorage::default();
+        seed(
+            &storage,
+            &[
+                discussion(1, "2024-01-01T00:00:00Z"),
+                discussion(2, "2024-01-02T00:00:00Z"),
+                discussion(0, "2023-01-01T00:00:00Z"),
+            ],
+        );
         let client = MockBackupClient::new().with_discussion_pages(vec![
             vec![
                 discussion(2, "2024-06-01T00:00:00Z"),
@@ -347,27 +383,58 @@ mod tests {
             .await
             .expect("ok");
 
-        assert_eq!(outcome.count, 1);
+        assert_eq!(outcome.count, 3);
         let calls = client.calls();
         assert!(
-            !calls.contains(&"discussions:page-1".to_string()),
+            calls.contains(&"discussions:page-1".to_string()),
             "{calls:?}"
         );
         assert!(calls.contains(&"discussion_comments:D_2".to_string()));
         assert!(!calls.contains(&"discussion_comments:D_1".to_string()));
+        assert!(!calls.contains(&"discussion_comments:D_0".to_string()));
         let list = read(&storage, "discussions.json").expect("list");
-        let updated: Vec<&str> = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|d| d["updatedAt"].as_str().unwrap())
-            .collect();
-        assert_eq!(updated, ["2024-01-01T00:00:00Z", "2024-06-01T00:00:00Z"]);
+        assert_eq!(list.as_array().map(Vec::len), Some(3));
     }
 
-    /// Without a stored list there is nothing to keep, so the watermark is
-    /// ignored and every discussion is fetched (the category was switched on
-    /// later, or the file was removed).
+    /// A new comment on an old discussion changes its comment count even if
+    /// GitHub did not move its `updatedAt`: the comments are fetched again.
+    #[tokio::test]
+    async fn a_new_comment_on_an_old_discussion_is_noticed_by_its_count() {
+        let storage = MemStorage::default();
+        seed(&storage, &[discussion(1, "2024-01-01T00:00:00Z")]);
+        let mut grown = discussion(1, "2024-01-01T00:00:00Z");
+        grown["comments"]["totalCount"] = json!(2);
+        let client = MockBackupClient::new().with_discussion_pages(vec![vec![grown]]);
+
+        run(&client, &repo(None), Some("2024-03-01T00:00:00Z"), &storage)
+            .await
+            .expect("ok");
+
+        assert!(client
+            .calls()
+            .contains(&"discussion_comments:D_1".to_string()));
+    }
+
+    /// A missing comments file is fetched again even for an unchanged
+    /// discussion.
+    #[tokio::test]
+    async fn a_missing_comments_file_is_fetched_again() {
+        let storage = MemStorage::default();
+        storage
+            .write_json(
+                &meta().join("discussions.json"),
+                &json!([discussion(1, "2024-01-01T00:00:00Z")]),
+            )
+            .expect("seed");
+        let client = MockBackupClient::new()
+            .with_discussion_pages(vec![vec![discussion(1, "2024-01-01T00:00:00Z")]]);
+        run(&client, &repo(None), Some("2024-03-01T00:00:00Z"), &storage)
+            .await
+            .expect("ok");
+        assert!(read(&storage, "discussion_comments/1.json").is_some());
+    }
+
+    /// Without a stored list every discussion's comments are fetched.
     #[tokio::test]
     async fn a_watermark_without_a_stored_list_fetches_everything() {
         let client = MockBackupClient::new().with_discussion_pages(vec![
