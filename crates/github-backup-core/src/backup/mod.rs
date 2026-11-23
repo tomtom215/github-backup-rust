@@ -100,29 +100,33 @@ impl From<()> for Outcome {
     }
 }
 
-/// `true` for an API answer that says the resource does not exist (404) or
-/// no longer exists (410): a category switched off, an item deleted since
-/// it was listed.
+/// `true` for an API answer that says the resource does not exist (404, or
+/// a GraphQL `NOT_FOUND`) or no longer exists (410): a category switched
+/// off, an item deleted since it was listed.
 #[must_use]
 pub(crate) fn is_gone(error: &CoreError) -> bool {
-    matches!(
-        error,
-        CoreError::Client(ClientError::ApiError {
-            status: 404 | 410,
-            ..
-        })
-    )
+    match error {
+        CoreError::Client(ClientError::ApiError { status, .. }) => matches!(status, 404 | 410),
+        CoreError::Client(ClientError::GraphQl { kinds, .. }) => graphql_only(kinds, "NOT_FOUND"),
+        _ => false,
+    }
 }
 
-/// `true` for an API answer that refuses access (403).  Rate limits are not
-/// among them: the client waits those out and reports an exhausted budget as
-/// [`ClientError::RateLimitExceeded`].
+/// `true` for an API answer that refuses access (403, or a GraphQL
+/// `FORBIDDEN`).  Rate limits are not among them: the client waits those out
+/// and reports an exhausted budget as [`ClientError::RateLimitExceeded`].
 #[must_use]
 pub(crate) fn is_forbidden(error: &CoreError) -> bool {
-    matches!(
-        error,
-        CoreError::Client(ClientError::ApiError { status: 403, .. })
-    )
+    match error {
+        CoreError::Client(ClientError::ApiError { status, .. }) => *status == 403,
+        CoreError::Client(ClientError::GraphQl { kinds, .. }) => graphql_only(kinds, "FORBIDDEN"),
+        _ => false,
+    }
+}
+
+/// `true` when GraphQL reported errors of type `kind` and of no other type.
+fn graphql_only(kinds: &[String], kind: &str) -> bool {
+    !kinds.is_empty() && kinds.iter().all(|k| k == kind)
 }
 
 /// What a refusal (HTTP 403) of `category` means for the run; see
@@ -231,6 +235,22 @@ mod tests {
         assert!(outcome.item_error("e", api(401)).is_err(), "fatal");
         let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
         assert_eq!(whats, ["a", "d"]);
+    }
+
+    #[test]
+    fn graphql_not_found_and_forbidden_read_like_404_and_403() {
+        let graphql = |kinds: &[&str]| {
+            CoreError::Client(ClientError::GraphQl {
+                message: "x".into(),
+                kinds: kinds.iter().map(ToString::to_string).collect(),
+            })
+        };
+        assert!(is_gone(&graphql(&["NOT_FOUND"])));
+        assert!(is_forbidden(&graphql(&["FORBIDDEN"])));
+        for other in [&[][..], &["INTERNAL"], &["NOT_FOUND", "FORBIDDEN"]] {
+            assert!(!is_gone(&graphql(other)), "{other:?}");
+            assert!(!is_forbidden(&graphql(other)), "{other:?}");
+        }
     }
 
     #[test]
