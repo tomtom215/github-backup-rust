@@ -237,6 +237,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Repositories | Mirror, bare, full or shallow clone, updated with `git fetch`; optional LFS objects (`--lfs`) |
 | Issues and pull requests | Lists, comments, events, commits and reviews as GitHub's complete JSON |
 | Releases | Metadata plus optional asset download (streamed, verified) |
+| Attachments | Files and images attached to issues, pull requests, comments and release notes, content-addressed with an index (`--attachments`) |
 | Gists and wikis | Owned gists and wikis cloned; starred gists as metadata |
 | Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, advisories, Actions, environments, packages, Discussions (with comments and replies, through GraphQL) |
 | User and org data | Starred, watched, followers, following, org members and teams |
@@ -254,8 +255,8 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Dry run | `--dry-run` lists what would be backed up and writes nothing |
 | Monitoring | JSON report, Prometheus textfile metrics, webhook, run history |
 
-Not backed up: Actions secrets, code-scanning and Dependabot alerts, issue
-attachments, and repository clones in S3.  See
+Not backed up: Actions secrets, code-scanning and Dependabot alerts, and
+repository clones in S3.  See
 [the limits](https://tomtom215.github.io/github-backup-rust/restore.html#what-is-not-restored-or-not-backed-up).
 
 ## Design Principles

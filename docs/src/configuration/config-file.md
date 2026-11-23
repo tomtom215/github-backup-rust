@@ -292,6 +292,7 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `projects` | bool | `false` | Back up the owner's Projects (v2): projects, fields, items with field values |
 | `packages` | bool | `false` | Back up GitHub Packages metadata for the target user or organisation |
 | `commit_comments` | bool | `false` | Back up the comments made on commits of each repository |
+| `attachments` | bool | `false` | Download the files attached to issues, pull requests, comments and release notes |
 | `include_repos` | string array | `[]` | Only back up repos whose **name** (not `owner/name`) matches one of these glob patterns; a TOML array (`["a-*", "b"]`), not a comma-separated string |
 | `exclude_repos` | string array | `[]` | Exclude repos whose name matches one of these glob patterns (a TOML array) |
 | `since` | string | — | Expert override, same as `--since`: a date (`2026-01-01`) or timestamp.  Applied to every run and never stored; leave it unset and the tool tracks its own per-repository watermarks |

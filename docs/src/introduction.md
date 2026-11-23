@@ -42,8 +42,8 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 
 ## What It Does Not Back Up
 
-- Actions secrets and variables, code-scanning and Dependabot alerts, issue
-  attachments and commit statuses.
+- Actions secrets and variables, code-scanning and Dependabot alerts, and commit
+  statuses.  Issue attachments only with `--attachments` (part of `--all`).
 - **Git LFS objects** unless you pass `--lfs` (requires `git-lfs`).
 - Repository **clones are not uploaded to S3**, only the JSON metadata.
 - It cannot see what the token cannot see: other users' private data, or

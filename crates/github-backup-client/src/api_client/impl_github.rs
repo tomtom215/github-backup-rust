@@ -20,7 +20,7 @@ use github_backup_types::{
 use crate::error::ClientError;
 use crate::GitHubClient;
 
-use super::{AssetSink, BackupClient, BoxFuture, NodePage};
+use super::{AssetSink, AttachmentDownload, BackupClient, BoxFuture, NodePage};
 
 /// `Result` of a boxed client future.
 type Fut<'a, T> = BoxFuture<'a, Result<T, ClientError>>;
@@ -243,6 +243,14 @@ impl BackupClient for GitHubClient {
         sink: &'a mut dyn AssetSink,
     ) -> Fut<'a, u64> {
         Box::pin(GitHubClient::download_release_asset(self, asset_url, sink))
+    }
+
+    fn download_attachment<'a>(
+        &'a self,
+        url: &'a str,
+        sink: &'a mut dyn AssetSink,
+    ) -> Fut<'a, AttachmentDownload> {
+        Box::pin(GitHubClient::download_attachment(self, url, sink))
     }
 
     fn list_deploy_keys<'a>(&'a self, owner: &'a str, repo: &'a str) -> Fut<'a, Page<DeployKey>> {

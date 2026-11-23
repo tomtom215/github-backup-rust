@@ -97,6 +97,7 @@
 # projects = true          # Projects (v2): fields and items; needs read:project
 # packages = true
 # commit_comments = true
+# attachments = true       # files and images attached to issues, PRs, comments, releases
 
 # ── Repository filtering (glob patterns, case-insensitive) ────────────────
 

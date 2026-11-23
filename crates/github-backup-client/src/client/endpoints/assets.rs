@@ -8,6 +8,7 @@
 //! [`super::super::redirect`]).
 
 use http_body_util::BodyExt;
+use hyper::body::Incoming;
 
 use crate::api_client::AssetSink;
 use crate::error::ClientError;
@@ -42,14 +43,24 @@ impl GitHubClient {
             ..Call::get(asset_url, &[("accept", "application/octet-stream")])
         };
         let response = self.send(&call, &mut Attempts::default()).await?;
+        self.stream_body(response.into_body(), asset_url, sink)
+            .await
+    }
 
-        let mut body = response.into_body();
+    /// Hands `body` to `sink` chunk by chunk (each chunk must arrive within
+    /// the request timeout) and returns the number of bytes delivered.
+    pub(super) async fn stream_body(
+        &self,
+        mut body: Incoming,
+        url: &str,
+        sink: &mut dyn AssetSink,
+    ) -> Result<u64, ClientError> {
         let mut written = 0u64;
         loop {
             let frame = tokio::time::timeout(self.timing.request_timeout, body.frame())
                 .await
                 .map_err(|_| ClientError::Timeout {
-                    url: asset_url.to_string(),
+                    url: url.to_string(),
                 })?;
             let Some(frame) = frame else { break };
             if let Some(chunk) = frame?.data_ref() {

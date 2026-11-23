@@ -74,7 +74,8 @@ fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
         || opts.security_advisories
         || opts.actions
         || opts.action_runs
-        || opts.discussions;
+        || opts.discussions
+        || opts.attachments;
     if touches_repos {
         set.insert("public_repo");
     }
@@ -199,6 +200,14 @@ mod tests {
     fn followers_need_no_scope() {
         let s = recommended_scopes(&args(&["--followers", "--following"]));
         assert!(s.is_empty(), "{s:?}");
+    }
+
+    #[test]
+    fn attachments_read_repositories() {
+        let s = recommended_scopes(&args(&["--attachments"]));
+        assert_eq!(s, ["public_repo"]);
+        let s = recommended_scopes(&args(&["--attachments", "--private"]));
+        assert_eq!(s, ["repo"]);
     }
 
     #[test]

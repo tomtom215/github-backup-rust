@@ -25,6 +25,7 @@
 //! | Body cap | 16 MiB cap on API responses ([`ClientError::BodyTooLarge`]) to protect against runaway streams |
 //! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports; Discussions are read through it, every connection followed with cursors |
 //! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
+//! | Attachments | Files attached to issues, comments and release notes, streamed like release assets; the credential (HTTP Basic) goes to `https://github.com` only, and only from a github.com client |
 //! | TLS | rustls with platform CA bundle |
 //! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] is shared with the webhook notifier and the device flow |
 //!
@@ -58,7 +59,7 @@ pub mod proxy;
 mod rate_limit;
 mod token;
 
-pub use api_client::{AssetSink, BackupClient, BoxFuture, NodePage};
+pub use api_client::{AssetSink, AttachmentDownload, BackupClient, BoxFuture, NodePage};
 pub use client::{GitHubClient, Installation};
 pub use error::ClientError;
 pub use pagination::parse_next_link;

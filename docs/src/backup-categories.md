@@ -171,6 +171,73 @@ Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_a
 
 ---
 
+## Attachments
+
+| Flag | Description |
+|------|-------------|
+| `--attachments` | Download the files and images attached to issues, pull requests, discussions, comments, reviews, commit comments and release notes |
+
+GitHub has no API for attachments: they are links in the Markdown `body` of an
+item.  After the other categories of a repository, the backup reads the bodies
+it has stored (`issues.json`, `pulls.json`, `discussions.json`, `releases.json`,
+`commit_comments.json`, `issue_comments/<n>.json`, `pull_comments/<n>.json`
+and `pull_reviews/<n>.json` of every stored issue and pull request, and
+`discussion_comments/<n>.json` with the replies of every stored discussion),
+picks out
+the links to GitHub's attachment hosts and downloads each URL once.  The stored
+JSON is not changed; `attachments/index.json` maps every URL to its file.
+
+Only `https` links of these forms are downloaded, wherever they appear in a body
+(Markdown links and images, HTML `src`/`href`, bare text, also inside code
+spans); no other host is contacted, except where GitHub itself redirects:
+
+| Host | Path |
+|------|------|
+| `github.com` | `/user-attachments/assets/<id>`, `/user-attachments/files/<n>/<name>` |
+| `github.com` | `/<owner>/<repo>/assets/<n>/<id>`, `/<owner>/<repo>/files/<n>/<name>` (older form) |
+| `user-images.githubusercontent.com` | any (older public images) |
+| `private-user-images.githubusercontent.com` | any (signed links that expire minutes after a page is rendered; Markdown bodies rarely contain them) |
+
+Attachments on a GitHub Enterprise Server host are not downloaded.
+
+Output: `<output>/<owner>/json/repos/<repo>/attachments/<sha256>.<ext>`, named by
+the SHA-256 of the content (a file attached twice is stored once), with the
+extension of the link's file name, else one for the media type GitHub sends,
+else none; and `attachments/index.json`.  Each file is streamed to disk and
+limited to 100 MiB (GitHub accepts at most 100 MB, for videos on paid plans).
+
+The index entry of a URL holds `file`, `size`, `content_type`, `sha256` and
+`first_seen`.  It is never removed, and an indexed URL whose file is on disk is
+not downloaded again.  Every run reads all stored bodies again: for a
+repository with 10,000 issues and 30,000 comments (50 MB of JSON) that took
+0.2 s in a release build on the project's test machine, with every link
+already indexed.
+
+**Private repositories.**  Since May 2023 an attachment of a private repository
+needs authentication.  The token is sent, as HTTP Basic authentication, to
+`https://github.com` only (never to the storage host GitHub redirects to, and
+never by a backup of a GitHub Enterprise Server).  python-github-backup
+reports that classic personal access tokens work and that fine-grained and
+GitHub App tokens are answered `404 Not Found` for many attachments of private
+repositories; see [Authentication](getting-started/authentication.md#attachments-of-private-repositories).
+
+What a failed download means:
+
+* **404 or 410** (or any client error for an expired signed link): the URL is
+  recorded in the index as missing (`missing` holds the status, `checked_at`
+  the time), one warning per repository says so, and it is not a failure.  It
+  is asked for again after 30 days, or on a run with `--full`.  Because GitHub
+  answers 404 to tokens it does not accept for private attachments, run once
+  with `--full` and a classic token after switching tokens.
+* **401, 403**, or a web page (`text/html`, a sign-in page) instead of a file:
+  the token may not read it.  With `--attachments` this is a failure (exit
+  status `3`); with `--all` or the default selection one warning per run.  The
+  URL is tried again next run.
+* Anything else, including a file larger than 100 MiB: a failure of the
+  repository's `attachments` step (exit status `3`); tried again next run.
+
+---
+
 ## Wikis
 
 | Flag | Description |
