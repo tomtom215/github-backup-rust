@@ -195,7 +195,6 @@ pub(crate) fn verify_ours(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
@@ -259,7 +258,12 @@ pub(crate) mod tests {
             "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/pull/*) echo \"deny $ref\" >&2; exit 1;; esac; done\n",
         )
         .expect("hook");
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Git for Windows runs hooks through its own `sh` whatever the mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
         dest
     }
 
@@ -351,8 +355,11 @@ pub(crate) mod tests {
         assert!(matches!(err, MirrorError::GitFailed { .. }), "{err:?}");
     }
 
+    /// Runs a `#!/bin/sh` script in place of git, which only Unix can exec.
     #[test]
+    #[cfg(unix)]
     fn token_is_in_the_environment_only_and_scoped_to_the_destination() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let seen = dir.path().join("seen.txt");
         let script = dir.path().join("fake-git");

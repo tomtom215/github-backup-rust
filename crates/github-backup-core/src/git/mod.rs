@@ -783,7 +783,10 @@ fn is_ref_name_conflict(stderr: &str) -> bool {
 mod tests {
     use super::spy::SpyGitRunner;
     use super::*;
+    // Used only by the tests that run real or stand-in git, which need Unix.
+    #[cfg(unix)]
     use crate::cancel::CancelFlag;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn opts() -> CloneOptions {

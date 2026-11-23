@@ -70,6 +70,7 @@ const ERROR_LINES: usize = 12;
 
 /// How long a stopped child's process group has between `SIGTERM` and
 /// `SIGKILL` to clean up (git removes its `.lock` files on `SIGTERM`).
+#[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// The SSH command used when the user configured none: it fails instead of
