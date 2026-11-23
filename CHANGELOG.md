@@ -114,6 +114,14 @@ is bumped.
 
 ### Added
 
+- **Proxy settings** (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) now
+  also apply to S3 uploads and to the Gitea/GitLab API calls of `--mirror-to`;
+  loopback hosts are always reached directly.
+- **TUI:** an empty Owner backs up the token's account; Commit Comments and
+  Attachments toggles; `A` selects exactly what `--all` selects.
+- **Docker:** with only `GITHUB_TOKEN` set, the container backs up the token's
+  account instead of printing help.
+
 - **`--render-html[=DIR]`** turns a backup into a static website you can read
   offline (default `<output>/<owner>/site`): repositories, issues and pull
   requests with comments, events, reviews, review comments and commits,
@@ -236,6 +244,13 @@ is bumped.
 
 ### Changed
 
+- **`--decrypt`** streams objects of the current format with bounded memory and
+  writes the output only after the last segment authenticates; a truncated,
+  tampered or wrong-key object leaves no output file.
+- The owner and organisation look-ups before a run use the client's retry and
+  rate-limit handling; hints cover device-flow refusals, pagination and GraphQL
+  errors, and `--doctor` recognises an answer that is not the GitHub API.
+
 - **Repeat runs ask only for what changed.**  Issues are listed with `since`
   and pull requests newest-updated first until older ones, and both are merged
   into the stored lists; `git fetch` is skipped for a repository nothing was
@@ -313,6 +328,8 @@ is bumped.
   cancelled run shows no misleading counters.
 
 ### Fixed
+
+- Docker: a blank `BACKUP_NOTIFY_FORMAT` aborted every run.
 
 - **Refs that should be kept were deleted**: a `fetch.prune` setting in the
   user's own git configuration pruned the backup, and a stale `.lock` file left

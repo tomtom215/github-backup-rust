@@ -41,7 +41,7 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 | WebUI field                       | Variable / mount        | Default                          | Notes |
 |-----------------------------------|--------------------------|----------------------------------|-------|
 | Output Directory                  | `/backup` (Path)         | `/mnt/user/backups/github/`      | Required. Point at an Unraid share. |
-| GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Required. User / org to back up. |
+| GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Optional. User / org to back up; empty backs up the token's account. |
 | GitHub Token                      | `GITHUB_TOKEN`           | _(empty)_                        | Required, **masked**. |
 | Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:edge --tui` from the Unraid terminal. |
 | Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted; nothing is run through a shell). |

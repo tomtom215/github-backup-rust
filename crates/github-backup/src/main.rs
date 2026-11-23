@@ -475,7 +475,8 @@ async fn run_tui(mut args: Args, matches: &ArgMatches) -> ExitCode {
     let output = args.output.as_ref().map(|p| p.display().to_string());
     let api_url = args.api_url.clone();
     let manifest = args.manifest;
-    // `into_backup_options` needs an owner; the TUI asks for it.
+    // `into_backup_options` needs an owner; an empty one makes the TUI back
+    // up the token's account (or ask, for an organisation).
     args.owner.get_or_insert_with(String::new);
     let (_, _, options) = args.into_backup_options();
     let initial = InitialConfig {

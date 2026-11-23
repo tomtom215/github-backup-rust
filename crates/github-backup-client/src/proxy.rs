@@ -131,12 +131,16 @@ impl ProxySettings {
     }
 
     /// The proxy to use for `uri`, or `None` for a direct connection.
+    ///
+    /// Loopback hosts (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) are
+    /// always reached directly, as Go's HTTP client does: a service on this
+    /// machine (a local MinIO or Gitea) is never behind the network's proxy.
     #[must_use]
     pub fn proxy_for(&self, uri: &Uri) -> Option<&ProxyConfig> {
         let host = uri.host()?;
         let secure = uri.scheme_str() == Some("https");
         let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
-        if self.no_proxy.iter().any(|rule| rule.matches(host, port)) {
+        if is_loopback(host) || self.no_proxy.iter().any(|rule| rule.matches(host, port)) {
             return None;
         }
         if secure {
@@ -145,6 +149,17 @@ impl ProxySettings {
             self.http.as_ref()
         }
     }
+}
+
+/// `true` for a host name or address that always means this machine.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Parses `http://[user[:pass]@]host[:port]` (or `host[:port]`); the port
@@ -687,6 +702,28 @@ mod tests {
 
     fn proxy_for<'a>(s: &'a ProxySettings, url: &str) -> Option<&'a str> {
         s.proxy_for(&url.parse().unwrap()).map(|p| p.host.as_str())
+    }
+
+    #[test]
+    fn loopback_hosts_never_go_through_the_proxy() {
+        let s = settings(&[("HTTPS_PROXY", "http://p:1"), ("HTTP_PROXY", "http://p:1")]);
+        for url in [
+            "http://127.0.0.1:9000/b",
+            "http://127.1.2.3/x",
+            "https://localhost/x",
+            "http://minio.localhost:9000/",
+            "http://[::1]:9000/b",
+            "https://LOCALHOST/x",
+        ] {
+            assert_eq!(proxy_for(&s, url), None, "{url}");
+        }
+        for url in [
+            "http://128.0.0.1/x",
+            "https://localhost.example/x",
+            "http://[::2]/x",
+        ] {
+            assert_eq!(proxy_for(&s, url), Some("p"), "{url}");
+        }
     }
 
     #[test]

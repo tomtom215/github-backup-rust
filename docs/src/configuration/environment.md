@@ -65,7 +65,7 @@ credentials exported for other tools never affect a run that does not use S3.
 | `HTTPS_PROXY` / `https_proxy` | Proxy for `https://` targets |
 | `HTTP_PROXY` / `http_proxy` | Proxy for `http://` targets |
 | `ALL_PROXY` / `all_proxy` | Fallback for both when the specific variable is unset |
-| `NO_PROXY` / `no_proxy` | Comma-separated exceptions: `*`, host names (also match subdomains), IP addresses, CIDR blocks such as `10.0.0.0/8`, each with an optional `:port` |
+| `NO_PROXY` / `no_proxy` | Comma-separated exceptions: `*`, host names (also match subdomains), IP addresses, CIDR blocks such as `10.0.0.0/8`, each with an optional `:port`.  Loopback hosts (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) are always reached directly. |
 
 The lower-case spelling wins when both are set.  The proxy must be an
 **HTTP proxy** (`http://[user:pass@]host[:port]`, port 3128 if omitted;
