@@ -76,7 +76,8 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   `node(id:)` queries.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
-  `/gists`, which include private repositories and secret gists.
+  `/gists`, which include private repositories and secret gists.  A GitHub App
+  never asks `GET /user`; it lists `/installation/repositories`.
 - **Release assets** are streamed to disk through an `AssetSink`, with the
   same rate-limit and retry handling until the body starts; the
   `Authorization` header is dropped on any redirect that leaves the origin.
@@ -87,6 +88,13 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   S3 client.  HTTP/1.1 only.
 - `oauth`: the device flow, at the login host of `--api-url` (github.com by
   default), retrying lost connections until the code expires.
+- **GitHub App** (`app_auth`, `client/app.rs`): an RS256 JWT signed with
+  `aws-lc-rs` (rustls's provider) finds the installation and mints installation
+  tokens; the current token is renewed five minutes before it expires, under a
+  lock so that concurrent requests share one renewal.  An App lists
+  `/installation/repositories` instead of calling `GET /user`.  `git_token()`
+  gives the engine a `GitToken` that the git runner asks for the token at
+  every `git` start.
 
 ### `github-backup-core`
 

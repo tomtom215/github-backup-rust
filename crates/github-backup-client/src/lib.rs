@@ -15,7 +15,7 @@
 //!
 //! | Capability | Details |
 //! |-----------|---------|
-//! | Authentication | Personal access token (classic & fine-grained); the OAuth device flow ([`oauth`]) on github.com or GHES |
+//! | Authentication | Personal access token (classic & fine-grained); a GitHub App (JWT signed with `aws-lc-rs`, installation tokens renewed five minutes before they expire, single-flight); the OAuth device flow ([`oauth`]) on github.com or GHES |
 //! | API version | `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2022-11-28` on every request; `Deprecation` / `Sunset` headers are logged once per endpoint |
 //! | Pagination | Automatic via `Link` response header (including the `{"total_count", "<list>"}` wrappers of workflows, runs and environments); a next link to another origin or to a page already fetched is an error |
 //! | Lossless lists | Lists are decoded element by element into a [`Page`](github_backup_types::Page): the original JSON of every element is kept, and an element that does not fit its model is isolated and logged instead of failing the list |
@@ -48,6 +48,7 @@
 #![warn(missing_debug_implementations)]
 
 mod api_client;
+mod app_auth;
 mod client;
 mod decode;
 mod error;
@@ -55,10 +56,16 @@ pub mod oauth;
 mod pagination;
 pub mod proxy;
 mod rate_limit;
+mod token;
 
 pub use api_client::{AssetSink, BackupClient, BoxFuture, NodePage};
-pub use client::{AccountKind, GitHubClient};
+pub use client::{AccountKind, GitHubClient, Installation};
 pub use error::ClientError;
 pub use pagination::parse_next_link;
 pub use proxy::{native_tls_config, ProxyClient, ProxyConnector, ProxySettings};
 pub use rate_limit::RateLimitInfo;
+pub use token::{GitToken, TokenSource};
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use app_auth::test_keys;

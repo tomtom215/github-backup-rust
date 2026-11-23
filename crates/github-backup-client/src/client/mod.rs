@@ -7,6 +7,9 @@
 //! API endpoint methods live in the [`endpoints`] submodule, which is split
 //! by resource category into smaller focused files.
 
+mod app;
+#[cfg(test)]
+mod app_tests;
 mod endpoints;
 mod graphql;
 
@@ -43,6 +46,10 @@ use crate::pagination::parse_next_link;
 use crate::rate_limit::{self, RateLimitInfo, RateLimitWait};
 
 use redirect::{Hop, MAX_REDIRECTS};
+
+pub use app::Installation;
+
+use crate::app_auth::AppAuth;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 pub(crate) const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
@@ -114,6 +121,9 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub struct GitHubClient {
     pub(crate) http: ProxyClient,
     pub(crate) credential: Credential,
+    /// For a [`Credential::App`]: the parsed key and the current installation
+    /// token, shared by every clone.
+    app: Option<Arc<AppAuth>>,
     /// Base URL for all API requests.  Defaults to `https://api.github.com`.
     pub(crate) api_base: String,
     /// Login of the user the credential belongs to, looked up once with
@@ -197,6 +207,9 @@ struct Call<'a> {
     leave_origin: bool,
     /// A GraphQL request: a `200` can still be a rate limit.
     graphql: bool,
+    /// Authenticate with this bearer token (a GitHub App's JWT) instead of
+    /// the client's credential.
+    bearer: Option<&'a str>,
 }
 
 impl<'a> Call<'a> {
@@ -209,6 +222,7 @@ impl<'a> Call<'a> {
             idempotent: true,
             leave_origin: false,
             graphql: false,
+            bearer: None,
         }
     }
 }
@@ -245,18 +259,14 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Returns [`ClientError::InvalidApiUrl`] unless `api_base_url` is an
-    /// `https://` URL with a host, and [`ClientError::Tls`] if the native CA
-    /// bundle cannot be loaded.
+    /// `https://` URL with a host, [`ClientError::Tls`] if the native CA
+    /// bundle cannot be loaded, and [`ClientError::App`] for a GitHub App
+    /// credential whose private key cannot be used.
     pub fn with_api_url(credential: Credential, api_base_url: &str) -> Result<Self, ClientError> {
         validate_api_url(api_base_url)?;
         // HTTPS only: the token must never travel in clear text.
         let http = ProxyClient::from_env(false)?;
-        Ok(Self::from_parts(
-            http,
-            credential,
-            api_base_url,
-            Timing::default(),
-        ))
+        Self::from_parts(http, credential, api_base_url, Timing::default())
     }
 
     fn from_parts(
@@ -264,16 +274,21 @@ impl GitHubClient {
         credential: Credential,
         api_base: &str,
         timing: Timing,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ClientError> {
+        let app = match &credential {
+            Credential::App(app) => Some(Arc::new(AppAuth::new(app)?)),
+            Credential::Token(_) | Credential::Anonymous => None,
+        };
+        Ok(Self {
             http,
             credential,
+            app,
             api_base: api_base.trim_end_matches('/').to_string(),
             login: Arc::new(OnceCell::new()),
             rate_gate: Arc::new(RateGate::default()),
             deprecations: Arc::new(Mutex::new(HashSet::new())),
             timing,
-        }
+        })
     }
 
     /// A client for tests that talk to a local **plain-HTTP** server.
@@ -289,6 +304,10 @@ impl GitHubClient {
     ///
     /// Plain HTTP, no proxy, no CA bundle: only for tests against a local
     /// server (the `test-support` feature exposes it to other crates' tests).
+    ///
+    /// # Panics
+    ///
+    /// For a GitHub App credential whose key cannot be used.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
@@ -301,6 +320,7 @@ impl GitHubClient {
                 request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             },
         )
+        .expect("a usable test credential")
     }
 
     /// Returns the API base URL (without trailing slash).
@@ -344,16 +364,11 @@ impl GitHubClient {
     }
 
     /// Returns the raw token string if the credential is a [`Credential::Token`],
-    /// or `None` for anonymous / other credential types.
-    ///
-    /// Used by the backup engine to inject the token into git clone commands
-    /// for HTTPS authentication on private repositories.
+    /// or `None` for anonymous and GitHub App credentials (an App's token
+    /// changes during a run: see [`git_token`](Self::git_token)).
     #[must_use]
     pub fn token(&self) -> Option<String> {
-        match &self.credential {
-            Credential::Token(t) => Some(t.clone()),
-            Credential::Anonymous => None,
-        }
+        self.credential.token().map(str::to_string)
     }
 
     // ── Internal HTTP machinery ───────────────────────────────────────────
@@ -637,7 +652,12 @@ impl GitHubClient {
 
         loop {
             self.rate_gate.pass().await;
-            let req = self.request(call, &url, same_origin)?;
+            let authorization = if same_origin {
+                self.authorization(call).await?
+            } else {
+                None
+            };
+            let req = self.request(call, &url, same_origin, authorization.as_deref())?;
             let sent =
                 tokio::time::timeout(self.timing.request_timeout, self.http.request(req)).await;
             let response = match sent {
@@ -713,9 +733,23 @@ impl GitHubClient {
         }
     }
 
+    /// The `Authorization` header value for `call`: its own bearer token (a
+    /// GitHub App's JWT), the current installation token for a GitHub App
+    /// credential (minted or renewed when needed), the token, or `None` for
+    /// [`Credential::Anonymous`].
+    async fn authorization(&self, call: &Call<'_>) -> Result<Option<String>, ClientError> {
+        if let Some(bearer) = call.bearer {
+            return Ok(Some(format!("Bearer {bearer}")));
+        }
+        if self.is_app() {
+            return Ok(Some(format!("Bearer {}", self.installation_token().await?)));
+        }
+        Ok(self.credential.authorization_header())
+    }
+
     /// Builds the request for one hop of `call` to `url`.
     ///
-    /// The credential, `Accept: application/vnd.github+json` and the API
+    /// `authorization`, `Accept: application/vnd.github+json` and the API
     /// version go only to the origin of the call; the headers of the call are
     /// sent on every hop and replace the defaults of the same name.  The
     /// `Authorization` header is omitted for [`Credential::Anonymous`] so that
@@ -725,6 +759,7 @@ impl GitHubClient {
         call: &Call<'_>,
         url: &str,
         same_origin: bool,
+        authorization: Option<&str>,
     ) -> Result<Request<Full<Bytes>>, ClientError> {
         let mut req = Request::builder()
             .method(call.method.clone())
@@ -738,9 +773,9 @@ impl GitHubClient {
                 HeaderName::from_static(API_VERSION_HEADER),
                 HeaderValue::from_static(API_VERSION),
             );
-            if let Some(auth) = self.credential.authorization_header() {
+            if let Some(auth) = authorization {
                 let mut value =
-                    HeaderValue::from_str(&auth).map_err(|e| ClientError::Http(e.into()))?;
+                    HeaderValue::from_str(auth).map_err(|e| ClientError::Http(e.into()))?;
                 value.set_sensitive(true);
                 headers.insert(header::AUTHORIZATION, value);
             }

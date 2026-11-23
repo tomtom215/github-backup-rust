@@ -177,25 +177,34 @@ pub(crate) async fn run_doctor(args: &Args) -> ExitCode {
     let mut report = doctor::Report::default();
     report.push(doctor::check_git_binary());
     report.push(doctor::check_output_dir(args.output.as_deref()));
-    report.push(doctor::check_credential(args));
+    let (credential_check, app) = doctor::check_app_credential(args);
+    report.push(credential_check);
     report.push(doctor::check_categories(args));
     if let Some(check) = doctor::check_destinations(args) {
         report.push(check);
     }
-    let api_checks = doctor::check_api(args).await;
-    let api_ok = api_checks.iter().all(|c| c.status == doctor::Status::Pass);
-    for check in api_checks {
-        report.push(check);
-    }
-    if api_ok {
-        let credential = args
-            .token
-            .clone()
-            .map_or(github_backup_types::config::Credential::Anonymous, |t| {
-                github_backup_types::config::Credential::Token(t)
-            });
-        if let Ok(api) = account::Api::new(&credential, args.api_url.as_deref()) {
-            report.push(doctor::check_owner(args, &api).await);
+    // A GitHub App is checked on its own terms (JWT, installation, installation
+    // token); its installation also settles OWNER.
+    if let Some(app) = app {
+        for check in doctor::check_app_api(args, app).await {
+            report.push(check);
+        }
+    } else if args.app_id.is_none() {
+        let api_checks = doctor::check_api(args).await;
+        let api_ok = api_checks.iter().all(|c| c.status == doctor::Status::Pass);
+        for check in api_checks {
+            report.push(check);
+        }
+        if api_ok {
+            let credential = args
+                .token
+                .clone()
+                .map_or(github_backup_types::config::Credential::Anonymous, |t| {
+                    github_backup_types::config::Credential::Token(t)
+                });
+            if let Ok(api) = account::Api::new(&credential, args.api_url.as_deref()) {
+                report.push(doctor::check_owner(args, &api).await);
+            }
         }
     }
 
@@ -215,7 +224,11 @@ pub(crate) async fn run_doctor(args: &Args) -> ExitCode {
         let _ = writeln!(
             out,
             "  owner            {}",
-            args.owner.as_deref().unwrap_or("(the token's account)")
+            args.owner.as_deref().unwrap_or(if args.app_id.is_some() {
+                "(the GitHub App installation's account)"
+            } else {
+                "(the token's account)"
+            })
         );
         let _ = writeln!(
             out,

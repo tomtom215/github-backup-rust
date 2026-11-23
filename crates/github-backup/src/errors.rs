@@ -190,6 +190,15 @@ mod tests {
         assert!(!out.contains("pw@"), "{out}");
     }
 
+    /// A GitHub App's installation tokens change during the run, so they cannot
+    /// be remembered by value; their `ghs_` prefix identifies them.
+    #[test]
+    fn github_app_installation_tokens_are_redacted_by_their_prefix() {
+        let out = redact_secrets("clone failed with ghs_16C7e42F292c6912E7710c838347Ae178B4a");
+        assert!(out.contains("ghs_<redacted>"), "{out}");
+        assert!(!out.contains("16C7e42F"), "{out}");
+    }
+
     /// A mirror token or S3 key has no recognisable format, so only its value
     /// identifies it: post-processing errors must not carry it into the
     /// report, the webhook or the log.  (The only test that sets the

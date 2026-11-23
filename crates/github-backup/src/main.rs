@@ -8,8 +8,9 @@ use std::process::ExitCode;
 use clap::{ArgMatches, CommandFactory};
 use tracing::{error, info, warn};
 
+use github_backup_client::GitHubClient;
 use github_backup_tui::InitialConfig;
-use github_backup_types::config::{ConfigFile, Credential, OutputConfig};
+use github_backup_types::config::{AppCredential, ConfigFile, Credential, OutputConfig};
 
 mod account;
 mod cli;
@@ -170,7 +171,7 @@ async fn run() -> ExitCode {
         }
     }
 
-    let credential = match setup::obtain_credential(&args).await {
+    let mut credential = match setup::obtain_credential(&args).await {
         Ok(c) => c,
         Err(e) => {
             let redacted = errors::redact_secrets(&e);
@@ -182,7 +183,11 @@ async fn run() -> ExitCode {
         }
     };
 
-    if let Err(code) = resolve_owner(&mut args, &credential).await {
+    let resolved = match &mut credential {
+        Credential::App(app) => resolve_app_installation(&mut args, app).await,
+        _ => resolve_owner(&mut args, &credential).await,
+    };
+    if let Err(code) = resolved {
         return ExitCode::from(code);
     }
 
@@ -251,9 +256,10 @@ fn load_config(args: &mut Args, matches: &ArgMatches) -> Result<(), u8> {
     }
 }
 
-/// Falls back to the GitHub CLI's token when no other was given.
+/// Falls back to the GitHub CLI's token when no other credential was given
+/// (a GitHub App is one).
 async fn discover_gh_token(args: &mut Args) {
-    if args.token.is_some() || args.device_auth {
+    if args.token.is_some() || args.device_auth || args.app_id.is_some() {
         return;
     }
     let host = setup::gh_hostname(args.api_url.as_deref());
@@ -261,6 +267,72 @@ async fn discover_gh_token(args: &mut Args) {
         info!(host = %host, "using the GitHub CLI's login (gh auth token)");
         args.token = Some(token);
     }
+}
+
+/// For a GitHub App: finds the installation to act as (the configured one, or
+/// the App's installation on OWNER), records it in `app`, fills in OWNER when
+/// it was not given (the installation's account) and settles whether OWNER is
+/// an organisation.  A configured installation on another account than OWNER
+/// is an error: its token could not back OWNER up.
+async fn resolve_app_installation(args: &mut Args, app: &mut AppCredential) -> Result<(), u8> {
+    let api_url = args.api_url.as_deref().unwrap_or(account::DEFAULT_API_URL);
+    let fail = |e: github_backup_client::ClientError| {
+        let unauthorised = matches!(
+            e,
+            github_backup_client::ClientError::ApiError { status: 401, .. }
+        );
+        let e = errors::redact_secrets(&e.to_string());
+        error!("authentication failed: {e}");
+        if unauthorised {
+            error!(
+                "hint: GitHub refused the App's JWT; check --app-id (the client ID or App ID), \
+                 that the key is one of the App's current private keys, and the system clock"
+            );
+        } else if let Some(hint) = errors::explain_error(&e) {
+            error!("hint: {hint}");
+        }
+        EXIT_FAILURE
+    };
+    let client = GitHubClient::with_api_url(Credential::App(app.clone()), api_url).map_err(fail)?;
+    let installation = client
+        .app_installation(args.owner.as_deref())
+        .await
+        .map_err(fail)?;
+    match args.owner.as_deref() {
+        None => {
+            let login = installation.account.clone();
+            if let Err(reason) = setup::validate_owner_name(&login) {
+                error!(owner = %login, "invalid owner name: {reason}");
+                return Err(EXIT_FAILURE);
+            }
+            info!(owner = %login, "no OWNER given: backing up {login}, the account the GitHub App installation belongs to");
+            args.owner = Some(login);
+        }
+        Some(owner) if !owner.eq_ignore_ascii_case(&installation.account) => {
+            error!(
+                "GitHub App installation {} belongs to {}, not to {owner}; drop \
+                 --app-installation-id to look up the installation on {owner}",
+                installation.id, installation.account
+            );
+            return Err(EXIT_FAILURE);
+        }
+        Some(_) => {}
+    }
+    if installation.organization && !args.org {
+        info!(owner = %installation.account, "{} is an organisation: backing it up as one (--org)", installation.account);
+        args.org = true;
+    } else if !installation.organization && args.org {
+        warn!(owner = %installation.account, "{} is a user, not an organisation: ignoring --org", installation.account);
+        args.org = false;
+    }
+    info!(
+        installation = installation.id,
+        account = %installation.account,
+        repositories = %installation.repository_selection,
+        "authenticating as the GitHub App installation"
+    );
+    app.installation_id = Some(installation.id);
+    Ok(())
 }
 
 /// Fills in OWNER when it was not given (the token's account) and settles
@@ -378,6 +450,7 @@ async fn run_tui(mut args: Args, matches: &ArgMatches) -> ExitCode {
         (args.diff_with.is_some(), "--diff-with"),
         (args.clone_host.is_some(), "--clone-host / clone_host"),
         (args.device_auth, "--device-auth"),
+        (args.app_id.is_some(), "--app-id / app_id (GitHub App)"),
         (args.verify_git, "--verify-git / verify_git"),
         (args.git_timeout.is_some(), "--git-timeout / git_timeout"),
     ]

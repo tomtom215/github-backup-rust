@@ -376,4 +376,8 @@ impl BackupClient for GitHubClient {
     fn token(&self) -> Option<String> {
         GitHubClient::token(self)
     }
+
+    fn git_token(&self) -> Option<crate::GitToken> {
+        GitHubClient::git_token(self)
+    }
 }

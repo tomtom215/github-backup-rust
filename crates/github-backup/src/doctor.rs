@@ -22,7 +22,7 @@
 use std::time::Duration;
 
 use github_backup_client::{ClientError, GitHubClient};
-use github_backup_types::config::Credential;
+use github_backup_types::config::{AppCredential, Credential};
 
 use crate::account::{AccountKind, Api};
 use crate::cli::Args;
@@ -452,6 +452,11 @@ pub async fn check_api(args: &Args) -> Vec<Check> {
 
 fn client_setup_failure(url: &str, e: &ClientError) -> Check {
     match e {
+        ClientError::App(why) => Check::fail(
+            "GitHub App",
+            why.clone(),
+            "use the unencrypted .pem private key GitHub generated for the App",
+        ),
         ClientError::InvalidApiUrl(why) => Check::fail(
             "API url",
             format!("{url}: {why}"),
@@ -463,6 +468,168 @@ fn client_setup_failure(url: &str, e: &ClientError) -> Check {
             "install your distribution's `ca-certificates` package",
         ),
     }
+}
+
+/// Checks the GitHub App settings: an App ID, exactly one private key that can
+/// be read, and no token or device flow beside them.  Returns the credential
+/// for [`check_app_api`] when they are complete.
+pub fn check_app_credential(args: &Args) -> (Check, Option<AppCredential>) {
+    let key_env = std::env::var(crate::setup::APP_KEY_ENV).ok();
+    match crate::setup::app_credential(args, key_env) {
+        Ok(Some(app)) => {
+            let source = args.app_key.as_ref().map_or_else(
+                || crate::setup::APP_KEY_ENV.to_string(),
+                |path| path.display().to_string(),
+            );
+            (
+                Check::pass(
+                    "credential",
+                    format!("GitHub App {} (key from {source})", app.app_id),
+                ),
+                Some(app),
+            )
+        }
+        Ok(None) => (check_credential(args), None),
+        Err(why) => (
+            Check::fail(
+                "credential",
+                why,
+                "see the GitHub App section of the authentication guide",
+            ),
+            None,
+        ),
+    }
+}
+
+/// Checks a GitHub App against the API, in the order a run depends on them:
+/// the App's JWT is accepted (`GET /app`), its installation is found (the
+/// configured one, or the one on OWNER), and an installation token is minted
+/// and accepted.  The installation's permissions are listed.
+pub async fn check_app_api(args: &Args, app: AppCredential) -> Vec<Check> {
+    let url = args.api_url.as_deref().unwrap_or("https://api.github.com");
+    check_app_api_with(args, app, url, |credential| {
+        GitHubClient::with_api_url(credential, url)
+    })
+    .await
+}
+
+/// The checks behind [`check_app_api`]; `new_client` builds the API client for a
+/// credential (tests use a plain-HTTP one).
+pub(crate) async fn check_app_api_with(
+    args: &Args,
+    app: AppCredential,
+    url: &str,
+    new_client: impl Fn(Credential) -> Result<GitHubClient, ClientError>,
+) -> Vec<Check> {
+    let timed = |what: &'static str| ClientError::Timeout {
+        url: format!("{url} ({what})"),
+    };
+    let client = match new_client(Credential::App(app.clone())) {
+        Ok(c) => c,
+        Err(e) => return vec![client_setup_failure(url, &e)],
+    };
+    let mut checks = Vec::new();
+    match tokio::time::timeout(API_CHECK_TIMEOUT, client.app_name()).await {
+        Ok(Ok(name)) => {
+            checks.push(Check::pass("API connectivity", format!("{url} reachable")));
+            checks.push(Check::pass("GitHub App", format!("JWT accepted: {name}")));
+        }
+        Ok(Err(ClientError::ApiError { status, body })) if status == 401 || status == 403 => {
+            checks.push(Check::pass("API connectivity", format!("{url} reachable")));
+            checks.push(Check::fail(
+                "GitHub App",
+                format!("JWT refused (HTTP {status}{})", message_suffix(&body)),
+                "check --app-id (the App's client ID or App ID), that the key is one of the \
+                 App's current private keys, and that the system clock is correct",
+            ));
+            return checks;
+        }
+        Ok(Err(e)) => return interpret_api_result(url, false, Err(e)),
+        Err(_) => return interpret_api_result(url, false, Err(timed("GET /app"))),
+    }
+    let found = tokio::time::timeout(
+        API_CHECK_TIMEOUT,
+        client.app_installation(args.owner.as_deref()),
+    )
+    .await
+    .unwrap_or_else(|_| Err(timed("installation lookup")));
+    let installation = match found {
+        Ok(i) => i,
+        Err(e) => {
+            checks.push(Check::fail(
+                "installation",
+                e.to_string(),
+                "install the App on OWNER (the App's settings page, Install App), or pass \
+                 --app-installation-id",
+            ));
+            return checks;
+        }
+    };
+    let kind = if installation.organization {
+        "organisation"
+    } else {
+        "user"
+    };
+    let detail = format!(
+        "{} on {} ({kind}), {} repositories",
+        installation.id, installation.account, installation.repository_selection
+    );
+    match args.owner.as_deref() {
+        Some(owner) if !owner.eq_ignore_ascii_case(&installation.account) => {
+            checks.push(Check::fail(
+                "installation",
+                format!("{detail}, but OWNER is {owner}"),
+                "drop --app-installation-id, or set OWNER to the installation's account",
+            ));
+            return checks;
+        }
+        _ => checks.push(Check::pass("installation", detail)),
+    }
+    let permissions = installation
+        .permissions
+        .iter()
+        .map(|(name, level)| format!("{name}: {level}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    checks.push(if installation.permissions.contains_key("contents") {
+        Check::pass("permissions", permissions)
+    } else {
+        Check::warn(
+            "permissions",
+            permissions,
+            "grant the Contents (read) repository permission, or repositories cannot be cloned",
+        )
+    });
+
+    let app = AppCredential {
+        installation_id: Some(installation.id),
+        ..app
+    };
+    let client = match new_client(Credential::App(app)) {
+        Ok(c) => c,
+        Err(e) => {
+            checks.push(client_setup_failure(url, &e));
+            return checks;
+        }
+    };
+    let minted = tokio::time::timeout(API_CHECK_TIMEOUT, client.verify_token())
+        .await
+        .unwrap_or_else(|_| Err(timed("installation token")));
+    checks.push(match minted {
+        Ok(remaining) => Check::pass(
+            "installation token",
+            match remaining {
+                Some(n) => format!("minted and accepted ({n} API requests left this hour)"),
+                None => "minted and accepted".to_string(),
+            },
+        ),
+        Err(e) => Check::fail(
+            "installation token",
+            e.to_string(),
+            "check that the installation is not suspended and the App still has access",
+        ),
+    });
+    checks
 }
 
 /// The checks behind [`check_api`], for an already-built client.
