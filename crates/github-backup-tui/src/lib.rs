@@ -599,7 +599,7 @@ async fn run_backup_task(
     let (owner, output_path, opts, token_opt) = cfg.to_backup_config();
     let dry_run = opts.dry_run;
     let write_manifest = cfg.manifest;
-    let started_at = chrono::Utc::now();
+    let started_at = jiff::Timestamp::now();
 
     let credential = match token_opt {
         Some(t) => Credential::Token(t),
@@ -731,14 +731,14 @@ async fn finish_run(
     stats: &github_backup_core::BackupStats,
     output: &OutputConfig,
     owner: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
+    started_at: jiff::Timestamp,
     write_manifest: bool,
 ) {
     const SCOPE: &str = "post-processing";
     let stats = stats.handle();
     let output = output.clone();
     let owner = owner.to_string();
-    let started = started_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let started = github_backup_core::time::format_utc(started_at);
 
     let work = {
         let stats = stats.handle();

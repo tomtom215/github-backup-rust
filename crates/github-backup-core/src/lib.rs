@@ -45,6 +45,7 @@ pub mod redact;
 pub mod starred_queue;
 pub mod stats;
 pub mod storage;
+pub mod time;
 
 pub use cancel::CancelFlag;
 pub use engine::BackupEngine;

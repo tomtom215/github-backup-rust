@@ -96,7 +96,7 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   explicit `--since` replaces it and is never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
   current run; a later run resumes from it only if it is less than 6 hours old.
-- **Locking** (`lock.rs`): an operating-system exclusive lock (`fslock`: `flock` /
+- **Locking** (`lock.rs`): an operating-system exclusive lock (the standard library's `File::try_lock`: `flock` /
   `LockFileEx`) on `<owner>/json/.backup.lock`; the CLI takes another on
   `<output>/.github-backup.lock`.  The kernel releases them when the process dies,
   so there are no stale locks and no PID heuristics.

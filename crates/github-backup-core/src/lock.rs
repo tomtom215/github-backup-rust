@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! [`BackupLock`] holds an OS-level exclusive lock (`flock` on Unix,
-//! `LockFileEx` on Windows, via `fslock`) on `<owner-json-dir>/.backup.lock`.
+//! `LockFileEx` on Windows, via the standard library's `File::try_lock`) on `<owner-json-dir>/.backup.lock`.
 //! The kernel releases such a lock the moment the holding process dies — however
 //! it dies (`SIGKILL`, OOM kill, power loss, container stop) — so there is **no
 //! stale-lock state to detect and nothing to clean up by hand**.  An earlier
@@ -22,7 +22,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fslock::LockFile;
 use tracing::debug;
 
 /// RAII guard that holds the lock for its lifetime.
@@ -32,7 +31,7 @@ use tracing::debug;
 #[derive(Debug)]
 pub struct BackupLock {
     path: PathBuf,
-    _file: LockFile,
+    _file: std::fs::File,
 }
 
 /// Errors that can occur when acquiring a backup lock.
@@ -75,13 +74,16 @@ impl BackupLock {
         std::fs::create_dir_all(json_dir).map_err(LockError::DirCreate)?;
 
         let path = json_dir.join(".backup.lock");
-        let mut file = LockFile::open(&path).map_err(LockError::Write)?;
-        let acquired = file.try_lock().map_err(LockError::Write)?;
-        if !acquired {
-            let pid = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok());
-            return Err(LockError::AlreadyRunning { pid });
+        let file = open_lock_file(&path).map_err(LockError::Write)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                return Err(LockError::AlreadyRunning { pid });
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(LockError::Write(e)),
         }
 
         // Informational: who holds it now.
@@ -98,6 +100,37 @@ impl BackupLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+impl Drop for BackupLock {
+    fn drop(&mut self) {
+        release(&self._file);
+    }
+}
+
+/// Releases the OS lock held on `file` before the handle is closed.
+///
+/// Closing alone is not enough: a `fork` on another thread (any child process
+/// this program starts) duplicates every descriptor until the child `exec`s,
+/// and a `flock` lock lives as long as any duplicate does.  An explicit unlock
+/// releases it at once regardless.
+pub fn release(file: &std::fs::File) {
+    if let Err(e) = file.unlock() {
+        debug!(error = %e, "could not release the lock explicitly; it is released when the file is closed");
+    }
+}
+
+/// Opens (creating if needed) the file an OS lock is taken on.
+///
+/// The file is never truncated here: a process that fails to get the lock must
+/// not wipe the holder's PID.
+pub fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 /// Overwrites the lock file's content with `pid`.

@@ -33,7 +33,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use chrono::Utc;
 use tracing::{info, warn};
 
 use github_backup_client::BackupClient;
@@ -231,7 +230,7 @@ pub async fn backup_starred_repos(
         }
 
         // ── Record outcome ──────────────────────────────────────────────────
-        let now = Utc::now().to_rfc3339();
+        let now = crate::time::now_utc();
         if success {
             queue.items[idx].state = CloneState::Done;
             queue.items[idx].finished_at = Some(now);

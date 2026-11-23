@@ -13,6 +13,7 @@ use github_backup_client::{AssetSink, BackupClient, ClientError};
 use github_backup_types::config::BackupOptions;
 use github_backup_types::ReleaseAsset;
 
+use crate::manifest::lower_hex;
 use crate::{
     error::CoreError,
     storage::{PendingFile, Storage},
@@ -143,7 +144,7 @@ async fn backup_asset(
         hasher: Sha256::new(),
     };
     let received = client.download_release_asset(&asset.url, &mut sink).await?;
-    let digest = format!("{:x}", sink.hasher.clone().finalize());
+    let digest = lower_hex(&sink.hasher.clone().finalize());
 
     if received != asset.size {
         return Err(integrity_error(
@@ -251,7 +252,7 @@ fn sha256_of_stored(storage: &impl Storage, path: &Path) -> Result<Option<String
         }
         hasher.update(&buf[..n]);
     }
-    Ok(Some(format!("{:x}", hasher.finalize())))
+    Ok(Some(lower_hex(&hasher.finalize())))
 }
 
 #[cfg(test)]
@@ -309,7 +310,7 @@ mod tests {
     }
 
     fn sha256_hex(data: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(data))
+        crate::manifest::sha256_hex(data)
     }
 
     fn opts() -> BackupOptions {

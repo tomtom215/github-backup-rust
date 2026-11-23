@@ -13,13 +13,11 @@ members = [
 [workspace.package]
 version       = "0.3.2"
 edition       = "2021"
-rust-version  = "1.88"
+rust-version  = "1.89"
 authors       = ["Tom F"]
 license       = "MIT"
 repository    = "https://github.com/tomtom215/github-backup-rust"
-homepage      = "https://github.com/tomtom215/github-backup-rust"
 documentation = "https://tomtom215.github.io/github-backup-rust/"
-readme        = "README.md"
 keywords      = ["github", "backup", "git", "mirror", "archive"]
 categories    = ["command-line-utilities", "development-tools"]
 
@@ -61,9 +59,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 
 # Cryptography (AWS SigV4 signing for S3 backend + AES-256-GCM at-rest encryption)
-sha2 = "0.10"
-hmac = "0.12"
-aes-gcm = { version = "0.10", features = ["zeroize"] }
+sha2 = "0.11"
+hmac = "0.13"
+aes-gcm = { version = "0.11", features = ["zeroize"] }
 zeroize = { version = "1", features = ["derive", "zeroize_derive"] }
 
 # Workspace crates.
@@ -81,16 +79,14 @@ github-backup-s3     = { path = "crates/github-backup-s3"     }
 github-backup-tui    = { path = "crates/github-backup-tui"    }
 
 # TOML config file parsing
-toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse", "display"] }
 
-# Date / time formatting (RFC 3339 timestamps in queue files)
-chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
-
-# Cross-platform exclusive file locking (output-directory protection)
-fslock = "0.2"
+# Date / time: RFC 3339 timestamps in state, queue, report and history files.
+# (chrono was declared unmaintained in RUSTSEC-2026-0543.)
+jiff = "1"
 
 # Safe wrapper for signalling a git subprocess's whole process group (Unix).
-nix = { version = "0.30", default-features = false, features = ["signal"] }
+nix = { version = "0.32", default-features = false, features = ["signal"] }
 
 # Test-only
 tokio-test = "0.4"
@@ -98,7 +94,7 @@ proptest = "1"
 tempfile = "3"
 
 # Benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [profile.release]
 opt-level = 3
