@@ -33,9 +33,10 @@
 //!
 //! # Proxies
 //!
-//! The client connects to the endpoint directly.  `HTTPS_PROXY` / `NO_PROXY`
-//! are **not** honoured for S3 traffic (the GitHub client's proxy connector is
-//! private to that crate); see the storage documentation.
+//! Connections are made by the GitHub client's proxy-aware connector
+//! ([`github_backup_client::ProxyConnector`]), so `HTTPS_PROXY`,
+//! `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to S3 traffic as they do to
+//! the GitHub API.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -46,11 +47,11 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use github_backup_client::{ProxyClient, ProxyConnector, ProxySettings};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::header::HeaderValue;
 use hyper::{HeaderMap, Method, Request};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tracing::{debug, info, warn};
@@ -87,7 +88,7 @@ const BODY_FRAME_BYTES: usize = 64 * 1024;
 /// Longest `Retry-After` the client will honour.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
-type HyperClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, ProgressBody>;
+type HyperClient = ProxyClient<ProgressBody>;
 
 // ── Options ─────────────────────────────────────────────────────────────────
 
@@ -565,10 +566,20 @@ impl S3Client {
     /// # Errors
     ///
     /// See [`S3Client::new`].
-    pub fn with_options(mut config: S3Config, options: ClientOptions) -> Result<Self, S3Error> {
+    pub fn with_options(config: S3Config, options: ClientOptions) -> Result<Self, S3Error> {
+        Self::with_proxy(config, options, ProxySettings::from_env())
+    }
+
+    /// Like [`S3Client::with_options`] with explicit proxy settings instead
+    /// of the environment's.
+    fn with_proxy(
+        mut config: S3Config,
+        options: ClientOptions,
+        proxy: ProxySettings,
+    ) -> Result<Self, S3Error> {
         config.validate()?;
         let target = Target::new(&config)?;
-        let http = build_http_client(&options, target.https)?;
+        let http = build_http_client(&options, target.https, proxy)?;
         // The signer owns the only long-lived copy of the credentials; the
         // config kept for addressing carries none.
         let signer = Signer::new_s3(
@@ -1209,41 +1220,34 @@ fn validate_key(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// Builds an HTTPS client using the system native CA bundle.
-fn build_http_client(options: &ClientOptions, needs_tls: bool) -> Result<HyperClient, S3Error> {
-    let mut root_store = rustls::RootCertStore::empty();
-    let cert_result = rustls_native_certs::load_native_certs();
-    if cert_result.certs.is_empty() && needs_tls {
-        let msg = cert_result
-            .errors
-            .first()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "no CA certificates found".to_string());
-        return Err(S3Error::Tls(msg));
-    }
-    root_store.add_parsable_certificates(cert_result.certs);
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let mut http = HttpConnector::new();
-    // The TLS layer above decides between http and https.
-    http.enforce_http(false);
-    http.set_connect_timeout(Some(options.connect_timeout));
-    http.set_nodelay(true);
-    http.set_keepalive(Some(Duration::from_secs(30)));
-
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .wrap_connector(http);
-
-    Ok(Client::builder(TokioExecutor::new())
-        // Servers drop idle connections after a short while; do not reuse
-        // ones that have been idle for long.
-        .pool_idle_timeout(Duration::from_secs(15))
-        .build(https))
+/// Builds the HTTP(S) client: the system CA bundle (not needed for a
+/// plain-`http://` endpoint) and the shared proxy-aware connector.
+fn build_http_client(
+    options: &ClientOptions,
+    needs_tls: bool,
+    proxy: ProxySettings,
+) -> Result<HyperClient, S3Error> {
+    let tls = match github_backup_client::native_tls_config() {
+        Ok(tls) => tls,
+        Err(github_backup_client::ClientError::Tls(why)) if needs_tls => {
+            return Err(S3Error::Tls(why))
+        }
+        Err(e) if needs_tls => return Err(S3Error::Tls(e.to_string())),
+        Err(_) => rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+    };
+    // The endpoint's scheme decides between http and https.
+    let mut connector = ProxyConnector::new(proxy, tls, true);
+    connector.set_connect_timeout(Some(options.connect_timeout));
+    connector.set_keepalive(Some(Duration::from_secs(30)));
+    Ok(ProxyClient::with_connector(
+        Client::builder(TokioExecutor::new())
+            // Servers drop idle connections after a short while; do not reuse
+            // ones that have been idle for long.
+            .pool_idle_timeout(Duration::from_secs(15)),
+        connector,
+    ))
 }
 
 #[cfg(test)]
@@ -1702,5 +1706,174 @@ mod tests {
             b"<CompleteMultipartUploadResult><Key>k</Key></CompleteMultipartUploadResult>"
         ));
         assert!(!body_is_error_document(b""));
+    }
+
+    // ── Proxy ─────────────────────────────────────────────────────────────
+
+    mod proxy {
+        use super::*;
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        /// One request as a fake peer received it: the head and the body
+        /// length.
+        type Seen = Arc<Mutex<Vec<(String, usize)>>>;
+
+        fn settings(vars: &[(&str, String)]) -> ProxySettings {
+            let vars: HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect();
+            ProxySettings::from_lookup(|n| vars.get(n).cloned())
+        }
+
+        /// A peer (proxy or origin) that reads one request per connection,
+        /// body included, records it and answers with `reply`.
+        async fn peer(reply: &'static str) -> (u16, Seen) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen: Seen = Arc::default();
+            let log = Arc::clone(&seen);
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = listener.accept().await {
+                    let log = Arc::clone(&log);
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut chunk = vec![0u8; 64 * 1024];
+                        let head_end = loop {
+                            let n = s.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break i + 4;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        while buf.len() - head_end < length {
+                            let n = s.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        log.lock().unwrap().push((head, buf.len() - head_end));
+                        let _ = s.write_all(reply.as_bytes()).await;
+                        let _ = s.shutdown().await;
+                    });
+                }
+            });
+            (port, seen)
+        }
+
+        const OK: &str =
+            "HTTP/1.1 200 OK\r\nETag: \"e\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+        fn client(endpoint: String, proxy: ProxySettings) -> S3Client {
+            S3Client::with_proxy(
+                S3Config {
+                    endpoint: Some(endpoint),
+                    ..sample_config()
+                },
+                ClientOptions {
+                    retry: RetryPolicy::none(),
+                    idle_timeout: Duration::from_secs(5),
+                    connect_timeout: Duration::from_secs(5),
+                    part_size: DEFAULT_PART_SIZE,
+                },
+                proxy,
+            )
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn https_endpoints_are_reached_through_a_connect_tunnel_without_leaking_credentials()
+        {
+            let (port, seen) = peer("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await;
+            let s3 = client(
+                "https://s3.example.invalid".into(),
+                settings(&[(
+                    "HTTPS_PROXY",
+                    format!("http://alice:pr0xy-s3cret@127.0.0.1:{port}"),
+                )]),
+            );
+            let err = s3.head_object("k").await.unwrap_err();
+            let (head, _) = seen.lock().unwrap()[0].clone();
+            let head = head.to_ascii_lowercase();
+            assert!(
+                head.starts_with("connect s3.example.invalid:443 http/1.1"),
+                "{head}"
+            );
+            // base64("alice:pr0xy-s3cret")
+            assert!(
+                head.contains("proxy-authorization: basic ywxpy2u6chiwehktcznjcmv0"),
+                "{head}"
+            );
+            assert!(
+                !head.contains("x-amz") && !head.contains("authorization: aws4"),
+                "the signed request stays inside the tunnel: {head}"
+            );
+            for text in [err.to_string(), format!("{err:?}"), format!("{s3:?}")] {
+                assert!(!text.contains("pr0xy-s3cret"), "{text}");
+                assert!(!text.contains("YWxpY2U6cHIweHktczNjcmV0"), "{text}");
+            }
+        }
+
+        /// A streamed body of several frames reaches the proxy whole, with the
+        /// proxy credentials, in absolute form.
+        #[tokio::test]
+        async fn plain_http_uploads_stream_through_the_proxy() {
+            let (port, seen) = peer(OK).await;
+            let s3 = client(
+                "http://minio.example.invalid:9000".into(),
+                settings(&[("HTTP_PROXY", format!("http://u:p@127.0.0.1:{port}"))]),
+            );
+            let body = vec![7u8; 3 * BODY_FRAME_BYTES + 11];
+            s3.put_object("owner/a.json", body.clone(), "application/json", &[])
+                .await
+                .unwrap();
+            let (head, length) = seen.lock().unwrap()[0].clone();
+            let lower = head.to_ascii_lowercase();
+            assert!(
+                lower.starts_with(
+                    "put http://minio.example.invalid:9000/my-bucket/owner/a.json http/1.1"
+                ),
+                "{head}"
+            );
+            assert!(lower.contains("proxy-authorization: basic dtpw"), "{head}");
+            assert!(lower.contains("authorization: aws4-hmac-sha256"), "{head}");
+            assert_eq!(length, body.len());
+        }
+
+        #[tokio::test]
+        async fn no_proxy_endpoints_are_reached_directly() {
+            let (proxy_port, proxy_seen) = peer(OK).await;
+            let (origin_port, origin_seen) = peer(OK).await;
+            let s3 = client(
+                format!("http://127.0.0.1:{origin_port}"),
+                settings(&[
+                    ("HTTP_PROXY", format!("http://127.0.0.1:{proxy_port}")),
+                    ("NO_PROXY", "localhost,127.0.0.1".into()),
+                ]),
+            );
+            s3.put_object("k", &b"{}"[..], "application/json", &[])
+                .await
+                .unwrap();
+            assert!(
+                proxy_seen.lock().unwrap().is_empty(),
+                "the proxy was bypassed"
+            );
+            let (head, _) = origin_seen.lock().unwrap()[0].clone();
+            assert!(head.starts_with("PUT /my-bucket/k HTTP/1.1"), "{head}");
+        }
     }
 }

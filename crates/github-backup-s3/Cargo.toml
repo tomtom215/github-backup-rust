@@ -15,13 +15,13 @@ categories.workspace    = true
 publish                 = false
 
 [dependencies]
+# The shared proxy-aware connector (`github_backup_client::ProxyConnector`).
+github-backup-client = { workspace = true }
 tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
-hyper-rustls = { workspace = true }
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

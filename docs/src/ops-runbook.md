@@ -128,7 +128,8 @@ error code and a hint.  Common causes:
 - `AccessDenied`: the policy lacks `s3:ListBucket`, `s3:GetObject` or
   `s3:PutObject` (see [required permissions](storage/s3.md#required-permissions)).
 - `RequestTimeTooSkewed`: fix the system clock.
-- "cannot reach the endpoint": network, DNS or a proxy (S3 ignores `HTTPS_PROXY`).
+- "cannot reach the endpoint": network, DNS or a proxy (S3 honours
+  `HTTPS_PROXY`; put an endpoint that must be reached directly in `NO_PROXY`).
 
 `--dry-run` does not test S3 (it skips the sync).
 

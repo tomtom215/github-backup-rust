@@ -15,13 +15,12 @@ categories.workspace    = true
 publish                 = false
 
 [dependencies]
+# The shared proxy-aware HTTP client (`github_backup_client::ProxyClient`).
+github-backup-client = { workspace = true }
 tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
-hyper-rustls = { workspace = true }
-rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,3 +34,5 @@ hyper = { workspace = true, features = ["server"] }
 hyper-util = { workspace = true, features = ["server"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+# Test clients trust an empty certificate store.
+rustls = { workspace = true }

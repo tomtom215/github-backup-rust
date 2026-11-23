@@ -102,10 +102,9 @@ in GitHub's token settings, otherwise the API answers 403.
 
 ## Proxies
 
-`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to the API calls
-and the OAuth device flow;
-`git` follows its own proxy settings.  S3 and mirror-destination API calls do
-not use a proxy.  Details and the SOCKS limitation are in
+`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to the API calls,
+the OAuth device flow, S3 and the mirror destinations' API calls;
+`git` follows its own proxy settings.  Details and the SOCKS limitation are in
 [Environment Variables](environment.md#proxy).
 
 ---

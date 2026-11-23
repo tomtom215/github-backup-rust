@@ -26,7 +26,7 @@
 //! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports |
 //! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
 //! | TLS | rustls with platform CA bundle |
-//! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] is shared with the webhook notifier and the device flow |
+//! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] and [`ProxyConnector`] are shared with the webhook notifier, the device flow, the mirror destinations' APIs and the S3 client |
 //!
 //! # Example
 //!
@@ -60,5 +60,5 @@ pub use api_client::{AssetSink, BackupClient, BoxFuture};
 pub use client::GitHubClient;
 pub use error::ClientError;
 pub use pagination::parse_next_link;
-pub use proxy::{ProxyClient, ProxySettings};
+pub use proxy::{native_tls_config, ProxyClient, ProxyConnector, ProxySettings};
 pub use rate_limit::RateLimitInfo;

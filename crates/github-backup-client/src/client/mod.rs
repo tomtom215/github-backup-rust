@@ -1069,25 +1069,6 @@ pub(crate) async fn collect_body_limited(
     Ok(buf.freeze())
 }
 
-/// Builds a [`rustls::ClientConfig`] using the system native CA bundle.
-pub(crate) fn build_tls_config() -> Result<rustls::ClientConfig, ClientError> {
-    let mut root_store = rustls::RootCertStore::empty();
-    let cert_result = rustls_native_certs::load_native_certs();
-    if cert_result.certs.is_empty() {
-        let msg = cert_result
-            .errors
-            .first()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "no CA certificates found".to_string());
-        return Err(ClientError::Tls(msg));
-    }
-    root_store.add_parsable_certificates(cert_result.certs);
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    Ok(config)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
