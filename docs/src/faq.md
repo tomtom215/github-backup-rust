@@ -76,6 +76,18 @@ at the same time.
 Yes.  Each owner gets its own `<output>/<owner>/` directory, and S3 keys include
 the owner as well.
 
+### How do I read my backup without GitHub?
+
+Render it as a website and open it in a browser:
+
+```bash
+github-backup octocat --output /backup --render-html
+# then open /backup/octocat/site/index.html
+```
+
+Issues, pull requests with their reviews, releases, discussions, gists and
+projects become pages that work offline.  See [Browsing a Backup](viewer.md).
+
 ### How do I restore a repository from the backup?
 
 ```bash
@@ -106,10 +118,13 @@ never stop the other repositories.  See
 
 It depends on the categories; see
 [What each category needs](getting-started/authentication.md#what-each-category-needs).
-For a complete backup of your own account a classic token with `repo`, `gist`,
-`read:org` and `read:packages` is enough.  The GitHub CLI's login
-(`gh auth login`, used automatically) has all of them but `read:packages`.
-Public data needs no token.
+For a complete backup (the default) a classic token needs `repo`, `gist`,
+`read:org`, `read:packages`, `read:project` and `admin:repo_hook`; without one of
+them that category is skipped with a warning.  The GitHub CLI's login
+(`gh auth login`, used automatically) has `repo`, `gist` and `read:org`;
+`gh auth refresh -s read:packages,read:project` adds two more.
+`github-backup --list-scopes` prints what your selection needs.  Public data
+needs no token.
 
 ### My token expired.  What happens?
 
@@ -119,12 +134,15 @@ sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file, or
 log in again with `gh auth login`).
 `github-backup --doctor` tells you whether the token is accepted.
 
-### Can I use a GitHub App token?
+### Can I run it as a GitHub App?
 
-An installation token is accepted as a bearer token, but it cannot call
-`GET /user`, so for a user target the tool cannot tell that the token belongs to
-the account and lists **public** repositories and gists only (it logs a
-warning).  Organisation targets work as far as the app's permissions reach.
+Yes: give `--app-id`, `--app-key` (the private key file, or the key itself in
+`GITHUB_APP_PRIVATE_KEY`) and optionally `--app-installation-id`.  The tool
+mints installation tokens and renews them before they expire, for API requests
+and git alike, and lists every repository the installation can see, private
+ones included.  See
+[GitHub App](getting-started/authentication.md#github-app) for the permissions
+to grant.
 
 ---
 
@@ -199,14 +217,16 @@ with exit status `3`.
 ### `skipping hooks (no admin access)`
 
 `--hooks` (like `--deploy-keys`, `--collaborators` and the protection rules of
-`--branches`) needs admin access.  Without it GitHub answers 403/404, the tool
-logs an `INFO` line and writes no file for that repository.  This is **not**
-counted as a failure, so check for the files if you rely on them.
+`--branches`) needs admin access.  When GitHub refuses (403), a category you
+selected with its own flag is a failure naming the missing permission (exit
+status `3`); under the default selection or `--all` it is one warning per
+category per run.  A category that does not exist for a repository (404/410) is
+skipped without a failure.
 
 ### `skipping security advisories (not available)`
 
 Advisories exist only where the repository has them enabled and the token may
-read them; the same INFO-and-skip rule applies.
+read them; the same rule applies.
 
 ### `failed to write report: ...`
 
