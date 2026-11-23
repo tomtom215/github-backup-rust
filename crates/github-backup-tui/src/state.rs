@@ -80,6 +80,7 @@ pub struct ConfigState {
     pub discussions: bool,
     pub projects: bool,
     pub packages: bool,
+    pub commit_comments: bool,
 
     // ── Clone ─────────────────────────────────────────────────────────────
     pub clone_type: CloneTypeForm,
@@ -197,6 +198,7 @@ impl Default for ConfigState {
             discussions: false,
             projects: false,
             packages: false,
+            commit_comments: false,
             clone_type: CloneTypeForm::Mirror,
             forks: false,
             private: false,
@@ -240,7 +242,7 @@ impl ConfigState {
         match self.active_tab {
             0 => 2,  // Auth: token, api_url
             1 => 5,  // Target: owner, output_dir, org_mode, since, full
-            2 => 34, // Categories: 34 bool flags
+            2 => 35, // Categories: 35 bool flags
             3 => 7,  // Clone: clone_type, forks, private, lfs, prefer_ssh, prune, concurrency
             4 => 2,  // Filter: include, exclude
             5 => 2,  // Output: manifest, dry_run
@@ -249,7 +251,13 @@ impl ConfigState {
     }
 
     /// Converts form state into the types needed by the backup engine.
-    /// Returns `(owner, output_path, BackupOptions, token_opt)`.
+    /// Returns `(owner, output_path, BackupOptions, token_opt)`; an empty
+    /// owner means the account the token belongs to (the backup task looks
+    /// it up).
+    ///
+    /// As on the command line, a refusal (`403`) of a category is a warning
+    /// when every category `--all` selects is on (the `A` key selects them),
+    /// and a failure when the categories were picked one by one.
     ///
     /// The destructuring below names every field and uses no `..`: adding a
     /// field to [`ConfigState`] is a compile error until it is decided whether
@@ -297,6 +305,7 @@ impl ConfigState {
             discussions,
             projects,
             packages,
+            commit_comments,
             clone_type,
             forks,
             private,
@@ -356,9 +365,8 @@ impl ConfigState {
 
         let opts = BackupOptions {
             target,
-            // No form control yet: commit comments off, refusals are failures.
-            commit_comments: false,
-            tolerate_forbidden: false,
+            commit_comments: *commit_comments,
+            tolerate_forbidden: self.all_categories_on(),
             full: *full,
             repositories: *repositories,
             forks: *forks,
@@ -425,8 +433,8 @@ impl ConfigState {
     pub fn from_backup_options(opts: &BackupOptions) -> Self {
         let BackupOptions {
             target,
-            // No form control yet; the TUI leaves these at their defaults.
-            commit_comments: _,
+            commit_comments,
+            // Follows from the categories (see `to_backup_config`).
             tolerate_forbidden: _,
             full,
             repositories,
@@ -522,6 +530,7 @@ impl ConfigState {
             discussions: *discussions,
             projects: *projects,
             packages: *packages,
+            commit_comments: *commit_comments,
             forks: *forks,
             private: *private,
             prefer_ssh: *prefer_ssh,
@@ -540,8 +549,12 @@ impl ConfigState {
     /// Validates the form; returns what to fix, or `None` if a run may start.
     pub fn validate(&self) -> Option<String> {
         let owner = self.owner.trim();
-        if owner.is_empty() {
-            return Some("Owner is required (Configure > Target tab)".into());
+        if owner.is_empty() && self.org_mode {
+            return Some(
+                "Organisation mode needs Owner: the name of the organisation (Configure > Target \
+                 tab)"
+                    .into(),
+            );
         }
         if owner.contains(['/', '\\'])
             || owner.contains("..")
@@ -584,7 +597,10 @@ impl ConfigState {
         None
     }
 
-    /// Returns `true` if every category flag (the ones `A` toggles) is on.
+    /// Returns `true` if every category `--all` selects (the ones `A`
+    /// toggles) is on.  The opt-in categories (`clone_starred`,
+    /// `action_runs`) and `discussions`, which `--all` leaves off, do not
+    /// count.
     pub fn all_categories_on(&self) -> bool {
         self.repositories
             && self.issues
@@ -615,12 +631,13 @@ impl ConfigState {
             && self.org_teams
             && self.actions
             && self.environments
-            && self.discussions
             && self.projects
             && self.packages
+            && self.commit_comments
     }
 
-    /// Sets all category flags to `val`.
+    /// Sets every category `--all` selects to `val` (see
+    /// [`all_categories_on`](Self::all_categories_on)).
     pub fn set_all_categories(&mut self, val: bool) {
         self.repositories = val;
         self.issues = val;
@@ -651,9 +668,9 @@ impl ConfigState {
         self.org_teams = val;
         self.actions = val;
         self.environments = val;
-        self.discussions = val;
         self.projects = val;
         self.packages = val;
+        self.commit_comments = val;
     }
 }
 

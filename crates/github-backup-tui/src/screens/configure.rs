@@ -144,7 +144,8 @@ fn render_auth_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
 
 fn render_target_tab(frame: &mut Frame, cfg: &ConfigState, area: Rect) {
     let fields: Vec<FieldDef> = vec![
-        FieldDef::text(0, "Owner", &cfg.owner, false, cfg).help("User or organisation to back up."),
+        FieldDef::text(0, "Owner", &cfg.owner, false, cfg)
+            .help("User or organisation to back up. Empty = the token's account."),
         FieldDef::text(1, "Output Directory", &cfg.output_dir, false, cfg)
             .help("Backups go to <dir>/<owner>/."),
         FieldDef::toggle(2, "Organisation Mode (--org)", cfg.org_mode, cfg)
@@ -194,6 +195,7 @@ fn category_labels(cfg: &ConfigState) -> Vec<(&'static str, bool)> {
         ("Discussions", cfg.discussions),
         ("Projects", cfg.projects),
         ("Packages", cfg.packages),
+        ("Commit Comments", cfg.commit_comments),
     ]
 }
 

@@ -22,7 +22,10 @@ for a normal run, so `--all`, `--skip`, `--private`, `--forks`, `--dry-run`,
 the Configure screen as initial values; with no category selected every
 category starts switched on, as a command-line run would back up everything.
 The token is found as for a normal run (`GITHUB_TOKEN`, `GH_TOKEN`, the config
-file, the GitHub CLI).  Review and adjust, then start the backup.  An option
+file, the GitHub CLI).  OWNER may be left out, as on the command line: the
+backup is then of the account the token belongs to, looked up when the backup
+starts and shown on the Run screen (the Owner field keeps it afterwards).
+Review and adjust, then start the backup.  An option
 the TUI cannot carry out (see [What the TUI cannot do](#what-the-tui-cannot-do))
 is an error together with `--tui` (exit status 2), not silently dropped.
 
@@ -47,8 +50,9 @@ clipped screen.
 
 ### 1 — Dashboard
 
-Owner, output directory, token status (never shown, only "configured") and the
-last recorded run: time, repository count and result (`complete`, or
+Owner (or "(the token's account)" when the field is empty), output
+directory, token status (never shown, only "configured") and the last
+recorded run: time, repository count and result (`complete`, or
 `INCOMPLETE (N failures)`).  The last run is read from
 `<output>/<owner>/json/backup_history.json`, falling back to
 `backup_state.json`, and refreshed whenever you return to the Dashboard.
@@ -61,7 +65,7 @@ Six tabs:
 |-----|----------|
 | Auth | GitHub token (always masked), API URL for GitHub Enterprise (`https://` only) |
 | Target | Owner, output directory, organisation mode, since date, **Full backup (ignore state)** |
-| Categories | 34 backup-category toggles |
+| Categories | 35 backup-category toggles, commit comments included |
 | Clone | Clone type (mirror/bare/full/shallow), forks, private, LFS, prefer-SSH, prune deleted refs, concurrency (1–64) |
 | Filter | include / exclude repository globs (comma-separated) |
 | Output | Write SHA-256 manifest, dry run |
@@ -72,8 +76,15 @@ ends with a note: **Command line only: mirror push, S3 sync, JSON report,
 Prometheus metrics, webhook notification and device-flow sign-in.**
 
 The focused field's help text is shown under the list when there is room.
-Starting a backup validates the form (owner, token, `https://` API URL, date
-format, concurrency range) and shows what to fix in a dialog.
+Starting a backup validates the form (owner name, token, `https://` API URL,
+date format, concurrency range; organisation mode needs an Owner) and shows
+what to fix in a dialog.
+
+`A` on the Categories tab selects what `--all` selects: every category except
+the opt-in *Clone Starred Repos* and *Action Runs*, and *Discussions* (not
+backed up yet).  As with `--all`, while all of those are on a category the
+token may not read (`403`) is a warning; once categories are picked one by
+one, it is a failure that makes the run incomplete, as on the command line.
 
 ### 3 — Run
 
@@ -147,7 +158,7 @@ selected failure's full text is shown underneath when there is room.
 | `Space` | Toggle a checkbox |
 | `Enter` | Edit a text field (toggles a checkbox) |
 | `←` / `→` | Change the Clone type |
-| `A` | Categories tab: select all, or none when all are on |
+| `A` | Categories tab: select what `--all` selects, or none when all of those are on |
 | `s` / `F5` | Start the backup |
 | `Esc` | Back to the Dashboard |
 
