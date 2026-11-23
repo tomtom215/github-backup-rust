@@ -534,11 +534,21 @@ fn interpret_api_result(
                 "wait a while, then run --doctor again",
             ),
         ],
-        Err(e) => vec![Check::fail(
+        // Something answered, but not the GitHub API: an HTML page from a
+        // captive portal or proxy, or a wrong --api-url.
+        Err(e @ (ClientError::Json(_) | ClientError::BodyTooLarge { .. })) => vec![Check::fail(
             "API connectivity",
-            format!("{url}: {e}"),
-            "check your network, firewall, or set HTTPS_PROXY (and NO_PROXY) for proxied environments",
+            format!("{url} answered, but not as the GitHub API does ({e})"),
+            "check --api-url (https://HOST/api/v3 for GitHub Enterprise Server) and that no \
+             proxy or captive portal answers in its place",
         )],
+        Err(e) => {
+            let hint = crate::errors::explain_error(&e.to_string()).unwrap_or(
+                "check your network, firewall, or set HTTPS_PROXY (and NO_PROXY) for proxied \
+                 environments",
+            );
+            vec![Check::fail("API connectivity", format!("{url}: {e}"), hint)]
+        }
     }
 }
 
@@ -615,6 +625,48 @@ mod tests {
         r.push(Check::fail("d", "bad", "fix"));
         assert_eq!(r.failures(), 2);
         assert_eq!(r.warnings(), 1);
+    }
+
+    /// An HTML page or an oversized answer means something other than the
+    /// API answered: the hint is about --api-url and proxies, not the network.
+    #[test]
+    fn an_answer_that_is_not_the_api_points_at_the_api_url() {
+        let not_json = serde_json::from_str::<serde_json::Value>("<html>").unwrap_err();
+        for e in [
+            ClientError::Json(not_json),
+            ClientError::BodyTooLarge {
+                limit_bytes: 16 << 20,
+            },
+        ] {
+            let checks = interpret_api_result("https://api.github.com", true, Err(e));
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].status, Status::Fail);
+            assert!(checks[0].detail.contains("not as the GitHub API does"));
+            assert!(checks[0].hint.as_deref().unwrap().contains("--api-url"));
+        }
+    }
+
+    /// Anything else is a connectivity failure, with the shared hint when
+    /// there is one and the network hint otherwise.
+    #[test]
+    fn the_catch_all_uses_the_shared_hints() {
+        let checks = interpret_api_result(
+            "https://ghe.example/api/v3",
+            true,
+            Err(ClientError::Pagination("a loop".into())),
+        );
+        assert_eq!(checks[0].label, "API connectivity");
+        assert!(checks[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("next-page link"));
+        let checks = interpret_api_result(
+            "https://api.github.com",
+            true,
+            Err(ClientError::Timeout { url: "x".into() }),
+        );
+        assert!(checks[0].hint.as_deref().unwrap().contains("HTTPS_PROXY"));
     }
 
     #[test]

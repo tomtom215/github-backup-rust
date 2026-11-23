@@ -63,6 +63,34 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
         );
     }
 
+    // The device flow's OAuth server refused (ClientError::OAuth).
+    if r.contains("oauth error") {
+        return Some(
+            "The OAuth device flow was refused.  Check that --oauth-client-id is the \
+             Client ID of an OAuth App (or GitHub App) with device flow enabled in its \
+             settings, registered on the host of --api-url.",
+        );
+    }
+
+    // A next-page link that is not followed (ClientError::Pagination).
+    if r.contains("pagination error") {
+        return Some(
+            "GitHub sent a next-page link to another host or back to a page already \
+             fetched, which is not followed.  With GitHub Enterprise Server, check that \
+             --api-url uses the hostname the server is configured with; a proxy that \
+             rewrites links can also cause this.",
+        );
+    }
+
+    // An `errors` array in a GraphQL answer (ClientError::GraphQl).
+    if r.contains("graphql error") {
+        return Some(
+            "GitHub's GraphQL API rejected the query.  Check that the token has the \
+             scopes `github-backup --list-scopes` prints (Projects need read:project); \
+             a fine-grained token or GitHub App needs the matching permissions.",
+        );
+    }
+
     // 401 — token wrong or revoked.
     if r.contains("401")
         || r.contains("bad credentials")
@@ -219,6 +247,41 @@ mod tests {
     #[test]
     fn explain_error_recognises_an_oversized_response() {
         assert!(explain_error("response body exceeds the 16 MiB cap").is_some());
+    }
+
+    /// The `Display` text of the newer `ClientError` variants each gets its
+    /// own hint, ahead of the generic status-code patterns.
+    #[test]
+    fn explain_error_recognises_the_newer_client_errors() {
+        use github_backup_client::ClientError;
+        let oauth = ClientError::OAuth {
+            error: "incorrect_client_credentials".into(),
+            description: Some("The client_id and/or client_secret passed are incorrect.".into()),
+        };
+        assert!(explain_error(&oauth.to_string())
+            .expect("oauth hint")
+            .contains("--oauth-client-id"));
+        let pagination = ClientError::Pagination(
+            "the next-page link of https://ghe.example/api/v3/x leads to another origin \
+             (https://other.example); not following it"
+                .into(),
+        );
+        assert!(explain_error(&pagination.to_string())
+            .expect("pagination hint")
+            .contains("next-page link"));
+        let graphql = ClientError::GraphQl {
+            message: "Resource not accessible by integration".into(),
+            kinds: vec!["FORBIDDEN".into()],
+        };
+        assert!(explain_error(&graphql.to_string())
+            .expect("graphql hint")
+            .contains("GraphQL"));
+        let too_large = ClientError::BodyTooLarge {
+            limit_bytes: 16 * 1024 * 1024,
+        };
+        assert!(explain_error(&too_large.to_string())
+            .expect("size hint")
+            .contains("larger than the client accepts"));
     }
 
     #[test]
