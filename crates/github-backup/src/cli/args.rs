@@ -136,7 +136,7 @@ use crate::notify::NotifyFormat;
     ArgGroup::new("mode")
         .multiple(false)
         .args([
-            "tui", "list_scopes", "doctor", "check", "verify", "decrypt",
+            "tui", "list_scopes", "doctor", "check", "verify", "decrypt", "render_html",
             "restore", "every", "print_config_template", "completions",
         ]),
 ))]
@@ -954,6 +954,28 @@ pub struct Args {
     /// not contact the GitHub API.
     #[arg(help_heading = "Integrity", long)]
     pub verify: bool,
+
+    // ── Viewer ────────────────────────────────────────────────────────────
+    /// Render the backup as a static HTML site you can read offline.
+    ///
+    /// Reads `<output>/<owner>/json` (and the clones under `git/`) and writes
+    /// a browsable site: repositories, issues, pull requests with reviews
+    /// and commits, releases, gists and more.  Open its `index.html` in a
+    /// browser; no server is needed.  The site goes to
+    /// `<output>/<owner>/site` unless a directory is given with `=`
+    /// (`--render-html=/srv/www/backup`); an earlier render there is
+    /// replaced, any other non-empty directory is refused.
+    ///
+    /// Requires OWNER (`--output` defaults to the current directory).  Does
+    /// not contact the GitHub API.
+    #[arg(
+        help_heading = "Viewer",
+        long,
+        value_name = "SITE_DIR",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub render_html: Option<Option<PathBuf>>,
 
     // ── Retention / pruning ────────────────────────────────────────────────
     /// Deprecated and ignored (a warning is logged): nothing is deleted.

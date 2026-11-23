@@ -144,6 +144,16 @@ async fn run() -> ExitCode {
         return modes::run_verify(&json_dir);
     }
 
+    // ── Render-HTML mode: local, needs OWNER ────────────────────────────────
+    if let Some(site_dir) = &args.render_html {
+        let Some(owner) = args.owner.as_deref() else {
+            error!("--render-html needs OWNER: the account whose backup to render");
+            return ExitCode::FAILURE;
+        };
+        let output_path = args.output.clone().unwrap_or_else(|| ".".into());
+        return modes::run_render_html(&output_path, owner, site_dir.as_deref());
+    }
+
     discover_gh_token(&mut args).await;
     errors::remember_secrets(&args);
 

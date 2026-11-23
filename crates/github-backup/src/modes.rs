@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! The non-backup run modes: `--verify`, `--decrypt` and `--doctor`/`--check`.
+//! The non-backup run modes: `--verify`, `--decrypt`, `--render-html` and
+//! `--doctor`/`--check`.
 
 use std::process::ExitCode;
 
@@ -38,6 +39,50 @@ pub(crate) fn run_verify(json_dir: &std::path::Path) -> ExitCode {
                     warn!(files = ?report.unexpected, "UNEXPECTED: files on disk not in manifest");
                 }
                 ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+/// Renders the backup of `owner` under `output` as a static HTML site in
+/// `site_dir` (default `<output>/<owner>/site`).
+///
+/// Exits `0` when every backup file could be read, `3` when the site was
+/// written but some files were unreadable (each is logged), and `1` when no
+/// site could be written.
+pub(crate) fn run_render_html(
+    output: &std::path::Path,
+    owner: &str,
+    site_dir: Option<&std::path::Path>,
+) -> ExitCode {
+    let owner_dir = output.join(owner);
+    let opts = github_backup_viewer::RenderOptions {
+        site_dir: site_dir.map_or_else(|| owner_dir.join("site"), std::path::Path::to_path_buf),
+        owner_dir,
+        owner: owner.to_string(),
+    };
+    info!(site = %opts.site_dir.display(), "rendering the backup as HTML");
+    match github_backup_viewer::render_site(&opts) {
+        Err(e) => {
+            error!("--render-html failed: {e}");
+            ExitCode::FAILURE
+        }
+        Ok(report) => {
+            for w in &report.warnings {
+                warn!("skipped while rendering: {w}");
+            }
+            let index = report.site_dir.join("index.html");
+            info!(
+                repositories = report.repositories,
+                pages = report.pages,
+                bytes = report.bytes,
+                "site written: open {}",
+                index.display()
+            );
+            if report.warnings.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(3)
             }
         }
     }

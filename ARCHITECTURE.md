@@ -1,6 +1,6 @@
 # Architecture
 
-`github-backup` is a Rust workspace of seven crates.  This page describes how
+`github-backup` is a Rust workspace of eight crates.  This page describes how
 they fit together.  (It is also the book page *Development / Architecture*.)
 
 ## Workspace Layout
@@ -14,6 +14,7 @@ github-backup-rust/
 │   ├── github-backup-mirror/   # Push mirrors to Gitea / Forgejo / Codeberg / GitLab
 │   ├── github-backup-s3/       # S3-compatible client, sync, AES-256-GCM encryption
 │   ├── github-backup-tui/      # Ratatui front-end (--tui)
+│   ├── github-backup-viewer/   # Static HTML site from a backup (--render-html)
 │   └── github-backup/          # CLI binary (clap), run modes, reporting
 ├── docker/entrypoint.sh        # container entrypoint wrapper
 ├── Dockerfile, docker-compose.yml
@@ -203,6 +204,19 @@ The Ratatui terminal interface (`--tui`).  It drives the same `BackupEngine`
 through an event channel and does not embed its own backup logic.  See the
 [Interactive TUI guide](https://tomtom215.github.io/github-backup-rust/tui.html).
 
+### `github-backup-viewer`
+
+`--render-html`: renders one owner's backup directory as a static HTML site.
+It reads the JSON files as stored (`serde_json::Value`, so it shows every
+backup the tool has ever written, and a missing or unreadable file only
+leaves a page shorter) and writes plain HTML with one style sheet and no
+JavaScript.  Markdown goes through `pulldown-cmark` with raw HTML turned
+into text and a link-scheme allow-list; every page has a
+Content-Security-Policy that forbids scripts and remote loads.  Item pages
+are rendered on all CPUs; the output is deterministic.  The site is staged
+in a hidden sibling directory and renamed into place, and only an empty
+directory or an earlier render is ever replaced.
+
 ### `github-backup` (binary)
 
 | File | Responsibility |
@@ -213,7 +227,7 @@ through an event channel and does not embed its own backup logic.  See the
 | `post_process.rs` | mirror push, S3 sync, diff |
 | `restore.rs` | `--restore` |
 | `report.rs`, `metrics.rs`, `notify.rs` | JSON report, Prometheus textfile, webhook |
-| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt` |
+| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt`/`--render-html` |
 | `account.rs` | the default OWNER (the token's account) and user/organisation detection |
 | `schedule.rs` | `--every`: repeat the run at an interval |
 | `shutdown.rs` | signal handling and the exit watchdog |
@@ -226,8 +240,8 @@ Flow of a normal run:
    single values; switches are OR-ed, lists unioned; no category selected means
    all of them, minus `--skip`).  The token falls back to `GH_TOKEN`, then to
    `gh auth token`; OWNER falls back to the token's account.
-2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify` and
-   `--restore` are handled and return before a backup (`--doctor` after the same
+2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify`,
+   `--render-html` and `--restore` are handled and return before a backup (`--doctor` after the same
    validation a run makes).  Mirror and S3 settings are checked before the run.
 3. Take the output lock, build the client, run `BackupEngine::run`, racing it
    against `SIGINT` / `SIGTERM`.
