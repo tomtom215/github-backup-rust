@@ -4,8 +4,8 @@
 # Multi-stage Docker build for github-backup-rust.
 #
 # Stage 1 (builder): compiles a static musl release binary using the official
-#                    Rust image.  The Rust toolchain version must be at least
-#                    the workspace `rust-version` declared in Cargo.toml.
+#                    Rust image.  RUST_VERSION must match `channel` in
+#                    rust-toolchain.toml (CI checks this).
 # Stage 2 (runtime): minimal Alpine image with the binary, git, git-lfs and ssh.
 #
 # Usage:
@@ -19,9 +19,25 @@
 #
 # Quick health-check of a fresh image:
 #   docker run --rm -e GITHUB_TOKEN github-backup octocat --doctor
+#
+# Packaging an already-built binary instead of compiling (what the release and
+# edge-image workflows do, so the image contains exactly the attested release
+# binary and no emulated compile is needed):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     --build-arg BINARY_STAGE=prebuilt \
+#     --build-context binaries=DIR .
+# where DIR contains `amd64/github-backup` and `arm64/github-backup`.
+
+# Base image versions: the single place to bump them.  RUST_VERSION is kept
+# equal to rust-toolchain.toml.
+ARG RUST_VERSION=1.100.0
+ARG ALPINE_VERSION=3.24
+# Which stage supplies /github-backup to the runtime image: `export` (compile
+# here, the default) or `prebuilt` (take it from the `binaries` build context).
+ARG BINARY_STAGE=export
 
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM rust:1.88-alpine AS builder
+FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
 
 # Build dependencies
 RUN apk add --no-cache musl-dev pkgconf
@@ -78,8 +94,18 @@ RUN cargo clean --release \
 FROM scratch AS export
 COPY --from=builder /build/target/release/github-backup /github-backup
 
+# ── Optional stage: a binary built elsewhere ─────────────────────────────────
+# Selected with `--build-arg BINARY_STAGE=prebuilt`; needs the named build
+# context `binaries` holding `<TARGETARCH>/github-backup` (see the header).
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY --from=binaries ${TARGETARCH}/github-backup /github-backup
+
+FROM ${BINARY_STAGE} AS binary
+
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM alpine:3.23 AS runtime
+FROM alpine:${ALPINE_VERSION} AS runtime
+ARG ALPINE_VERSION
 
 # OCI image metadata.  These propagate to GHCR / Docker Hub so Dependabot,
 # Renovate, and humans can find the source from the image alone.
@@ -90,7 +116,7 @@ LABEL org.opencontainers.image.title="github-backup-rust" \
       org.opencontainers.image.documentation="https://tomtom215.github.io/github-backup-rust/" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="tomtom215" \
-      org.opencontainers.image.base.name="alpine:3.23"
+      org.opencontainers.image.base.name="docker.io/library/alpine:${ALPINE_VERSION}"
 
 # Runtime dependencies:
 # - git            : required for cloning / mirroring repositories.
@@ -135,10 +161,8 @@ RUN addgroup -S -g 1000 backup && \
     chown unraid:users  /home/unraid /home/unraid/.ssh && \
     chmod 0700 /home/backup/.ssh /home/unraid/.ssh
 
-# Copy the compiled binary.
-COPY --from=builder \
-    /build/target/release/github-backup \
-    /usr/local/bin/github-backup
+# Copy the binary (compiled above, or the prebuilt one; see BINARY_STAGE).
+COPY --from=binary --chmod=0755 /github-backup /usr/local/bin/github-backup
 
 # Install the env-var-aware entrypoint wrapper.  CLI / Compose users
 # who pass explicit positional args see no behavioural change; users

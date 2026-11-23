@@ -1,9 +1,0 @@
-# cargo-audit configuration
-# https://docs.rs/cargo-audit/latest/cargo_audit/config/index.html
-#
-# No advisory is ignored.  Add an entry only with a comment explaining why the
-# advisory cannot reach the code we ship, and remove it as soon as the lock file
-# no longer contains an affected version.
-
-[advisories]
-ignore = []

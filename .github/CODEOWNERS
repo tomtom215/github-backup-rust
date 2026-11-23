@@ -13,10 +13,18 @@ Cargo.toml                  @tomtom215
 Cargo.lock                  @tomtom215
 **/Cargo.toml               @tomtom215
 
-# CI / CD workflows.
-.github/workflows/          @tomtom215
+# CI / CD workflows, the release toolchain and the container image.
+.github/                    @tomtom215
+rust-toolchain.toml         @tomtom215
+Dockerfile                  @tomtom215
+docker/                     @tomtom215
+install.sh                  @tomtom215
+install.ps1                 @tomtom215
 
-# Security-sensitive code.
-crates/github-backup-core/src/git/askpass.rs  @tomtom215
-crates/github-backup-s3/src/encrypt.rs        @tomtom215
-crates/github-backup/src/lock.rs              @tomtom215
+# Security-sensitive code: the git credential helper and the token-carrying
+# git invocation, the mirror push, at-rest encryption and the run lock.
+crates/github-backup-core/src/git/credential.rs  @tomtom215
+crates/github-backup-core/src/git/process.rs     @tomtom215
+crates/github-backup-mirror/src/push.rs          @tomtom215
+crates/github-backup-s3/src/encrypt.rs           @tomtom215
+crates/github-backup/src/lock.rs                 @tomtom215

@@ -11,27 +11,27 @@ concurrency:
   group: "pages"
   cancel-in-progress: true
 
-# Grant the GITHUB_TOKEN the permissions required by actions/deploy-pages.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
     name: Build mdBook
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install mdBook and link checker
-        # Pin mdBook to match the version used in ci.yml. book.toml enables
+        # Same versions as the `book` job in ci.yml.  book.toml enables
         # [output.linkcheck], so mdbook-linkcheck must be installed or the
         # build fails with "The command `mdbook-linkcheck` wasn't found".
-        run: |
-          cargo install mdbook --version "0.4.40" --locked
-          cargo install mdbook-linkcheck --version "0.7.7" --locked
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: mdbook@0.4.52,mdbook-linkcheck@0.7.7
 
       - name: Build book
         run: mdbook build docs
@@ -40,7 +40,7 @@ jobs:
         # With the linkcheck backend enabled, mdBook emits each backend into
         # its own subdirectory (docs/book/html/ for HTML, docs/book/linkcheck/
         # for the link-check report). Publish only the HTML tree.
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs/book/html/
 
@@ -48,10 +48,15 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only the deploying job gets the Pages and OIDC permissions.
+    permissions:
+      pages: write      # deploy the site
+      id-token: write   # OIDC token that deploy-pages presents to Pages
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -4,6 +4,14 @@ Run `github-backup` automatically on a schedule using a systemd service + timer 
 
 ## Setup
 
+The unit below runs `/usr/local/bin/github-backup`.  To put the release binary
+there (the install script verifies its checksum):
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/install.sh
+sudo sh install.sh --dir /usr/local/bin
+```
+
 ### 1. Create a dedicated user
 
 ```bash
