@@ -8,20 +8,27 @@
 //! by resource category into smaller focused files.
 
 mod endpoints;
+mod graphql;
 #[cfg(test)]
 mod http_tests;
+mod redirect;
 #[cfg(test)]
 mod retry_tests;
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::{Method, Request};
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use hyper::{Method, Request, Response, StatusCode};
 use serde_json::{Map, Value};
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 use tracing::{debug, warn};
+use url::Url;
 
 use crate::proxy::ProxyClient;
 
@@ -33,16 +40,37 @@ use crate::error::ClientError;
 use crate::pagination::parse_next_link;
 use crate::rate_limit::{self, RateLimitInfo, RateLimitWait};
 
+use redirect::{Hop, MAX_REDIRECTS};
+
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
+pub(crate) const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"));
+/// The media type GitHub recommends for REST API requests.
+const ACCEPT_GITHUB_JSON: &str = "application/vnd.github+json";
+/// The request header that selects the REST API version (`X-GitHub-Api-Version`,
+/// lower case as `HeaderName::from_static` requires).
+pub(crate) const API_VERSION_HEADER: &str = "x-github-api-version";
+/// The REST API version every request asks for, unless it names another one.
+///
+/// `2022-11-28` is the version GitHub applies to requests without the header
+/// and is supported until 2028-03-10.  The newer `2026-03-10` removes fields
+/// this tool backs up losslessly (`merge_commit_sha` and `assignee` from pull
+/// requests and issues, `has_downloads` from repositories, `history` and
+/// `forks` from gists), and GitHub Enterprise Server releases that predate it
+/// reject it.  An endpoint that needs another version passes the header per
+/// request (see [`GitHubClient::get_json_with_headers`]).
+const API_VERSION: &str = "2022-11-28";
 /// Default page size for all paginated GitHub API endpoints.
 pub(crate) const PER_PAGE: u32 = 100;
 /// Maximum number of times to retry a rate-limited request.
 const MAX_RATE_LIMIT_RETRIES: u32 = 6;
-/// Total time one request may spend waiting out rate limits.  Slightly over
-/// GitHub's one-hour primary window, so a primary limit that resets within the
-/// hour is waited out, while a longer one fails instead of hanging the run.
-const MAX_RATE_WAIT_TOTAL_SECS: u64 = 3700;
+/// Longest single rate-limit wait.  Slightly over GitHub's one-hour primary
+/// window, so a primary limit that resets within the hour is waited out,
+/// while a longer one fails instead of hanging the run.
+const MAX_RATE_WAIT_SECS: u64 = 3700;
+/// Total time one request may spend waiting out rate limits: two windows, so
+/// that a few secondary limits followed by a primary limit that resets in an
+/// hour are still waited out.
+const MAX_RATE_WAIT_TOTAL_SECS: u64 = 2 * MAX_RATE_WAIT_SECS;
 /// First wait when GitHub reports a secondary rate limit without saying how
 /// long to wait (`Retry-After` / `X-RateLimit-Reset`); doubled on every
 /// further hit.  GitHub's guidance is "at least one minute".
@@ -52,15 +80,13 @@ const MAX_SERVER_ERROR_RETRIES: u32 = 3;
 /// Maximum number of times to retry a connection failure, timeout or a
 /// response cut off mid-body (idempotent requests only).
 const MAX_TRANSPORT_RETRIES: u32 = 3;
-/// Default request timeout in seconds. GitHub's API can be slow for large repos.
-/// Also the longest a response body may stall between two chunks.
+/// Default limit, in seconds, on receiving the response headers, and on the
+/// silence between two chunks of a response body.  It does not bound a whole
+/// transfer: a slow but steady body is fine, a stalled one is not.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
-/// Hard cap on a single back-off sleep (5 minutes).
-///
-/// Protects against pathological `Retry-After` or `X-RateLimit-Reset` values
-/// that could otherwise pause a backup for hours.  GitHub's primary rate
-/// limit window is one hour, but the secondary (abuse) limit usually clears
-/// well under five minutes.
+/// Cap on one back-off sleep after a 5xx response or a transport failure
+/// (5 minutes).  Rate-limit waits are bounded by [`MAX_RATE_WAIT_SECS`]
+/// instead.
 const MAX_BACKOFF_SECS: u64 = 300;
 /// Hard cap on a single API response body (16 MiB).
 ///
@@ -77,7 +103,8 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// instance (supply the `https://hostname/api/v3` base URL).
 ///
 /// The client is cheaply cloneable — the underlying hyper connection pool is
-/// `Arc`-wrapped.
+/// `Arc`-wrapped, and so is the rate-limit back-off: when one request is told
+/// to wait, every clone waits with it.
 ///
 /// **Proxy support**: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`
 /// (lower or upper case) are honoured, see [`crate::ProxySettings`].
@@ -91,6 +118,10 @@ pub struct GitHubClient {
     /// `GET /user` and shared by every clone of the client.  `None` inside
     /// means the lookup is not possible with this credential.
     login: Arc<OnceCell<Option<String>>>,
+    /// When GitHub last asked this client (any clone) to stop sending.
+    rate_gate: Arc<RateGate>,
+    /// Endpoints whose deprecation notice has been logged already.
+    deprecations: Arc<Mutex<HashSet<String>>>,
     /// Time base of all waits and timeouts (tests shrink it).
     timing: Timing,
 }
@@ -115,12 +146,78 @@ impl Default for Timing {
     }
 }
 
+/// The instant before which no request may be sent, shared by every clone of
+/// a client.  GitHub's guidance after a rate limit is to stop sending, not
+/// only to retry the request that was refused, so a back-off closes the gate
+/// for all concurrent workers.
+#[derive(Debug, Default)]
+struct RateGate(Mutex<Option<Instant>>);
+
+impl RateGate {
+    /// Keeps the gate closed until at least `until`.
+    fn close_until(&self, until: Instant) {
+        let mut gate = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if gate.is_none_or(|current| current < until) {
+            *gate = Some(until);
+        }
+    }
+
+    /// Waits until the gate is open.
+    async fn pass(&self) {
+        let until = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(until) = until {
+            tokio::time::sleep_until(until).await;
+        }
+    }
+}
+
 impl std::fmt::Debug for GitHubClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubClient")
             .field("credential", &"[redacted]")
             .finish()
     }
+}
+
+/// One request as the retry loop sends it.
+struct Call<'a> {
+    method: Method,
+    url: &'a str,
+    body: Bytes,
+    /// Headers that replace the defaults of the same name (`Accept`,
+    /// `X-GitHub-Api-Version`) or are added to them.
+    headers: &'a [(&'a str, &'a str)],
+    /// Whether the request may be repeated after a 5xx response or a
+    /// transport failure (a repeated POST could act twice).
+    idempotent: bool,
+    /// Follow a redirect to another origin, without the credential, instead
+    /// of failing (release assets live on a storage host).
+    leave_origin: bool,
+    /// A GraphQL request: a `200` can still be a rate limit.
+    graphql: bool,
+}
+
+impl<'a> Call<'a> {
+    fn get(url: &'a str, headers: &'a [(&'a str, &'a str)]) -> Self {
+        Self {
+            method: Method::GET,
+            url,
+            body: Bytes::new(),
+            headers,
+            idempotent: true,
+            leave_origin: false,
+            graphql: false,
+        }
+    }
+}
+
+/// What one request has used up of its retry budget.
+#[derive(Debug, Default)]
+struct Attempts {
+    rate_hits: u32,
+    rate_waited: u64,
+    server_errors: u32,
+    transport_failures: u32,
 }
 
 impl GitHubClient {
@@ -152,15 +249,29 @@ impl GitHubClient {
         validate_api_url(api_base_url)?;
         // HTTPS only: the token must never travel in clear text.
         let http = ProxyClient::from_env(false)?;
-
-        let api_base = api_base_url.trim_end_matches('/').to_string();
-        Ok(Self {
+        Ok(Self::from_parts(
             http,
             credential,
-            api_base,
+            api_base_url,
+            Timing::default(),
+        ))
+    }
+
+    fn from_parts(
+        http: ProxyClient,
+        credential: Credential,
+        api_base: &str,
+        timing: Timing,
+    ) -> Self {
+        Self {
+            http,
+            credential,
+            api_base: api_base.trim_end_matches('/').to_string(),
             login: Arc::new(OnceCell::new()),
-            timing: Timing::default(),
-        })
+            rate_gate: Arc::new(RateGate::default()),
+            deprecations: Arc::new(Mutex::new(HashSet::new())),
+            timing,
+        }
     }
 
     /// A client for tests that talk to a local **plain-HTTP** server.
@@ -179,20 +290,15 @@ impl GitHubClient {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn for_tests_at(credential: Credential, api_base_url: &str) -> Self {
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-        let http = ProxyClient::new(crate::proxy::ProxySettings::default(), tls, true);
-        Self {
-            http,
+        Self::from_parts(
+            crate::proxy::ProxyClient::for_tests(),
             credential,
-            api_base: api_base_url.trim_end_matches('/').to_string(),
-            login: Arc::new(OnceCell::new()),
-            timing: Timing {
+            api_base_url,
+            Timing {
                 unit: Duration::from_millis(1),
                 request_timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             },
-        }
+        )
     }
 
     /// Returns the API base URL (without trailing slash).
@@ -217,28 +323,7 @@ impl GitHubClient {
     /// Returns [`ClientError`] on network or API errors.
     pub async fn get_token_scopes(&self) -> Result<Vec<String>, ClientError> {
         let url = format!("{}/user", self.api_base);
-        let req = self
-            .build_request(Method::GET, &url)?
-            .header("Accept", "application/vnd.github.v3+json")
-            .body(Full::new(Bytes::new()))
-            .map_err(ClientError::Http)?;
-
-        let response = tokio::time::timeout(self.timing.request_timeout, self.http.request(req))
-            .await
-            .map_err(|_| ClientError::Timeout { url: url.clone() })??;
-
-        let status = response.status();
-        let headers = response.headers().clone();
-
-        if !status.is_success() {
-            let body =
-                collect_body_limited(response.into_body(), self.timing.request_timeout).await?;
-            return Err(ClientError::ApiError {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-
+        let (_, headers) = self.execute(&Call::get(&url, &[])).await?;
         Ok(RateLimitInfo::oauth_scopes(&headers))
     }
 
@@ -276,22 +361,28 @@ impl GitHubClient {
     ///
     /// Elements are decoded one by one: one that does not fit `T` is kept
     /// verbatim in [`Page::unparsed`] and logged, it does not fail the list
-    /// (see [`extend_page`]).
+    /// (see [`extend_page`]).  Pagination stops with
+    /// [`ClientError::Pagination`] when a next-page link leads to another
+    /// origin or back to a page already fetched.
     pub(crate) async fn get_all_pages<T>(&self, initial_url: &str) -> Result<Page<T>, ClientError>
     where
         T: serde::de::DeserializeOwned,
     {
-        let mut results = Page::new();
-        let mut next_url: Option<String> = Some(initial_url.to_string());
+        self.get_all_pages_with_headers(initial_url, &[]).await
+    }
 
-        while let Some(url) = next_url.take() {
-            debug!(url = %url, "GET");
-            let (values, link_header) = self.get_json_with_link::<Vec<Value>>(&url).await?;
-            extend_page(&mut results, &url, values);
-            next_url = link_header.as_deref().and_then(parse_next_link);
-        }
-
-        Ok(results)
+    /// Like [`get_all_pages`](Self::get_all_pages), sending `headers` with
+    /// every page (see [`get_json_with_headers`](Self::get_json_with_headers)).
+    pub(crate) async fn get_all_pages_with_headers<T>(
+        &self,
+        initial_url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Page<T>, ClientError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.collect_pages(initial_url, headers, |values: Vec<Value>, _| Ok(values))
+            .await
     }
 
     /// Like [`get_all_pages`](Self::get_all_pages) for the endpoints that wrap
@@ -306,20 +397,45 @@ impl GitHubClient {
     where
         T: serde::de::DeserializeOwned,
     {
+        self.collect_pages(
+            initial_url,
+            &[],
+            |mut body: Map<String, Value>, url| match body.remove(key) {
+                Some(Value::Array(values)) => Ok(values),
+                _ => Err(ClientError::Json(serde::de::Error::custom(format!(
+                    "response from {url} has no `{key}` array"
+                )))),
+            },
+        )
+        .await
+    }
+
+    /// Follows the `Link: rel="next"` chain from `initial_url`, taking the
+    /// elements of every page out of its body `B` with `values_of`.
+    async fn collect_pages<T, B>(
+        &self,
+        initial_url: &str,
+        headers: &[(&str, &str)],
+        values_of: impl Fn(B, &str) -> Result<Vec<Value>, ClientError>,
+    ) -> Result<Page<T>, ClientError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: serde::de::DeserializeOwned,
+    {
         let mut results = Page::new();
-        let mut next_url: Option<String> = Some(initial_url.to_string());
+        let mut fetched = HashSet::new();
+        let mut next_url = Some(String::from(Url::parse(initial_url)?));
 
         while let Some(url) = next_url.take() {
             debug!(url = %url, "GET");
-            let (mut body, link_header) =
-                self.get_json_with_link::<Map<String, Value>>(&url).await?;
-            let Some(Value::Array(values)) = body.remove(key) else {
-                return Err(ClientError::Json(serde::de::Error::custom(format!(
-                    "response from {url} has no `{key}` array"
-                ))));
-            };
-            extend_page(&mut results, &url, values);
-            next_url = link_header.as_deref().and_then(parse_next_link);
+            let (body, link_header) = self.get_json_with_headers::<B>(&url, headers).await?;
+            extend_page(&mut results, &url, values_of(body, &url)?);
+            fetched.insert(url.clone());
+            next_url = link_header
+                .as_deref()
+                .and_then(parse_next_link)
+                .map(|link| next_page(&url, &link, &fetched))
+                .transpose()?;
         }
 
         Ok(results)
@@ -394,8 +510,8 @@ impl GitHubClient {
     /// Performs a single GET request and returns the deserialised body along
     /// with the raw `Link` header value (if present).
     ///
-    /// Handles rate limiting (403/429) with exponential back-off and retries
-    /// transient 5xx server errors up to [`MAX_SERVER_ERROR_RETRIES`] times.
+    /// Redirects, rate limits and transient failures are handled as
+    /// described at [`send`](Self::send).
     pub(crate) async fn get_json_with_link<T>(
         &self,
         url: &str,
@@ -403,62 +519,35 @@ impl GitHubClient {
     where
         T: serde::de::DeserializeOwned,
     {
-        let (body_bytes, link_header) = self
-            .execute_with_retry(
-                Method::GET,
-                url,
-                Bytes::new(),
-                /* extra_headers = */ &[],
-                /* capture_link = */ true,
-            )
-            .await?;
-        let parsed: T = serde_json::from_slice(&body_bytes)?;
-        Ok((parsed, link_header))
+        self.get_json_with_headers(url, &[]).await
     }
 
-    /// Builds a [`hyper::http::request::Builder`] pre-populated with auth
-    /// and user-agent headers.
-    ///
-    /// The `Authorization` header is omitted for [`Credential::Anonymous`]
-    /// so that GitHub's unauthenticated rate-limit bucket applies.
-    pub(crate) fn build_request(
+    /// Like [`get_json_with_link`](Self::get_json_with_link) with extra
+    /// request headers.  A header replaces the default of the same name: pass
+    /// `(API_VERSION_HEADER, "2026-03-10")` for an endpoint that needs another
+    /// REST API version than [`API_VERSION`], or another `Accept` media type.
+    pub(crate) async fn get_json_with_headers<T>(
         &self,
-        method: Method,
         url: &str,
-    ) -> Result<hyper::http::request::Builder, ClientError> {
-        self.build_request_with_auth(method, url, true)
-    }
-
-    /// Like [`build_request`](Self::build_request), but the credential is
-    /// attached only when `send_auth` is true.
-    ///
-    /// Used for the follow-up hops of a redirect chain, which must not carry
-    /// the `Authorization` header to another origin.
-    pub(crate) fn build_request_with_auth(
-        &self,
-        method: Method,
-        url: &str,
-        send_auth: bool,
-    ) -> Result<hyper::http::request::Builder, ClientError> {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(url)
-            .header("User-Agent", USER_AGENT);
-
-        if send_auth {
-            if let Some(auth) = self.credential.authorization_header() {
-                builder = builder.header("Authorization", auth);
-            }
-        }
-
-        Ok(builder)
+        headers: &[(&str, &str)],
+    ) -> Result<(T, Option<String>), ClientError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let (body, response_headers) = self.execute(&Call::get(url, headers)).await?;
+        let link = response_headers
+            .get(header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok((serde_json::from_slice(&body)?, link))
     }
 
     /// Performs a single POST request with a JSON body and deserialises the
     /// response.
     ///
-    /// Handles rate limiting (403/429) and transient 5xx errors identically to
-    /// [`get_json_with_link`][Self::get_json_with_link].
+    /// Rate limits and redirects are handled as for GETs; a 5xx response or
+    /// a transport failure is not retried (the POST could act twice), and a
+    /// `301`/`302`/`303` is not followed (it would turn the POST into a GET).
     ///
     /// # Errors
     ///
@@ -468,168 +557,296 @@ impl GitHubClient {
         T: serde::de::DeserializeOwned,
         B: serde::Serialize,
     {
-        let body_bytes = Bytes::from(serde_json::to_vec(body)?);
-        let (resp_bytes, _) = self
-            .execute_with_retry(
-                Method::POST,
-                url,
-                body_bytes,
-                &[("content-type", "application/json")],
-                /* capture_link = */ false,
-            )
-            .await?;
+        let call = Call {
+            method: Method::POST,
+            body: Bytes::from(serde_json::to_vec(body)?),
+            headers: &[("content-type", "application/json")],
+            idempotent: false,
+            ..Call::get(url, &[])
+        };
+        let (resp_bytes, _) = self.execute(&call).await?;
         Ok(serde_json::from_slice(&resp_bytes)?)
     }
 
-    /// Performs an HTTP request with retry / rate-limit / 5xx handling.
+    /// Sends `call` (see [`send`](Self::send)) and reads the whole, bounded
+    /// response body.  A body cut off or stalled mid-stream is retried like a
+    /// transport failure; for GraphQL, a `200` that reports a rate limit is
+    /// waited out like a `403`/`429`.
+    async fn execute(&self, call: &Call<'_>) -> Result<(Bytes, HeaderMap), ClientError> {
+        let mut attempts = Attempts::default();
+        loop {
+            let response = self.send(call, &mut attempts).await?;
+            let headers = response.headers().clone();
+            let body = match collect_body_limited(response.into_body(), self.timing.request_timeout)
+                .await
+            {
+                Ok(body) => body,
+                Err(e) => {
+                    self.retry_transport(call, &mut attempts, call.url, e)
+                        .await?;
+                    continue;
+                }
+            };
+            if call.graphql {
+                if let Some(limit) = rate_limit::classify_graphql(&headers, &body, unix_now()) {
+                    self.hold_for_rate_limit(limit, &mut attempts, call.url, 200)?;
+                    continue;
+                }
+            }
+            return Ok((body, headers));
+        }
+    }
+
+    /// Sends `call` until it gets a success response, whose body is left
+    /// unread for the caller.
     ///
-    /// Returns the bounded response body bytes plus the `Link` header (only
-    /// when `capture_link` is true, otherwise `None`).
-    ///
-    /// Retry policy:
+    /// - Redirects (`301`, `302`, `303`, `307`, `308`): up to
+    ///   [`MAX_REDIRECTS`] are followed.  A GET follows all of them; any other
+    ///   method only `307`/`308`, which keep the method and body.  A redirect
+    ///   within the origin keeps the credential; one to another origin fails,
+    ///   unless `call.leave_origin`, when it is followed without the
+    ///   credential and the API headers.  HTTPS to HTTP is always refused.
     /// - Rate limits (see [`rate_limit::classify`]): a 429, or a 403 that
     ///   carries `Retry-After`, `X-RateLimit-Remaining: 0` or a "rate limit"
     ///   message, is waited out and retried: for `Retry-After`, else until
     ///   `X-RateLimit-Reset`, else (secondary limit) at least a minute,
-    ///   doubling on every further hit.  The waits of one request are bounded
-    ///   by [`MAX_RATE_WAIT_TOTAL_SECS`]; beyond that it fails with
-    ///   [`ClientError::RateLimitExceeded`] - never with a plain 403, which the
-    ///   backup treats as "no access, skip".
-    /// - GET only (a repeated POST could act twice): 500/502/503/504 up to
+    ///   doubling on every further hit.  The wait pauses every clone of the
+    ///   client.  One wait may last [`MAX_RATE_WAIT_SECS`], all waits of one
+    ///   request [`MAX_RATE_WAIT_TOTAL_SECS`]; beyond that the request fails
+    ///   with [`ClientError::RateLimitExceeded`] - never with a plain 403,
+    ///   which the backup treats as "no access, skip".
+    /// - Idempotent requests only: 500/502/503/504 up to
     ///   [`MAX_SERVER_ERROR_RETRIES`] retries with exponential back-off and
-    ///   jitter; connection failures, timeouts and bodies cut off mid-stream up
-    ///   to [`MAX_TRANSPORT_RETRIES`] retries.
-    /// - Any other non-success status fails immediately.
+    ///   jitter; connection failures, timeouts and bodies cut off mid-stream
+    ///   up to [`MAX_TRANSPORT_RETRIES`] retries.
+    /// - Any other status fails with [`ClientError::ApiError`].
     ///
-    /// The waits are plain `await`s, so dropping the future (as the engine
-    /// does on cancellation) ends them at once.
-    async fn execute_with_retry(
+    /// Error and redirect bodies are read with the size cap and the idle
+    /// timeout.  The waits are plain `await`s, so dropping the future (as the
+    /// engine does on cancellation) ends them at once.
+    async fn send(
         &self,
-        method: Method,
-        url: &str,
-        body: Bytes,
-        extra_headers: &[(&str, &str)],
-        capture_link: bool,
-    ) -> Result<(Bytes, Option<String>), ClientError> {
-        let idempotent = method == Method::GET;
-        let mut rate_hits = 0u32;
-        let mut rate_waited = 0u64;
-        let mut server_retries = 0u32;
-        let mut transport_retries = 0u32;
+        call: &Call<'_>,
+        attempts: &mut Attempts,
+    ) -> Result<Response<Incoming>, ClientError> {
+        let mut url = call.url.to_string();
+        let mut same_origin = true;
+        let mut redirects = 0u8;
 
         loop {
-            let mut builder = self
-                .build_request(method.clone(), url)?
-                .header("Accept", "application/vnd.github.v3+json");
-            for (name, value) in extra_headers {
-                builder = builder.header(*name, *value);
-            }
-            let req = builder
-                .body(Full::new(body.clone()))
-                .map_err(ClientError::Http)?;
-
+            self.rate_gate.pass().await;
+            let req = self.request(call, &url, same_origin)?;
             let sent =
                 tokio::time::timeout(self.timing.request_timeout, self.http.request(req)).await;
-            let attempt = match sent {
-                Ok(Ok(response)) => {
-                    let status = response.status();
-                    let headers = response.headers().clone();
-                    collect_body_limited(response.into_body(), self.timing.request_timeout)
-                        .await
-                        .map(|bytes| (status, headers, bytes))
-                }
-                Ok(Err(e)) => Err(ClientError::from(e)),
-                Err(_) => Err(ClientError::Timeout {
-                    url: url.to_string(),
-                }),
-            };
-            let (status, headers, bytes) = match attempt {
-                Ok(done) => done,
-                Err(
-                    e @ (ClientError::Transport(_)
-                    | ClientError::Body(_)
-                    | ClientError::Timeout { .. }),
-                ) if idempotent && transport_retries < MAX_TRANSPORT_RETRIES => {
-                    let backoff = backoff_with_jitter(transport_retries);
-                    warn!(
-                        url = %url,
-                        error = %e,
-                        backoff_secs = backoff.as_secs(),
-                        attempt = transport_retries + 1,
-                        "request failed, retrying"
-                    );
-                    tokio::time::sleep(self.scaled(backoff)).await;
-                    transport_retries += 1;
+            let response = match sent {
+                Ok(Ok(response)) => response,
+                Ok(Err(e)) => {
+                    self.retry_transport(call, attempts, &url, e.into()).await?;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(_) => {
+                    let e = ClientError::Timeout { url: url.clone() };
+                    self.retry_transport(call, attempts, &url, e).await?;
+                    continue;
+                }
+            };
+            let status = response.status();
+            if same_origin {
+                self.note_deprecation(&call.method, &url, response.headers());
+            }
+            if status.is_success() {
+                return Ok(response);
+            }
+
+            let headers = response.headers().clone();
+            let body = match collect_body_limited(response.into_body(), self.timing.request_timeout)
+                .await
+            {
+                Ok(body) => body,
+                Err(e) => {
+                    self.retry_transport(call, attempts, &url, e).await?;
+                    continue;
+                }
             };
 
-            // ── Rate limiting ─────────────────────────────────────────────
-            if let Some(limit) = rate_limit::classify(status.as_u16(), &headers, &bytes, unix_now())
-            {
-                let (wait, jitter_span) = match limit {
-                    RateLimitWait::Explicit(secs) => (secs.max(1), 1.0),
-                    RateLimitWait::Unspecified => (
-                        SECONDARY_LIMIT_BASE_SECS << rate_hits.min(4),
-                        // Spread concurrent clients over a few seconds.
-                        5.0,
-                    ),
-                };
-                if rate_hits >= MAX_RATE_LIMIT_RETRIES
-                    || rate_waited.saturating_add(wait) > MAX_RATE_WAIT_TOTAL_SECS
-                {
-                    return Err(ClientError::RateLimitExceeded {
-                        retry_after_secs: wait,
-                    });
-                }
-                warn!(
-                    url = %url,
-                    status = status.as_u16(),
-                    "rate limited; waiting {wait}s (attempt {})",
-                    rate_hits + 1
-                );
-                let jitter = Duration::from_millis((jitter_ms() as f64 * jitter_span) as u64);
-                tokio::time::sleep(self.scaled(Duration::from_secs(wait) + jitter)).await;
-                rate_waited += wait;
-                rate_hits += 1;
+            if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+                url = redirect_target(
+                    call,
+                    &url,
+                    status,
+                    &headers,
+                    &mut same_origin,
+                    &mut redirects,
+                )?;
                 continue;
             }
 
-            // ── Transient server errors ───────────────────────────────────
-            if idempotent
-                && matches!(status.as_u16(), 500 | 502 | 503 | 504)
-                && server_retries < MAX_SERVER_ERROR_RETRIES
+            if let Some(limit) = rate_limit::classify(status.as_u16(), &headers, &body, unix_now())
             {
-                let backoff = backoff_with_jitter(server_retries);
+                self.hold_for_rate_limit(limit, attempts, &url, status.as_u16())?;
+                continue;
+            }
+
+            if call.idempotent
+                && matches!(status.as_u16(), 500 | 502 | 503 | 504)
+                && attempts.server_errors < MAX_SERVER_ERROR_RETRIES
+            {
+                let backoff = backoff_with_jitter(attempts.server_errors);
                 warn!(
                     url = %url,
                     status = status.as_u16(),
                     backoff_secs = backoff.as_secs(),
-                    attempt = server_retries + 1,
+                    attempt = attempts.server_errors + 1,
                     "transient server error, retrying with jitter"
                 );
                 tokio::time::sleep(self.scaled(backoff)).await;
-                server_retries += 1;
+                attempts.server_errors += 1;
                 continue;
             }
 
-            if !status.is_success() {
-                return Err(ClientError::ApiError {
-                    status: status.as_u16(),
-                    body: String::from_utf8_lossy(&bytes).into_owned(),
-                });
-            }
+            return Err(ClientError::ApiError {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+    }
 
-            let link_header = if capture_link {
-                headers
-                    .get("link")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            } else {
-                None
-            };
-            return Ok((bytes, link_header));
+    /// Builds the request for one hop of `call` to `url`.
+    ///
+    /// The credential, `Accept: application/vnd.github+json` and the API
+    /// version go only to the origin of the call; the headers of the call are
+    /// sent on every hop and replace the defaults of the same name.  The
+    /// `Authorization` header is omitted for [`Credential::Anonymous`] so that
+    /// GitHub's unauthenticated rate-limit bucket applies.
+    fn request(
+        &self,
+        call: &Call<'_>,
+        url: &str,
+        same_origin: bool,
+    ) -> Result<Request<Full<Bytes>>, ClientError> {
+        let mut req = Request::builder()
+            .method(call.method.clone())
+            .uri(url)
+            .header(header::USER_AGENT, USER_AGENT)
+            .body(Full::new(call.body.clone()))?;
+        let headers = req.headers_mut();
+        if same_origin {
+            headers.insert(header::ACCEPT, HeaderValue::from_static(ACCEPT_GITHUB_JSON));
+            headers.insert(
+                HeaderName::from_static(API_VERSION_HEADER),
+                HeaderValue::from_static(API_VERSION),
+            );
+            if let Some(auth) = self.credential.authorization_header() {
+                let mut value =
+                    HeaderValue::from_str(&auth).map_err(|e| ClientError::Http(e.into()))?;
+                value.set_sensitive(true);
+                headers.insert(header::AUTHORIZATION, value);
+            }
+        }
+        for (name, value) in call.headers {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).map_err(|e| ClientError::Http(e.into()))?,
+                HeaderValue::from_str(value).map_err(|e| ClientError::Http(e.into()))?,
+            );
+        }
+        Ok(req)
+    }
+
+    /// Sleeps before retrying a connection failure, a timeout or a body cut
+    /// off mid-stream, or returns `error` when `call` may not be retried (not
+    /// idempotent, another kind of error, or out of retries).
+    async fn retry_transport(
+        &self,
+        call: &Call<'_>,
+        attempts: &mut Attempts,
+        url: &str,
+        error: ClientError,
+    ) -> Result<(), ClientError> {
+        let transient = matches!(
+            error,
+            ClientError::Transport(_) | ClientError::Body(_) | ClientError::Timeout { .. }
+        );
+        if !transient || !call.idempotent || attempts.transport_failures >= MAX_TRANSPORT_RETRIES {
+            return Err(error);
+        }
+        let backoff = backoff_with_jitter(attempts.transport_failures);
+        warn!(
+            url = %url,
+            error = %error,
+            backoff_secs = backoff.as_secs(),
+            attempt = attempts.transport_failures + 1,
+            "request failed, retrying"
+        );
+        tokio::time::sleep(self.scaled(backoff)).await;
+        attempts.transport_failures += 1;
+        Ok(())
+    }
+
+    /// Closes the shared [`RateGate`] for the wait `limit` asks for, or fails
+    /// with [`ClientError::RateLimitExceeded`] when the wait is out of the
+    /// request's budget.
+    fn hold_for_rate_limit(
+        &self,
+        limit: RateLimitWait,
+        attempts: &mut Attempts,
+        url: &str,
+        status: u16,
+    ) -> Result<(), ClientError> {
+        let (wait, jitter_span) = match limit {
+            RateLimitWait::Explicit(secs) => (secs.max(1), 1.0),
+            RateLimitWait::Unspecified => (
+                SECONDARY_LIMIT_BASE_SECS << attempts.rate_hits.min(4),
+                // Spread concurrent clients over a few seconds.
+                5.0,
+            ),
+        };
+        if attempts.rate_hits >= MAX_RATE_LIMIT_RETRIES
+            || wait > MAX_RATE_WAIT_SECS
+            || attempts.rate_waited.saturating_add(wait) > MAX_RATE_WAIT_TOTAL_SECS
+        {
+            return Err(ClientError::RateLimitExceeded {
+                retry_after_secs: wait,
+            });
+        }
+        warn!(
+            url = %url,
+            status,
+            "rate limited; pausing all requests for {wait}s (attempt {})",
+            attempts.rate_hits + 1
+        );
+        let jitter = Duration::from_millis((jitter_ms() as f64 * jitter_span) as u64);
+        self.rate_gate
+            .close_until(Instant::now() + self.scaled(Duration::from_secs(wait) + jitter));
+        attempts.rate_waited += wait;
+        attempts.rate_hits += 1;
+        Ok(())
+    }
+
+    /// Logs, once per endpoint, that GitHub announced its deprecation
+    /// (`Deprecation` / `Sunset` response headers, RFC 9745 / RFC 8594).
+    fn note_deprecation(&self, method: &Method, url: &str, headers: &HeaderMap) {
+        let value = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        let (deprecation, sunset) = (value("deprecation"), value("sunset"));
+        if deprecation.is_none() && sunset.is_none() {
+            return;
+        }
+        let path = Url::parse(url)
+            .map(|u| u.path().to_string())
+            .unwrap_or_default();
+        let endpoint = format!("{method} {}", endpoint_shape(&path));
+        let first = self
+            .deprecations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(endpoint.clone());
+        if first {
+            warn!(
+                endpoint = %endpoint,
+                deprecation = deprecation.unwrap_or("-"),
+                sunset = sunset.unwrap_or("-"),
+                "GitHub reports this API endpoint as deprecated; it may stop working \
+                 after the sunset date"
+            );
         }
     }
 
@@ -639,13 +856,128 @@ impl GitHubClient {
     }
 }
 
-/// Computes an exponential back-off with deterministic jitter.
+/// Where the redirect `status` from `url` leads, and whether the next hop
+/// stays in the origin (see [`GitHubClient::send`] for the rules).
+fn redirect_target(
+    call: &Call<'_>,
+    url: &str,
+    status: StatusCode,
+    headers: &HeaderMap,
+    same_origin: &mut bool,
+    redirects: &mut u8,
+) -> Result<String, ClientError> {
+    let refuse = |why: String| ClientError::ApiError {
+        status: status.as_u16(),
+        body: why,
+    };
+    // RFC 9110, section 15.4: a 301/302/303 may turn a POST into a GET; an
+    // API call must not silently change its meaning.
+    if call.method != Method::GET && !matches!(status.as_u16(), 307 | 308) {
+        return Err(refuse(format!(
+            "refusing to follow a {status} redirect of a {} request",
+            call.method
+        )));
+    }
+    if *redirects >= MAX_REDIRECTS {
+        return Err(refuse("too many redirects".to_string()));
+    }
+    *redirects += 1;
+    let location = headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| refuse("redirect with no Location header".to_string()))?;
+    let current = Url::parse(url)?;
+    let next = current.join(location)?;
+    let from = current.host_str().unwrap_or("");
+    let to = next.host_str().unwrap_or("");
+    match redirect::classify(&current, &next) {
+        Hop::SameOrigin => {}
+        Hop::OtherOrigin if call.leave_origin => {
+            debug!(
+                from,
+                to, "redirect leaves the origin: not sending the credential"
+            );
+            *same_origin = false;
+        }
+        Hop::OtherOrigin => {
+            return Err(refuse(format!(
+                "refusing to follow a redirect from {from} to another origin ({to})"
+            )));
+        }
+        Hop::Refuse => {
+            return Err(refuse(format!(
+                "refusing to follow a redirect from https://{from} to a non-HTTPS URL"
+            )));
+        }
+    }
+    if status == StatusCode::MOVED_PERMANENTLY {
+        debug!(
+            from = current.path(),
+            to = next.path(),
+            "moved permanently (renamed or transferred?); following"
+        );
+    }
+    Ok(next.into())
+}
+
+/// Resolves the next-page `link` of the page at `url`.
+///
+/// # Errors
+///
+/// [`ClientError::Pagination`] when the link leaves the origin (the
+/// credential must not follow it) or leads back to a page in `fetched` (the
+/// list would never end).
+fn next_page(url: &str, link: &str, fetched: &HashSet<String>) -> Result<String, ClientError> {
+    let current = Url::parse(url)?;
+    let next = current.join(link)?;
+    if redirect::classify(&current, &next) != Hop::SameOrigin {
+        return Err(ClientError::Pagination(format!(
+            "the next-page link of {url} leads to another origin ({}); not following it",
+            next.origin().ascii_serialization()
+        )));
+    }
+    let next = String::from(next);
+    if fetched.contains(&next) {
+        return Err(ClientError::Pagination(format!(
+            "the next-page link of {url} leads back to {next}, a page already fetched"
+        )));
+    }
+    Ok(next)
+}
+
+/// The path of an endpoint with the segments that name one resource (owner
+/// and repository names after `repos`, `users`, `orgs`, `gists`, and
+/// numbers) replaced by `{}`: a deprecation is logged once per endpoint, not
+/// once per repository.
+fn endpoint_shape(path: &str) -> String {
+    let mut names_left = 0;
+    path.split('/')
+        .map(|segment| {
+            if names_left > 0 {
+                names_left -= 1;
+                return "{}";
+            }
+            names_left = match segment {
+                "repos" => 2,
+                "users" | "orgs" | "gists" => 1,
+                _ => 0,
+            };
+            if !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Computes an exponential back-off with jitter.
 ///
 /// The base delay is `2^attempt` seconds (1, 2, 4, 8, …) capped at
-/// [`MAX_BACKOFF_SECS`].  Jitter adds 0–999 ms drawn from a deterministic
-/// PRNG seeded by the current process clock — enough variance to avoid a
-/// thundering herd from many concurrent workers retrying in lock-step,
-/// without pulling in a cryptographic randomness dependency.
+/// [`MAX_BACKOFF_SECS`].  Jitter adds 0–999 ms (see [`jitter_ms`]) — enough
+/// variance to avoid a thundering herd from many concurrent workers retrying
+/// in lock-step, without pulling in a randomness dependency.
 fn backoff_with_jitter(attempt: u32) -> Duration {
     // Saturate the exponent at 16 (2^16 = 65 536 s ≫ MAX_BACKOFF_SECS).
     let exp = attempt.min(16);
@@ -654,18 +986,24 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
     Duration::from_secs(base) + Duration::from_millis(jitter_ms())
 }
 
-/// Returns a value in `[0, 1000)` ms suitable for jittering a back-off.
-///
-/// Uses a small LCG seeded by the current high-resolution clock — fast,
-/// non-cryptographic, no extra dependency.  The constants are the well-known
-/// "Numerical Recipes" choices for a 32-bit LCG.
+/// Returns a value in `[0, 1000)` ms suitable for jittering a back-off,
+/// derived from the current high-resolution clock.
 fn jitter_ms() -> u64 {
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 12))
-        .unwrap_or(0)
-        .wrapping_add(1);
-    let mut x = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        .unwrap_or(0);
+    jitter_from(seed)
+}
+
+/// Scrambles `seed` with one step of a small LCG — fast, non-cryptographic,
+/// no extra dependency — into `[0, 1000)`.  The constants are the well-known
+/// "Numerical Recipes" choices for a 32-bit LCG.
+fn jitter_from(seed: u64) -> u64 {
+    let mut x = seed
+        .wrapping_add(1)
+        .wrapping_mul(1_664_525)
+        .wrapping_add(1_013_904_223);
     x ^= x.rotate_left(17);
     x % 1000
 }
@@ -673,7 +1011,7 @@ fn jitter_ms() -> u64 {
 /// An API base URL must be `https://host[...]`: the token is sent with every
 /// request, so a typo like `http://` must fail early instead of leaking it (the
 /// transport would refuse it too, but only at the first request).
-fn validate_api_url(raw: &str) -> Result<(), ClientError> {
+pub(crate) fn validate_api_url(raw: &str) -> Result<(), ClientError> {
     let url = url::Url::parse(raw)
         .map_err(|e| ClientError::InvalidApiUrl(format!("{raw:?} is not a valid URL: {e}")))?;
     if url.scheme() != "https" {
@@ -695,24 +1033,13 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Collects a hyper body into a [`Bytes`] buffer.
-///
-/// **Unbounded** — callers that handle untrusted or potentially huge
-/// responses (binary release assets, mirror push bodies) must check the
-/// response `Content-Length` themselves.  For JSON API responses use
-/// [`collect_body_limited`] instead.
-pub(crate) async fn collect_body(
-    body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
-) -> Result<Bytes, ClientError> {
-    Ok(body.collect().await?.to_bytes())
-}
-
 /// Collects a hyper body into a [`Bytes`] buffer with a size cap.
 ///
-/// Streams the body frame-by-frame and aborts with a synthetic API error if
-/// the accumulated size exceeds [`MAX_RESPONSE_BYTES`].  Protects the
-/// process from OOM kills when a misbehaving proxy or upstream returns an
-/// unbounded stream.
+/// Streams the body frame by frame and fails with
+/// [`ClientError::BodyTooLarge`] once it exceeds [`MAX_RESPONSE_BYTES`], and
+/// with [`ClientError::Timeout`] when no chunk arrives for `idle_timeout`.
+/// Protects the process from OOM kills and hangs when a misbehaving proxy or
+/// upstream returns an unbounded or stalled stream.
 pub(crate) async fn collect_body_limited(
     body: impl hyper::body::Body<Data = Bytes, Error = hyper::Error>,
     idle_timeout: Duration,
@@ -732,12 +1059,8 @@ pub(crate) async fn collect_body_limited(
         let frame = frame?;
         if let Some(chunk) = frame.data_ref() {
             if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(ClientError::ApiError {
-                    status: 0,
-                    body: format!(
-                        "response body exceeds {} MiB cap",
-                        MAX_RESPONSE_BYTES / (1024 * 1024)
-                    ),
+                return Err(ClientError::BodyTooLarge {
+                    limit_bytes: MAX_RESPONSE_BYTES,
                 });
             }
             buf.extend_from_slice(chunk);
@@ -874,22 +1197,29 @@ mod tests {
     }
 
     #[test]
-    fn backoff_includes_some_jitter() {
-        // Sample many attempts; jitter should vary across calls.
-        let mut seen_unique = std::collections::HashSet::new();
-        for _ in 0..32 {
-            let d = backoff_with_jitter(0);
-            seen_unique.insert(d.subsec_millis());
-            // The OS clock may not advance between rapid calls, so we don't
-            // require strict variance — but if every sample is identical the
-            // jitter implementation has regressed.
-        }
-        // Most platforms produce at least a couple of distinct millisecond
-        // jitter values across 32 successive reads; a single-element set
-        // indicates the PRNG is stuck.
+    fn jitter_spreads_neighbouring_clock_readings() {
+        // Workers that fail together read nearly the same clock; their
+        // jitter must still differ.  (The clock itself is not sampled here:
+        // two rapid reads may be equal on a coarse clock.)
+        let values: HashSet<u64> = (0..1000).map(jitter_from).collect();
+        assert!(values.iter().all(|&v| v < 1000));
         assert!(
-            !seen_unique.is_empty(),
-            "back-off jitter must produce at least one value"
+            values.len() > 500,
+            "only {} distinct values for 1000 seeds",
+            values.len()
         );
+    }
+
+    #[test]
+    fn endpoint_shape_names_the_endpoint_not_the_resource() {
+        assert_eq!(
+            endpoint_shape("/repos/octo/cat/issues/42/comments"),
+            "/repos/{}/{}/issues/{}/comments"
+        );
+        assert_eq!(
+            endpoint_shape("/api/v3/orgs/acme/repos"),
+            "/api/v3/orgs/{}/repos"
+        );
+        assert_eq!(endpoint_shape("/user/repos"), "/user/repos");
     }
 }

@@ -46,22 +46,39 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
 
 - `GitHubClient` (standard GitHub and, with `with_api_url`, GHES) behind the
   object-safe `BackupClient` trait, which tests replace with `MockClient`.
+- **Requests** send `Accept: application/vnd.github+json` and pin
+  `X-GitHub-Api-Version: 2022-11-28` (an endpoint may ask for another version
+  per request); `Deprecation` / `Sunset` response headers are logged once per
+  endpoint.
 - **Pagination** with `Link` headers; wrapped responses (`{"workflows": [...]}`)
-  are merged into plain lists.
-- **Retry policy** (`execute_with_retry`): rate limits (429, or 403 with
-  `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message) are waited
-  out and retried (up to 6 times, about an hour in total per request); GET
-  requests retry 5xx and transport failures 3 times with jittered back-off;
-  other statuses fail at once.  Every response body is capped at 16 MiB and
-  every request has a 120 s timeout.
+  are merged into plain lists.  A next-page link to another origin, or back
+  to a page already fetched, fails the list instead of being followed.
+- **Redirects** (`send`): up to 3 within the origin are followed with the
+  credential (`301` for a renamed or transferred repository); methods other
+  than GET follow only `307`/`308`.  An API redirect to another origin fails.
+- **Retry policy** (`send` / `execute`): rate limits (429, or 403 with
+  `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message; for
+  GraphQL also a 200 whose `errors` say so) are waited out and retried (up to
+  6 times; one wait at most about an hour, all waits of a request about two
+  hours), and the wait pauses every clone of the client; idempotent requests
+  retry 5xx and transport failures 3 times with jittered back-off; other
+  statuses fail at once.  Every response body is capped at 16 MiB; the
+  response headers, and each chunk of a body, must arrive within 120 s (a
+  slow but steady transfer is not cut off).
+- **GraphQL**: `graphql(query, variables)` posts a query to `/graphql` (GHES:
+  `/api/graphql`) with the same handling and fails on a non-empty `errors`
+  array.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
   `/gists`, which include private repositories and secret gists.
-- **Release assets** are streamed to disk through an `AssetSink`; the
+- **Release assets** are streamed to disk through an `AssetSink`, with the
+  same rate-limit and retry handling until the body starts; the
   `Authorization` header is dropped on any redirect that leaves the origin.
 - `proxy`: HTTP `CONNECT` proxy support from `HTTPS_PROXY`, `HTTP_PROXY`,
-  `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook and `--doctor`.
-- `oauth`: the device flow.
+  `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook, `--doctor` and
+  the device flow.  HTTP/1.1 only.
+- `oauth`: the device flow, at the login host of `--api-url` (github.com by
+  default), retrying lost connections until the code expires.
 
 ### `github-backup-core`
 

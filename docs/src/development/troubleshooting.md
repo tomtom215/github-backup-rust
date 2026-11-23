@@ -56,13 +56,15 @@ authorisation was denied" means you declined the request in the browser.
 
 ## Rate Limit Errors
 
-### `rate limited; waiting Ns (attempt K)`
+### `rate limited; pausing all requests for Ns (attempt K)`
 
 A `429` or a `403` with rate-limit information (`Retry-After`, no remaining
 requests, or a "rate limit" message): the client waits as long as GitHub says
-(at least a minute, doubling, when GitHub gives no time) and retries, up to 6
-times and about an hour of waiting per request.  Nothing to do unless it takes
-too long.
+(at least a minute, doubling, when GitHub gives no time) and retries.  The
+pause applies to every concurrent worker, as GitHub asks, not only to the
+request that was refused.  One request is retried up to 6 times; a single wait
+may last a little over an hour, and all waits of one request about two hours.
+Nothing to do unless it takes too long.
 
 ### `rate limit exceeded; retry after Ns`
 
