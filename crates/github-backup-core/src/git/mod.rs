@@ -1928,8 +1928,11 @@ mod prune_tests {
         runner.full_clone(&url, &dest, &opts).await.expect("update");
 
         let upstream = git(&origin, &["rev-parse", "HEAD"]);
+        // Git for Windows converts line endings on checkout (core.autocrlf).
         assert_eq!(
-            std::fs::read_to_string(dest.join("file.txt")).expect("read"),
+            std::fs::read_to_string(dest.join("file.txt"))
+                .expect("read")
+                .replace("\r\n", "\n"),
             "two\n",
             "the working tree must follow upstream"
         );

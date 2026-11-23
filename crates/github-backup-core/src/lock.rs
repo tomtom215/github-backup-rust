@@ -19,7 +19,7 @@
 //! race with a process that has just opened it.  It records the PID of the last
 //! holder purely so the "already running" message can name it.
 
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::debug;
@@ -88,7 +88,7 @@ impl BackupLock {
 
         // Informational: who holds it now.
         let pid = std::process::id();
-        if let Err(e) = write_pid(&path, pid) {
+        if let Err(e) = write_pid(&file, pid) {
             debug!(path = %path.display(), error = %e, "could not record the PID in the lock file");
         }
         debug!(path = %path.display(), pid, "backup lock acquired");
@@ -133,13 +133,15 @@ pub fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// Overwrites the lock file's content with `pid`.
-fn write_pid(path: &Path, pid: u32) -> std::io::Result<()> {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-    f.write_all(pid.to_string().as_bytes())
+/// Overwrites the content of the locked `file` with `pid`.
+///
+/// It is written through the handle that holds the lock: on Windows the lock
+/// is mandatory, so a second handle (even of this process) may neither read
+/// nor write the file while it is held.
+fn write_pid(mut file: &std::fs::File, pid: u32) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.write_all(pid.to_string().as_bytes())
 }
 
 #[cfg(test)]
@@ -151,8 +153,26 @@ mod tests {
     fn acquire_creates_the_lock_file_and_records_the_pid() {
         let dir = tempdir().unwrap();
         let lock = BackupLock::acquire(dir.path()).expect("acquire lock");
-        let recorded = std::fs::read_to_string(lock.path()).unwrap();
+        let path = lock.path().to_path_buf();
+        // Windows refuses to read a file another handle has locked, so the
+        // file is read once the lock is released; the PID stays in it.
+        drop(lock);
+        let recorded = std::fs::read_to_string(path).unwrap();
         assert_eq!(recorded, std::process::id().to_string());
+    }
+
+    /// A shorter PID replaces a longer one completely (no leftover digits).
+    #[test]
+    fn a_new_holder_overwrites_the_whole_pid() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".backup.lock"), "9999999999").unwrap();
+        let lock = BackupLock::acquire(dir.path()).expect("acquire lock");
+        let path = lock.path().to_path_buf();
+        drop(lock);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     #[test]
@@ -161,7 +181,14 @@ mod tests {
         let _lock = BackupLock::acquire(dir.path()).expect("first acquire");
         match BackupLock::acquire(dir.path()) {
             Err(LockError::AlreadyRunning { pid }) => {
-                assert_eq!(pid, Some(std::process::id()));
+                // On Windows the holder's lock also stops others from reading
+                // the file, so the PID cannot be named there.
+                let expected = if cfg!(windows) {
+                    None
+                } else {
+                    Some(std::process::id())
+                };
+                assert_eq!(pid, expected);
             }
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }
