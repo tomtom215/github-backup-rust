@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Git subprocess abstraction: clone, mirror, push, and fetch.
+//! Git subprocess abstraction: clone and update repositories.
 //!
 //! The production implementation ([`ProcessGitRunner`]) shells out to the
 //! system `git` binary.  Credentials for HTTPS cloning are handed to git
@@ -30,23 +30,27 @@
 //!   the destination is either absent or a complete repository.  A run killed
 //!   mid-clone leaves only a staging directory, which the next run deletes.
 //!
-//! - **Optional post-clone fsck** — with `CloneOptions::run_fsck = true`
-//!   (off by default) `git fsck --no-dangling` runs on every fresh clone and
-//!   problems are logged as warnings.
+//! - **Optional verification** — with `CloneOptions::run_fsck = true` (off by
+//!   default) `git fsck --no-dangling` checks every repository after it was
+//!   cloned or updated; a repository that fails is reported as
+//!   [`CoreError::GitFsckFailed`], and a fresh clone that fails is not moved
+//!   into place.
 //!
 //! # Sub-modules
 //!
 //! - `credential` — the host-scoped credential helper and its configuration
 //! - `process` — spawns and supervises one git subprocess
-//! - `spy` — test-only `SpyGitRunner` stub (available under `test_support` in tests)
+//! - `spy` — the `SpyGitRunner` stub used by the crate's tests (`cfg(test)` only)
 
 mod credential;
 mod process;
-pub mod spy;
+#[cfg(test)]
+pub(crate) mod spy;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use tracing::{debug, info, warn};
 
@@ -56,13 +60,10 @@ use process::run_git;
 
 // ── Public test-support re-export ─────────────────────────────────────────────
 
-/// Test-support module: re-exported from [`spy`] for use by sibling tests.
-///
-/// Importing this module from outside the crate requires `#[cfg(test)]`
-/// guards; the symbols are intentionally only `pub(crate)` at runtime.
+/// The `SpyGitRunner` stub, for the crate's own tests.
 #[cfg(test)]
-pub mod test_support {
-    pub use super::spy::{GitCall, SpyGitRunner};
+pub(crate) mod test_support {
+    pub use super::spy::SpyGitRunner;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -89,8 +90,9 @@ pub struct CloneOptions {
     /// `--progress`, so a long transfer that keeps reporting progress is never
     /// interrupted.  Defaults to 600 s.
     pub stall_timeout_secs: u64,
-    /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
-    /// detect repository corruption early.
+    /// When `true`, run `git fsck --no-dangling` after every clone and update;
+    /// a repository that fails the check is reported as
+    /// [`CoreError::GitFsckFailed`] (a fresh clone that fails is discarded).
     pub run_fsck: bool,
     /// Triggering this stops running git processes promptly and makes new ones
     /// fail with [`CoreError::Interrupted`].
@@ -129,6 +131,11 @@ impl Default for CloneOptions {
 /// - If `dest` already exists, update it in-place.
 /// - If `dest` does not exist, perform a fresh clone.
 ///
+/// Updates prune refs deleted upstream only when `opts.prune` is set; the
+/// choice is always passed to git explicitly (`--prune`, or `--no-prune
+/// --no-prune-tags`), so pruning settings in the user's git configuration do
+/// not apply.
+///
 /// For HTTPS URLs, `opts.token` is passed through the git child's environment
 /// and a credential helper scoped to the URL's host (see `credential`).
 ///
@@ -137,8 +144,7 @@ impl Default for CloneOptions {
 pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a bare mirror (`git clone --mirror`).
     ///
-    /// If `dest` already exists, updates it with `git fetch --all` (deleted
-    /// refs are pruned only if `opts.prune` is set).
+    /// If `dest` already exists, updates every ref with `git fetch --all`.
     ///
     /// # Errors
     ///
@@ -153,8 +159,8 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` as a bare clone (`git clone --bare`).
     ///
-    /// Similar to `mirror_clone` but does not configure remote-tracking refs.
-    /// If `dest` already exists, updates refs with `git fetch --all`.
+    /// Holds branches and tags only (no other refs).  If `dest` already
+    /// exists, fetches `refs/heads/*` and `refs/tags/*` into the same names.
     ///
     /// # Errors
     ///
@@ -169,7 +175,10 @@ pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a full working-tree clone.
     ///
     /// Use when you need to browse or build the backed-up source code.
-    /// If `dest` already exists, updates with `git fetch --all --prune`.
+    /// If `dest` already exists, every local branch, remote-tracking branch
+    /// and tag is set to its upstream position and the working tree is reset
+    /// (`reset --hard`) to the checked-out branch: the clone is the tool's
+    /// own, local edits in it are not kept.
     ///
     /// # Errors
     ///
@@ -183,9 +192,10 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` as a shallow clone with limited history.
     ///
-    /// Creates a bare-style repository with at most `depth` commits per
-    /// branch.  Reduces disk usage significantly but loses older history.
-    /// If `dest` already exists, deepens the clone with `git fetch --depth`.
+    /// Creates a mirror-style repository of every branch and tag with at most
+    /// `depth` commits each.  Reduces disk usage significantly but loses older
+    /// history.  If `dest` already exists, fetches what is new with
+    /// `git fetch --depth <depth>`, which keeps the history cut at `depth`.
     ///
     /// # Errors
     ///
@@ -200,7 +210,8 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` using Git LFS.
     ///
-    /// Fetches LFS objects in addition to regular git objects.
+    /// A mirror clone (see [`mirror_clone`](Self::mirror_clone)) followed by
+    /// `git lfs fetch --all`, which adds the LFS objects of every ref.
     ///
     /// # Errors
     ///
@@ -211,22 +222,6 @@ pub trait GitRunner: Send + Sync {
         dest: &Path,
         opts: &CloneOptions,
     ) -> impl Future<Output = Result<(), CoreError>> + Send;
-
-    /// Pushes all refs from the local repository at `src` to `remote_url`.
-    ///
-    /// Equivalent to `git -C <src> push --mirror <remote_url>`.  Used to push
-    /// a local bare/mirror clone to a secondary Git host (Gitea, Codeberg,
-    /// GitLab, etc.) after the primary backup has completed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
-    fn push_mirror(
-        &self,
-        src: &Path,
-        remote_url: &str,
-        opts: &CloneOptions,
-    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 }
 
 // ── Production implementation ─────────────────────────────────────────────────
@@ -234,8 +229,25 @@ pub trait GitRunner: Send + Sync {
 /// Production [`GitRunner`] that shells out to the system `git` binary.
 #[derive(Debug, Clone)]
 pub struct ProcessGitRunner {
-    /// The program to execute; `git` (resolved through `PATH`) by default.
+    git: GitCommand,
+}
+
+/// What is executed in place of `git`: a program, and arguments placed before
+/// git's own (empty except in tests, which run a stand-in script through
+/// `sh`).
+#[derive(Debug, Clone)]
+pub(crate) struct GitCommand {
     program: PathBuf,
+    leading_args: Vec<PathBuf>,
+}
+
+impl GitCommand {
+    /// A [`Command`] for this program, with its leading arguments.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.leading_args);
+        cmd
+    }
 }
 
 impl Default for ProcessGitRunner {
@@ -258,14 +270,34 @@ impl ProcessGitRunner {
     #[must_use]
     pub fn with_program(program: impl Into<PathBuf>) -> Self {
         Self {
-            program: program.into(),
+            git: GitCommand {
+                program: program.into(),
+                leading_args: Vec::new(),
+            },
+        }
+    }
+
+    /// Creates a runner that runs the shell script `script` (through `sh`)
+    /// instead of `git`.
+    ///
+    /// Executing a script the test has just written races with other tests
+    /// forking at the same moment: a forked child briefly holds the still-open
+    /// file descriptor, and `exec` then fails with "Text file busy".  Reading
+    /// the script with `sh` needs no `exec` of the file at all.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_shell_script(script: impl Into<PathBuf>) -> Self {
+        Self {
+            git: GitCommand {
+                program: PathBuf::from("sh"),
+                leading_args: vec![script.into()],
+            },
         }
     }
 
     /// Captures everything a blocking git job needs, by value.
     fn job(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Job {
         Job {
-            program: self.program.clone(),
+            git: self.git.clone(),
             url: url.to_owned(),
             dest: dest.to_owned(),
             opts: opts.clone(),
@@ -334,23 +366,12 @@ impl GitRunner for ProcessGitRunner {
         let job = self.job(url, dest, opts);
         async move { blocking(move || job.lfs_clone()).await }
     }
-
-    fn push_mirror(
-        &self,
-        src: &Path,
-        remote_url: &str,
-        opts: &CloneOptions,
-    ) -> impl Future<Output = Result<(), CoreError>> + Send {
-        // For a push, `dest` is the local repository and `url` the remote.
-        let job = self.job(remote_url, src, opts);
-        async move { blocking(move || job.push_mirror()).await }
-    }
 }
 
 /// One owned, blocking git operation.  Holds no borrows so it can move onto
 /// the blocking pool.
 struct Job {
-    program: PathBuf,
+    git: GitCommand,
     url: String,
     dest: PathBuf,
     opts: CloneOptions,
@@ -361,7 +382,11 @@ impl Job {
         path_to_str(&self.dest)?;
         if self.dest.exists() {
             info!(dest = %self.dest.display(), "repository exists, updating mirror");
-            self.update(self.fetch_all_args())
+            // `git fetch --all` rather than `git remote update` because it
+            // accepts `--progress`; the mirror refspec (`+refs/*:refs/*`)
+            // updates every ref, force-pushed branches and moved tags included.
+            self.fetch(&["--all"])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare mirror");
             self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, DEST])
@@ -374,27 +399,36 @@ impl Job {
             info!(dest = %self.dest.display(), "bare repository exists, fetching");
             // `git clone --bare` writes no fetch refspec, so `git fetch --all`
             // would exit 0 having fetched nothing, forever.  Name the refspecs.
-            let mut args = vec!["fetch", "--progress"];
-            if self.opts.prune {
-                args.push("--prune");
-            }
-            args.extend([
+            self.fetch(&[
                 "origin",
                 "+refs/heads/*:refs/heads/*",
                 "+refs/tags/*:refs/tags/*",
-            ]);
-            self.update(&args)
+            ])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare");
             self.fresh_clone(&["clone", "--progress", "--bare", &self.url, DEST])
         }
     }
 
+    /// A working-tree clone.  Its update brings every local branch, every
+    /// remote-tracking branch and every tag to its upstream position (the
+    /// clone is ours: nobody is expected to commit in it) and then the working
+    /// tree to the checked-out branch.
     fn full_clone(&self) -> Result<(), CoreError> {
         path_to_str(&self.dest)?;
         if self.dest.exists() {
-            info!(dest = %self.dest.display(), "full clone exists, fetching all branches");
-            self.update(self.fetch_all_args())
+            info!(dest = %self.dest.display(), "full clone exists, updating branches, tags and checkout");
+            // `--update-head-ok` lets the fetch move the checked-out branch too.
+            self.fetch(&[
+                "--update-head-ok",
+                "origin",
+                "+refs/heads/*:refs/heads/*",
+                "+refs/heads/*:refs/remotes/origin/*",
+                "+refs/tags/*:refs/tags/*",
+            ])?;
+            self.check_out_head()?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning full working tree");
             self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, DEST])
@@ -405,14 +439,19 @@ impl Job {
         path_to_str(&self.dest)?;
         let depth_str = depth.to_string();
         if self.dest.exists() {
-            info!(dest = %self.dest.display(), depth, "shallow clone exists, deepening fetch");
-            self.update(&["fetch", "--progress", "--depth", &depth_str])
+            // Fetches what is new, keeping the history cut at `depth` commits.
+            info!(dest = %self.dest.display(), depth, "shallow clone exists, fetching");
+            self.fetch(&["--depth", &depth_str])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), depth, "cloning shallow");
             self.fresh_clone(&[
                 "clone",
                 "--progress",
                 "--mirror",
+                // `--depth` implies `--single-branch`, which would leave every
+                // branch but the default one out of the first backup.
+                "--no-single-branch",
                 "--depth",
                 &depth_str,
                 &self.url,
@@ -427,67 +466,111 @@ impl Job {
     fn lfs_clone(&self) -> Result<(), CoreError> {
         self.mirror_clone()?;
         info!(dest = %self.dest.display(), "fetching LFS objects");
-        self.update(&["lfs", "fetch", "--all", "origin"])
+        self.run_update(&["lfs", "fetch", "--all", "origin"])
     }
 
-    fn push_mirror(&self) -> Result<(), CoreError> {
-        info!(
-            src = %self.dest.display(),
-            remote = %self.url,
-            "pushing mirror to remote"
-        );
-        run_git(
-            &self.program,
-            &["push", "--progress", "--mirror", &self.url],
-            &self.dest,
-            &self.url,
-            self.opts.token.as_deref(),
-            &self.opts,
-        )
-    }
-
-    /// Arguments that bring an existing clone up to date with its remote.
+    /// Runs `git fetch --progress <prune flags> <rest>` in the existing
+    /// repository.
     ///
-    /// `git fetch --all` is used rather than `git remote update` because it
-    /// accepts `--progress`; on a mirror clone the two yield identical refs
-    /// (including force-pushed branches and deleted tags with `--prune`).
-    fn fetch_all_args(&self) -> &'static [&'static str] {
-        if self.opts.prune {
-            &["fetch", "--progress", "--all", "--prune"]
-        } else {
-            &["fetch", "--progress", "--all"]
-        }
-    }
-
-    /// Runs an update command inside the existing repository.
+    /// The prune flags are always explicit: `--prune` when pruning was asked
+    /// for, `--no-prune --no-prune-tags` otherwise.  Leaving them out would let
+    /// a `fetch.prune`, `remote.<name>.prune` or `fetch.pruneTags` setting in
+    /// the user's or the system's git configuration delete refs that this
+    /// tool promises to keep.
     ///
     /// Not pruning has one failure mode: when a branch that was deleted on the
     /// remote is replaced by one whose name needs its place as a directory
     /// (`foo` deleted, `foo/bar` created), git cannot create the new ref while
     /// the stale one exists.  Such a fetch is repeated once with `--prune`, so
     /// the repository keeps being backed up; it loses only the stale refs.
-    fn update(&self, args: &[&str]) -> Result<(), CoreError> {
-        match self.run_update(args) {
+    fn fetch(&self, rest: &[&str]) -> Result<(), CoreError> {
+        remove_stale_locks(&self.dest, self.stale_lock_age());
+        let run = |prune: bool| {
+            let mut args = vec!["fetch", "--progress"];
+            if prune {
+                args.push("--prune");
+            } else {
+                args.extend(["--no-prune", "--no-prune-tags"]);
+            }
+            args.extend_from_slice(rest);
+            self.run_update(&args)
+        };
+        match run(self.opts.prune) {
             Err(CoreError::GitFailed { stderr, .. })
-                if !self.opts.prune
-                    && args.first() == Some(&"fetch")
-                    && is_ref_name_conflict(&stderr) =>
+                if !self.opts.prune && is_ref_name_conflict(&stderr) =>
             {
                 warn!(
                     dest = %self.dest.display(),
                     "a deleted branch blocks a new one of the same path; pruning deleted refs once to continue"
                 );
-                let mut retry = args.to_vec();
-                retry.insert(1, "--prune");
-                self.run_update(&retry)
+                run(true)
             }
             other => other,
         }
     }
 
+    /// How old a `.lock` file must be to count as left behind by a git that
+    /// was killed.
+    ///
+    /// git holds a lock for the moment it takes to write one file.  The owner
+    /// lock keeps other runs of this tool away from the repository, and any git
+    /// this tool runs is stopped after the stall limit; a lock older than that
+    /// limit therefore belongs to no live git of ours, and removing it is what
+    /// lets the update proceed (git asks for exactly that).
+    fn stale_lock_age(&self) -> Duration {
+        Duration::from_secs(self.opts.stall_timeout_secs)
+    }
+
+    /// With [`CloneOptions::run_fsck`], checks the repository at `repo` (the
+    /// destination, or the staging directory of a fresh clone) with `git fsck`.
+    ///
+    /// The check runs like any other git command: supervised for stalls
+    /// (`--progress` keeps a long check alive), cancellable, with bounded
+    /// output.  A failed check is [`CoreError::GitFsckFailed`].
+    fn verify(&self, repo: &Path) -> Result<(), CoreError> {
+        if !self.opts.run_fsck {
+            return Ok(());
+        }
+        debug!(repo = %self.dest.display(), "checking the repository with git fsck");
+        match run_git(
+            &self.git,
+            &["fsck", "--progress", "--no-dangling"],
+            repo,
+            "",
+            None,
+            &self.opts,
+        ) {
+            Err(CoreError::GitFailed { stderr, .. }) => Err(CoreError::GitFsckFailed {
+                repo: self.dest.display().to_string(),
+                output: stderr,
+            }),
+            other => other,
+        }
+    }
+
+    /// Brings the working tree of a full clone to the commit its checked-out
+    /// branch now points to.
+    ///
+    /// Nothing is done when that branch does not resolve: the repository is
+    /// empty, or (with pruning) the branch was deleted upstream; the working
+    /// tree is then left as it was.
+    fn check_out_head(&self) -> Result<(), CoreError> {
+        match self.run_update(&["rev-parse", "--verify", "--quiet", "HEAD"]) {
+            Ok(()) => self.run_update(&["reset", "--hard", "--quiet", "HEAD"]),
+            Err(CoreError::GitFailed { .. }) => {
+                info!(
+                    dest = %self.dest.display(),
+                    "the checked-out branch has no commit (empty repository, or deleted upstream); working tree left as it was"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn run_update(&self, args: &[&str]) -> Result<(), CoreError> {
         run_git(
-            &self.program,
+            &self.git,
             args,
             &self.dest,
             &self.url,
@@ -506,7 +589,8 @@ impl Job {
     /// half-initialised repository that later updates would treat as complete
     /// and "fetch" nothing into forever.
     ///
-    /// `args_for` receives the staging path and returns git's arguments.
+    /// `args` are git's arguments, with [`DEST`] standing for the staging
+    /// directory.
     fn fresh_clone(&self, args: &[&str]) -> Result<(), CoreError> {
         let parent = self.dest.parent().unwrap_or_else(|| Path::new("."));
         let name = self
@@ -528,17 +612,16 @@ impl Job {
             .collect();
 
         let result = run_git(
-            &self.program,
+            &self.git,
             &args,
             Path::new("."),
             &self.url,
             self.opts.token.as_deref(),
             &self.opts,
         )
+        // A clone that fails its check is not moved into place.
+        .and_then(|()| self.verify(&staging))
         .and_then(|()| {
-            if self.opts.run_fsck {
-                run_fsck(&self.program, &staging);
-            }
             std::fs::rename(&staging, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
         });
 
@@ -562,6 +645,54 @@ const DEST: &str = "\0dest";
 
 /// Infix of a staging directory's name: `.<repo>.git.partial-<pid>`.
 const STAGING_MARKER: &str = ".partial-";
+
+/// Removes the `.lock` files older than `min_age` from the git directory of
+/// the repository at `repo` (`repo/.git` for a working-tree clone): those at
+/// its top level (`HEAD.lock`, `packed-refs.lock`, `config.lock`,
+/// `shallow.lock`, `index.lock`, ...) and those under `refs/`.
+///
+/// A git that is killed with `SIGKILL` (by the OOM killer, or with the whole
+/// container) leaves its lock files behind, and every later update of the
+/// repository then fails with "Unable to create '...lock': File exists".
+fn remove_stale_locks(repo: &Path, min_age: Duration) {
+    let dot_git = repo.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        repo.to_path_buf()
+    };
+    let mut dirs = vec![(git_dir.clone(), false), (git_dir.join("refs"), true)];
+    while let Some((dir, recurse)) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if recurse {
+                    dirs.push((path, true));
+                }
+                continue;
+            }
+            let is_lock = path.extension().is_some_and(|ext| ext == "lock");
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| SystemTime::now().duration_since(m).ok());
+            if is_lock && age.is_some_and(|age| age >= min_age) {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        warn!(file = %path.display(), "removed a stale git lock file left by a killed git")
+                    }
+                    Err(e) => {
+                        warn!(file = %path.display(), error = %e, "could not remove a stale git lock file")
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Removes every `.<name>.partial-*` sibling in `parent`.
 fn remove_stale_staging(parent: &Path, name: &str) {
@@ -591,55 +722,30 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
     })
 }
 
-/// Runs `git fsck --no-dangling` on `repo_dir` and logs any issues found.
-///
-/// Corruption is not treated as a fatal error — the backup has already
-/// completed — but the issues are logged at `warn` level so operators can
-/// investigate.
-fn run_fsck(program: &Path, repo_dir: &Path) {
-    debug!(repo = %repo_dir.display(), "running git fsck");
-    let output = Command::new(program)
-        .args(["fsck", "--no-dangling"])
-        .current_dir(repo_dir)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            debug!(repo = %repo_dir.display(), "git fsck: clean");
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let combined = format!("{stdout}{stderr}");
-            warn!(
-                repo = %repo_dir.display(),
-                output = %combined.chars().take(512).collect::<String>(),
-                "git fsck reported issues after clone"
-            );
-        }
-        Err(e) => {
-            warn!(
-                repo = %repo_dir.display(),
-                error = %e,
-                "could not run git fsck (git binary issue?)"
-            );
-        }
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// `true` if a failed fetch was blocked by a stale ref occupying the name a
 /// new ref needs (a directory/file clash between `foo` and `foo/bar`).
+///
+/// Only that clash qualifies.  "cannot lock ref" alone also covers a lock
+/// file left by a killed git ("Unable to create '...main.lock': File
+/// exists"), which pruning cannot fix: it would delete kept refs and fail
+/// again.
 fn is_ref_name_conflict(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    lower.contains("cannot lock ref") || lower.contains("git remote prune")
+    stderr.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        (line.contains("cannot lock ref")
+            && (line.contains("' exists; cannot create '") || line.contains("blocking reference")))
+            // git's own advice, printed for this clash only.
+            || line.contains("'git remote prune")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::spy::SpyGitRunner;
     use super::*;
+    use crate::cancel::CancelFlag;
     use std::time::{Duration, Instant};
 
     fn opts() -> CloneOptions {
@@ -698,35 +804,20 @@ mod tests {
         assert_eq!(calls[0].method, "mirror_clone");
     }
 
-    #[tokio::test]
-    async fn spy_runner_push_mirror() {
-        let runner = SpyGitRunner::default();
-        let src = PathBuf::from("/tmp/local.git");
-        runner
-            .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
-            .await
-            .expect("push mirror");
-        let calls = runner.recorded_calls();
-        assert_eq!(calls[0].method, "push_mirror");
-    }
-
     // ── Process handling (stand-in `git` scripts, Unix only) ─────────────
     //
     // Cancellation (`CloneOptions::cancel`) is covered by the integration test
     // `tests/git_cancel.rs`.
 
-    /// Writes an executable shell script into `dir` and returns a runner that
-    /// executes it instead of the real `git`.
+    /// Writes a shell script into `dir` and returns a runner that runs it
+    /// instead of the real `git`.
     #[cfg(unix)]
     fn runner_with_script(dir: &Path, body: &str) -> ProcessGitRunner {
-        use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-git");
         // Like real git, a `clone` creates its destination (the last argument).
         let prelude = r#"if [ "$1" = clone ] || [ "$1" = lfs ]; then for d in "$@"; do :; done; mkdir -p "$d"; fi"#;
-        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\n{body}\n")).expect("write script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-        ProcessGitRunner::with_program(script)
+        std::fs::write(&script, format!("{prelude}\n{body}\n")).expect("write script");
+        ProcessGitRunner::with_shell_script(script)
     }
 
     /// Drops the global `-c key=value` options git is run with, leaving the
@@ -967,9 +1058,11 @@ exit 128"#,
             .await
             .expect("update");
         let args = std::fs::read_to_string(&seen).expect("args");
-        assert!(args.contains("+refs/heads/*:refs/heads/*"), "{args}");
-        assert!(args.contains("+refs/tags/*:refs/tags/*"), "{args}");
-        assert!(!args.contains("--prune"), "pruning is opt-in: {args}");
+        let words: Vec<&str> = args.split_whitespace().collect();
+        assert!(words.contains(&"+refs/heads/*:refs/heads/*"), "{args}");
+        assert!(words.contains(&"+refs/tags/*:refs/tags/*"), "{args}");
+        assert!(!words.contains(&"--prune"), "pruning is opt-in: {args}");
+        assert!(words.contains(&"--no-prune"), "{args}");
 
         // With pruning requested the same update passes `--prune`.
         let opts = CloneOptions {
@@ -981,7 +1074,9 @@ exit 128"#,
             .await
             .expect("update");
         let args = std::fs::read_to_string(&seen).expect("args");
-        assert!(args.contains("--prune"), "{args}");
+        let words: Vec<&str> = args.split_whitespace().collect();
+        assert!(words.contains(&"--prune"), "{args}");
+        assert!(!words.contains(&"--no-prune"), "{args}");
     }
 
     /// LFS mode is a mirror (so refs advance on every run) plus the LFS objects.
@@ -1000,7 +1095,10 @@ exit 128"#,
             .expect("update");
         let calls = std::fs::read_to_string(&seen).expect("calls");
         let lines: Vec<String> = calls.lines().map(subcommand).collect();
-        assert!(lines[0].starts_with("fetch --progress --all"), "{lines:?}");
+        assert_eq!(
+            lines[0], "fetch --progress --no-prune --no-prune-tags --all",
+            "{lines:?}"
+        );
         assert_eq!(lines[1], "lfs fetch --all origin", "{lines:?}");
     }
 
@@ -1015,6 +1113,7 @@ exit 128"#,
             dir.path(),
             &format!(
                 r#"{{ echo "prompt=$GIT_TERMINAL_PROMPT"; echo "lc=$LC_ALL"; \
+echo "lfs=$GIT_LFS_FORCE_PROGRESS"; echo "ssh=$GIT_SSH_COMMAND"; \
 if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
                 seen.display()
             ),
@@ -1028,6 +1127,184 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
         assert!(text.contains("prompt=0"), "{text}");
         assert!(text.contains("lc=C"), "{text}");
         assert!(text.contains("stdin=none"), "{text}");
+        // git-lfs prints no progress without a terminal, which looked like a
+        // stall to the supervisor.
+        assert!(text.contains("lfs=1"), "{text}");
+        assert!(
+            text.contains("ssh=\n"),
+            "HTTPS needs no SSH command: {text}"
+        );
+    }
+
+    /// Regression: with `--prefer-ssh`, ssh asked about an unknown host key or
+    /// a key passphrase on the controlling terminal, and git, in a background
+    /// process group, was stopped by `SIGTTIN` for good.  ssh now runs in
+    /// batch mode unless the user configured an SSH command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_runs_in_batch_mode_unless_the_user_chose_a_command() {
+        if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return; // the user's choice wins; nothing to observe here
+        }
+        for (configured, expected) in [(false, "ssh -o BatchMode=yes"), (true, "")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let seen = dir.path().join("seen.txt");
+            let config_status = if configured { 0 } else { 1 };
+            let runner = runner_with_script(
+                dir.path(),
+                &format!(
+                    r#"if [ "$1" = config ]; then exit {config_status}; fi
+echo "ssh=$GIT_SSH_COMMAND" > '{}'"#,
+                    seen.display()
+                ),
+            );
+            runner
+                .mirror_clone(
+                    "git@github.com:o/r.git",
+                    &dir.path().join("r.git"),
+                    &with_stall(10),
+                )
+                .await
+                .expect("ok");
+            let text = std::fs::read_to_string(&seen).expect("script output");
+            assert_eq!(
+                text.trim(),
+                format!("ssh={expected}"),
+                "core.sshCommand configured: {configured}"
+            );
+        }
+    }
+
+    /// Regression: a stopped git was sent `SIGKILL` at once, so it never
+    /// removed its `.lock` files and every later update of the repository
+    /// failed.  The process group now gets `SIGTERM` and a grace period.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_git_gets_sigterm_and_time_to_clean_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = dir.path().join("started");
+        let cleaned = dir.path().join("cleaned");
+        let runner = runner_with_script(
+            dir.path(),
+            &format!(
+                "trap 'touch \"{}\"; exit 143' TERM\ntouch '{}'\nsleep 30 &\nwait",
+                cleaned.display(),
+                started.display()
+            ),
+        );
+        let cancel = CancelFlag::new();
+        let opts = CloneOptions {
+            cancel: cancel.clone(),
+            ..with_stall(60)
+        };
+        let dest = dir.path().join("repo.git");
+        let task = {
+            let runner = runner.clone();
+            let dest = dest.clone();
+            let opts = opts.clone();
+            tokio::spawn(async move {
+                runner
+                    .mirror_clone("https://example.invalid/r.git", &dest, &opts)
+                    .await
+            })
+        };
+        let t0 = Instant::now();
+        while !started.exists() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cancel.cancel();
+        let result = task.await.expect("no panic");
+        assert!(matches!(result, Err(CoreError::Interrupted)), "{result:?}");
+        assert!(
+            cleaned.exists(),
+            "the child must get SIGTERM, not only SIGKILL"
+        );
+    }
+
+    /// `run_fsck` checks every clone and update; a failed check is reported
+    /// as `GitFsckFailed` and a fresh clone that fails is not kept.  Without
+    /// it no check runs.  (It used to be logged only, after fresh clones only,
+    /// unsupervised, and nothing could switch it on.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verification_reports_a_failed_fsck_and_discards_a_bad_fresh_clone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.txt");
+        let runner = runner_with_script(
+            dir.path(),
+            &format!(
+                r#"echo "$@" >> '{}'
+case " $* " in *" fsck "*) echo "error: object 1234 is corrupt" >&2; exit 2;; esac"#,
+                log.display()
+            ),
+        );
+        let checked = CloneOptions {
+            run_fsck: true,
+            ..with_stall(10)
+        };
+        let url = "https://example.invalid/r.git";
+
+        let fresh = dir.path().join("fresh.git");
+        let err = runner
+            .mirror_clone(url, &fresh, &checked)
+            .await
+            .expect_err("a clone that fails its check fails");
+        match &err {
+            CoreError::GitFsckFailed { repo, output } => {
+                assert_eq!(repo, &fresh.display().to_string());
+                assert!(output.contains("is corrupt"), "{output}");
+            }
+            other => panic!("expected GitFsckFailed, got {other:?}"),
+        }
+        assert!(!fresh.exists(), "a clone that failed its check is not kept");
+        assert!(staging_dirs(dir.path()).is_empty());
+
+        let existing = dir.path().join("existing.git");
+        std::fs::create_dir(&existing).expect("mkdir");
+        for method in ["mirror", "bare", "full", "shallow"] {
+            let result = match method {
+                "mirror" => runner.mirror_clone(url, &existing, &checked).await,
+                "bare" => runner.bare_clone(url, &existing, &checked).await,
+                "full" => runner.full_clone(url, &existing, &checked).await,
+                _ => runner.shallow_clone(url, &existing, &checked, 1).await,
+            };
+            assert!(
+                matches!(result, Err(CoreError::GitFsckFailed { .. })),
+                "{method}: {result:?}"
+            );
+        }
+
+        std::fs::remove_file(&log).expect("reset log");
+        runner
+            .mirror_clone(url, &existing, &with_stall(10))
+            .await
+            .expect("no check, no failure");
+        let calls = std::fs::read_to_string(&log).expect("calls");
+        assert!(!calls.contains("fsck"), "{calls}");
+    }
+
+    /// A child that ignores `SIGTERM` is still stopped, after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_ignoring_sigterm_is_killed_after_the_grace_period() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = runner_with_script(dir.path(), "trap '' TERM\nwhile :; do sleep 1; done");
+        let started = Instant::now();
+        let err = runner
+            .mirror_clone(
+                "https://example.invalid/r.git",
+                &dir.path().join("r.git"),
+                &with_stall(1),
+            )
+            .await
+            .expect_err("stopped");
+        assert!(matches!(err, CoreError::GitTimeout { .. }), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// Network operations pass `--progress` so a stall can be told apart from
@@ -1055,8 +1332,8 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
         assert_eq!(lines.len(), 2, "{argv}");
         assert!(lines[0].starts_with("clone --progress --mirror "), "{argv}");
         assert_eq!(
-            lines[1], "fetch --progress --all",
-            "pruning is opt-in: {argv}"
+            lines[1], "fetch --progress --no-prune --no-prune-tags --all",
+            "pruning is opt-in, and not pruning is explicit: {argv}"
         );
 
         // `prune` adds `--prune` to the update (and only to the update).
@@ -1070,7 +1347,7 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
             .expect("pruning update");
         let argv = std::fs::read_to_string(&log).expect("argv log");
         let last = argv.lines().map(subcommand).next_back().expect("a call");
-        assert_eq!(last, "fetch --progress --all --prune", "{argv}");
+        assert_eq!(last, "fetch --progress --prune --all", "{argv}");
     }
 }
 
@@ -1166,20 +1443,18 @@ mod credential_tests {
     /// the child's environment, and the helper list is reset first.
     #[tokio::test]
     async fn token_is_never_in_argv_and_no_file_is_created() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let seen = dir.path().join("seen.txt");
         let script = dir.path().join("fake-git");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\n{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
+                "{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
                 seen.display()
             ),
         )
         .expect("write");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let runner = ProcessGitRunner::with_program(&script);
+        let runner = ProcessGitRunner::with_shell_script(&script);
         runner
             .mirror_clone(
                 "https://ghes.example.com/o/r.git",
@@ -1298,12 +1573,15 @@ mod credential_tests {
         assert!(server.auth_headers().is_empty());
     }
 
+    /// A runner whose `git` is the shell script `body`, run through `sh`.
+    ///
+    /// Regression (CI flake): the script used to be written, made executable
+    /// and `exec`ed, which fails with "Text file busy" when another test forks
+    /// while the file is still open for writing.
     fn fake_git(dir: &Path, body: &str) -> ProcessGitRunner {
-        use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-git-2");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        ProcessGitRunner::with_program(script)
+        std::fs::write(&script, format!("{body}\n")).expect("write");
+        ProcessGitRunner::with_shell_script(script)
     }
 
     /// Updating a repository we manage trusts exactly that path (never `*`),
@@ -1448,17 +1726,284 @@ mod prune_tests {
         assert!(!now.contains(&"foo".to_owned()), "{now:?}");
     }
 
+    fn has_ref(repo: &Path, name: &str) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .current_dir(repo)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run git")
+            .success()
+    }
+
+    /// Updates `dest` with every clone type, the way the engine does.
+    async fn update_as(
+        runner: &ProcessGitRunner,
+        kind: &str,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
+        match kind {
+            "mirror" => runner.mirror_clone(url, dest, opts).await,
+            "bare" => runner.bare_clone(url, dest, opts).await,
+            "full" => runner.full_clone(url, dest, opts).await,
+            "shallow" => runner.shallow_clone(url, dest, opts, 1).await,
+            other => panic!("unknown clone type {other}"),
+        }
+    }
+
+    /// Regression: with pruning off, updates passed no prune flag at all, so a
+    /// `fetch.prune` / `fetch.pruneTags` / `remote.<name>.prune` setting in the
+    /// user's git configuration silently deleted the refs the tool keeps.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_users_prune_settings_cannot_delete_kept_refs() {
+        for kind in ["mirror", "bare", "full", "shallow"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let url = origin_with_branches(dir.path(), &["feature"]);
+            let origin = dir.path().join("origin");
+            git(&origin, &["tag", "v1"]);
+            let dest = dir.path().join("clone");
+            let plain = ProcessGitRunner::new();
+            let opts = CloneOptions::unauthenticated();
+            update_as(&plain, kind, &url, &dest, &opts)
+                .await
+                .expect("clone");
+            assert!(has_ref(&dest, "refs/tags/v1"), "{kind}: tag not cloned");
+            let cloned = if kind == "full" {
+                "refs/remotes/origin/feature"
+            } else {
+                "refs/heads/feature"
+            };
+            assert!(has_ref(&dest, cloned), "{kind}: branch not cloned");
+
+            git(&origin, &["branch", "-D", "feature"]);
+            git(&origin, &["tag", "-d", "v1"]);
+
+            // git as the user has it configured.
+            let config = dir.path().join("gitconfig");
+            std::fs::write(
+                &config,
+                "[fetch]\n\tprune = true\n\tpruneTags = true\n[remote \"origin\"]\n\tprune = true\n\tpruneTags = true\n",
+            )
+            .expect("config");
+            let wrapper = dir.path().join("git-with-user-config");
+            std::fs::write(
+                &wrapper,
+                format!("GIT_CONFIG_GLOBAL='{}' exec git \"$@\"\n", config.display()),
+            )
+            .expect("wrapper");
+            let configured = ProcessGitRunner::with_shell_script(&wrapper);
+            update_as(&configured, kind, &url, &dest, &opts)
+                .await
+                .expect("update");
+
+            let branch = if kind == "full" {
+                "refs/remotes/origin/feature"
+            } else {
+                "refs/heads/feature"
+            };
+            assert!(has_ref(&dest, branch), "{kind}: {branch} was pruned");
+            assert!(has_ref(&dest, "refs/tags/v1"), "{kind}: tag v1 was pruned");
+        }
+    }
+
+    /// Regression: updating a full clone moved only `refs/remotes/origin/*`;
+    /// the working tree, the local branches and moved tags stayed at the state
+    /// of the first clone forever.
+    #[tokio::test]
+    async fn a_full_clone_update_brings_checkout_branches_and_tags_upstream() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = origin_with_branches(dir.path(), &[]);
+        let origin = dir.path().join("origin");
+        std::fs::write(origin.join("file.txt"), "one\n").expect("write");
+        git(&origin, &["add", "file.txt"]);
+        git(&origin, &["commit", "-q", "-m", "one"]);
+        git(&origin, &["tag", "release"]);
+        let dest = dir.path().join("full");
+        let runner = ProcessGitRunner::new();
+        let opts = CloneOptions::unauthenticated();
+        runner.full_clone(&url, &dest, &opts).await.expect("clone");
+
+        std::fs::write(origin.join("file.txt"), "two\n").expect("write");
+        git(&origin, &["commit", "-q", "-am", "two"]);
+        git(&origin, &["tag", "-f", "release"]);
+        git(&origin, &["branch", "topic"]);
+        runner.full_clone(&url, &dest, &opts).await.expect("update");
+
+        let upstream = git(&origin, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("file.txt")).expect("read"),
+            "two\n",
+            "the working tree must follow upstream"
+        );
+        assert_eq!(git(&dest, &["rev-parse", "HEAD"]), upstream);
+        assert_eq!(git(&dest, &["rev-parse", "refs/heads/main"]), upstream);
+        assert_eq!(
+            git(&dest, &["rev-parse", "refs/tags/release^{commit}"]),
+            upstream,
+            "a moved tag must move"
+        );
+        assert!(has_ref(&dest, "refs/heads/topic"), "new branches appear");
+        assert!(
+            git(&dest, &["status", "--porcelain"]).is_empty(),
+            "the checkout must be clean"
+        );
+    }
+
+    /// With verification on, healthy clones and updates of every kind pass
+    /// `git fsck` (the arguments are ones real git accepts, also in a
+    /// working-tree clone).
+    #[tokio::test]
+    async fn verification_passes_healthy_repositories_with_real_git() {
+        for kind in ["mirror", "bare", "full", "shallow"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let url = origin_with_branches(dir.path(), &["feature"]);
+            let dest = dir.path().join("clone");
+            let opts = CloneOptions {
+                run_fsck: true,
+                ..CloneOptions::unauthenticated()
+            };
+            let runner = ProcessGitRunner::new();
+            update_as(&runner, kind, &url, &dest, &opts)
+                .await
+                .unwrap_or_else(|e| panic!("{kind} clone: {e}"));
+            update_as(&runner, kind, &url, &dest, &opts)
+                .await
+                .unwrap_or_else(|e| panic!("{kind} update: {e}"));
+        }
+    }
+
+    /// An empty upstream repository has nothing to check out; updating its
+    /// full clone must not fail.
+    #[tokio::test]
+    async fn a_full_clone_of_an_empty_repository_updates_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = dir.path().join("empty.git");
+        std::fs::create_dir(&origin).expect("mkdir");
+        git(&origin, &["init", "-q", "--bare"]);
+        let url = format!("file://{}", origin.display());
+        let dest = dir.path().join("full");
+        let runner = ProcessGitRunner::new();
+        let opts = CloneOptions::unauthenticated();
+        runner.full_clone(&url, &dest, &opts).await.expect("clone");
+        runner.full_clone(&url, &dest, &opts).await.expect("update");
+    }
+
     #[test]
     fn only_ref_name_clashes_trigger_the_pruning_retry() {
+        // What git 2.43 prints for both directions of the clash.
         assert!(is_ref_name_conflict(
-            "error: cannot lock ref 'refs/heads/foo/bar': 'refs/heads/foo' exists"
+            "error: cannot lock ref 'refs/heads/foo/bar': 'refs/heads/foo' exists; cannot create 'refs/heads/foo/bar'"
         ));
         assert!(is_ref_name_conflict(
-            "error: some local refs could not be updated; try running\n 'git remote prune origin'"
+            "error: cannot lock ref 'refs/heads/x': 'refs/heads/x/y' exists; cannot create 'refs/heads/x'"
+        ));
+        assert!(is_ref_name_conflict(
+            "error: cannot lock ref 'refs/heads/x': there is a non-empty directory '/b/refs/heads/x' blocking reference 'refs/heads/x'"
+        ));
+        assert!(is_ref_name_conflict(
+            "error: some local refs could not be updated; try running\n 'git remote prune origin' to remove any old, conflicting branches"
         ));
         assert!(!is_ref_name_conflict("fatal: repository not found"));
         assert!(!is_ref_name_conflict(
             "fatal: unable to access: could not resolve host"
         ));
+        // A lock file left by a killed git is not a name clash: pruning
+        // would delete kept refs and fail again.
+        assert!(!is_ref_name_conflict(
+            "error: cannot lock ref 'refs/heads/main': Unable to create '/b/r.git/./refs/heads/main.lock': File exists.\n\
+             \nAnother git process seems to be running in this repository, e.g.\n\
+             an editor opened by 'git commit'. Please make sure all processes\n\
+             are terminated then try again. If it still fails, a git process\n\
+             may have crashed in this repository earlier:\n\
+             remove the file manually to continue.\n\
+              ! 05e71f7..93011c4  main       -> main  (unable to update local ref)"
+        ));
+    }
+
+    /// Ages `path` by `secs` seconds.
+    fn backdate(path: &Path, secs: u64) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open");
+        file.set_modified(SystemTime::now() - Duration::from_secs(secs))
+            .expect("set mtime");
+    }
+
+    /// Regression: a git killed with `SIGKILL` leaves `refs/heads/main.lock`;
+    /// the "cannot lock ref" error was taken for a name clash, the update was
+    /// retried with `--prune` (deleting kept refs) and failed again on every
+    /// run.  A lock older than the stall limit is now removed first; a recent
+    /// one is left alone and the failure is reported, refs intact.
+    #[tokio::test]
+    async fn a_stale_ref_lock_is_removed_and_a_recent_one_is_not_pruned_around() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = origin_with_branches(dir.path(), &["kept"]);
+        let origin = dir.path().join("origin");
+        let dest = dir.path().join("mirror.git");
+        mirror(&url, &dest, false).await.expect("clone");
+        git(&origin, &["branch", "-D", "kept"]);
+        git(&origin, &["commit", "-q", "--allow-empty", "-m", "next"]);
+
+        // A lock left by a git that is still (or was very recently) running.
+        let lock = dest.join("refs").join("heads").join("main.lock");
+        std::fs::write(&lock, "").expect("lock");
+        let err = mirror(&url, &dest, false)
+            .await
+            .expect_err("a held lock fails the update");
+        assert!(
+            err.to_string().contains("hint: a git process holds"),
+            "{err}"
+        );
+        assert!(lock.exists(), "a recent lock must not be removed");
+        assert!(
+            refs(&dest).contains(&"kept".to_owned()),
+            "the failure must not be 'fixed' by pruning: {:?}",
+            refs(&dest)
+        );
+
+        // The same lock, left by a git killed long ago.
+        backdate(&lock, 2 * DEFAULT_STALL_TIMEOUT_SECS);
+        mirror(&url, &dest, false).await.expect("update");
+        assert!(!lock.exists());
+        assert_eq!(
+            git(&dest, &["rev-parse", "main"]),
+            git(&origin, &["rev-parse", "main"])
+        );
+        assert!(refs(&dest).contains(&"kept".to_owned()));
+    }
+
+    #[test]
+    fn only_old_lock_files_in_the_git_directory_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("work");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/heads/feature")).expect("mkdir");
+        let old = [
+            git_dir.join("index.lock"),
+            git_dir.join("packed-refs.lock"),
+            git_dir.join("refs/heads/feature/x.lock"),
+        ];
+        let young = git_dir.join("HEAD.lock");
+        let not_a_lock = git_dir.join("refs/heads/main");
+        let outside = repo.join("notes.lock");
+        for path in old.iter().chain([&young, &not_a_lock, &outside]) {
+            std::fs::write(path, "").expect("write");
+        }
+        for path in old.iter().chain([&not_a_lock, &outside]) {
+            backdate(path, 3600);
+        }
+
+        remove_stale_locks(&repo, Duration::from_secs(600));
+
+        for path in &old {
+            assert!(!path.exists(), "{} must be removed", path.display());
+        }
+        assert!(young.exists(), "a recent lock may belong to a live git");
+        assert!(not_a_lock.exists());
+        assert!(outside.exists(), "the working tree is not touched");
     }
 }

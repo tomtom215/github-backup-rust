@@ -6,7 +6,9 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use github_backup_types::atomic_file;
 use serde::Serialize;
+use tracing::{info, warn};
 
 use crate::error::CoreError;
 
@@ -163,12 +165,8 @@ impl Storage for FsStorage {
 
     fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
         ensure_parent(path)?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         // Same directory as the destination, so the final rename is atomic.
-        let temp = path.with_file_name(format!(".{name}.part"));
+        let temp = atomic_file::temp_path(path, "part");
         let file = std::fs::File::create(&temp).map_err(|e| CoreError::io(temp.display(), e))?;
         Ok(Box::new(FsPendingFile {
             file: Some(file),
@@ -178,8 +176,8 @@ impl Storage for FsStorage {
     }
 }
 
-/// [`PendingFile`] backed by a temporary `.<name>.part` file next to the
-/// destination.
+/// [`PendingFile`] backed by a temporary `.<name>.part-<pid>-<n>` file next to
+/// the destination.
 struct FsPendingFile {
     file: Option<std::fs::File>,
     temp: PathBuf,
@@ -213,31 +211,54 @@ impl Drop for FsPendingFile {
     }
 }
 
-/// Writes `data` to `path` so that a reader (or a crash) never observes a
-/// half-written file: the bytes go to a uniquely named sibling temporary file
-/// which is then renamed over the destination.  `rename` is atomic on every
-/// platform and filesystem the tool supports, so after an interruption the
-/// path holds either the previous complete content or the new complete
-/// content, never a truncated JSON document.
+/// Writes `data` to `path` so that a reader, a killed process or a power cut
+/// never observes a half-written or empty file: the bytes go to a uniquely
+/// named sibling temporary file, which is synced to the disk and then renamed
+/// over the destination (see [`atomic_file`] for the details and the cost).
 ///
 /// The temporary file is removed again if the write or the rename fails.
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<(), CoreError> {
+    atomic_file::write(path, data).map_err(|e| CoreError::io(path.display(), e))
+}
+
+/// Deletes the temporary files ([`atomic_file::is_temp_name`]) that a killed
+/// run left anywhere under `root`, and returns how many were removed.
 ///
-/// The data is not `fsync`ed: the files are re-creatable metadata and a sync
-/// per file would make large backups dramatically slower.  Surviving a power
-/// cut is therefore best-effort, surviving a killed process is guaranteed.
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), CoreError> {
-    ensure_parent(path)?;
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, data).map_err(|e| CoreError::io(tmp.display(), e))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(CoreError::io(path.display(), e));
+/// Call it only while holding the lock for `root`: then no other run can be
+/// writing there, and every temporary file is a leftover.  Left in place they
+/// would end up in the manifest, the S3 upload and the disk usage.
+pub fn sweep_temp_files(root: &Path) -> usize {
+    let mut removed = 0;
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(atomic_file::is_temp_name)
+            {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        warn!(file = %entry.path().display(), error = %e, "could not remove a leftover temporary file")
+                    }
+                }
+            }
+        }
     }
-    Ok(())
+    if removed > 0 {
+        info!(root = %root.display(), removed, "removed temporary files left by an interrupted run");
+    }
+    removed
 }
 
 fn ensure_parent(path: &Path) -> Result<(), CoreError> {
@@ -516,6 +537,38 @@ mod tests {
             return;
         }
         assert_eq!(std::fs::read(&path).expect("read"), b"previous");
+    }
+
+    /// Regression: temporary files of a killed run were never removed and
+    /// ended up in the manifest and the S3 upload.
+    #[test]
+    fn leftover_temporary_files_are_swept_and_data_is_kept() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let nested = root.join("repos").join("r");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let leftovers = [
+            root.join(".repos.json.tmp-4242"),
+            nested.join(".issues.json.tmp-4242-7"),
+            nested.join(".asset.bin.part-4242-8"),
+            root.join("backup_checkpoint.tmp"),
+        ];
+        let data = [
+            root.join("repos.json"),
+            nested.join("issues.json"),
+            nested.join(".hidden"),
+        ];
+        for path in leftovers.iter().chain(&data) {
+            std::fs::write(path, b"x").expect("write");
+        }
+        assert_eq!(sweep_temp_files(root), leftovers.len());
+        for path in &leftovers {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &data {
+            assert!(path.exists(), "{}", path.display());
+        }
+        assert_eq!(sweep_temp_files(&root.join("missing")), 0);
     }
 
     #[test]

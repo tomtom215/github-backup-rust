@@ -12,7 +12,10 @@
 //!    newly starred repos into it as `Pending` items.
 //! 3. Processes every `Pending` item sequentially:
 //!    - Clones or updates the repository into `starred_dir/<owner>/<repo>.git`
-//!      using the same clone mode as owned repos (`opts.clone_type`).
+//!      using the same clone mode as owned repos (`opts.clone_type`) and the
+//!      same `--clone-host` override.  A name that is not a safe pair of path
+//!      components (a hostile or broken server) is recorded as a failure and
+//!      never cloned.
 //!    - On failure, retries up to [`MAX_ATTEMPTS`] times with exponential
 //!      backoff ([`RETRY_DELAYS_SECS`]).
 //!    - Saves the queue to disk after every item (atomic rename, crash-safe).
@@ -23,9 +26,11 @@
 //!
 //! # Resuming
 //!
-//! Re-running with `--clone-starred` picks up where the previous run stopped.
-//! `Done` items are skipped; `Failed` items remain skipped unless manually
-//! reset to `"pending"` in the queue file.
+//! Re-running with `--clone-starred` picks up where the previous run stopped:
+//! while a pass is in progress, `Done` and `Failed` items are skipped.  Once
+//! no item is `Pending`, the next run starts a new pass that refreshes every
+//! repository and retries the failed ones (see
+//! [`begin_pass`](crate::starred_queue::begin_pass)).
 //!
 //! [`MAX_ATTEMPTS`]: crate::starred_queue::MAX_ATTEMPTS
 //! [`RETRY_DELAYS_SECS`]: crate::starred_queue::RETRY_DELAYS_SECS
@@ -40,6 +45,7 @@ use github_backup_types::config::{BackupOptions, CloneType};
 use github_backup_types::starred_queue::CloneState;
 
 use crate::{
+    backup::repository::rewrite_host,
     error::CoreError,
     git::{CloneOptions, GitRunner},
     starred_queue::{self, MAX_ATTEMPTS, RETRY_DELAYS_SECS},
@@ -154,16 +160,37 @@ pub async fn backup_starred_repos(
         // Snapshot fields needed during the retry loop to avoid borrow issues.
         let full_name = queue.items[idx].full_name.clone();
         let size_kb = queue.items[idx].size_kb;
-        let url = if opts.prefer_ssh {
-            queue.items[idx].ssh_url.clone()
+        let raw_url = if opts.prefer_ssh {
+            &queue.items[idx].ssh_url
         } else {
-            queue.items[idx].clone_url.clone()
+            &queue.items[idx].clone_url
         };
+        let url = match opts.clone_host {
+            Some(ref host) => rewrite_host(raw_url, host),
+            None => raw_url.clone(),
+        };
+
+        // The name comes from the API and becomes two directory names; it
+        // must never lead outside `starred_dir`.
+        let (owner_part, name_part) = (queue.items[idx].repo_owner(), queue.items[idx].repo_name());
+        if !full_name.contains('/')
+            || !crate::paths::is_safe_component(owner_part)
+            || !crate::paths::is_safe_component(name_part)
+        {
+            let message = "repository name is not a safe owner/name pair; not cloned".to_string();
+            warn!(repo = %full_name, "{message}");
+            queue.items[idx].state = CloneState::Failed;
+            queue.items[idx].finished_at = Some(crate::time::now_utc());
+            queue.items[idx].last_error = Some(message.clone());
+            outcome.failed.push((full_name, message));
+            starred_queue::save(&mut queue, queue_path)?;
+            continue;
+        }
 
         // Destination: `<starred_dir>/<upstream-owner>/<repo>.git`
         let dest = starred_dir
-            .join(queue.items[idx].repo_owner())
-            .join(format!("{}.git", queue.items[idx].repo_name()));
+            .join(owner_part)
+            .join(format!("{name_part}.git"));
 
         info!(
             repo = %full_name,

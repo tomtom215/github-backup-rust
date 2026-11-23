@@ -44,6 +44,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+pub mod atomic_file;
 pub mod backup_state;
 pub mod branch;
 pub mod branch_protection;

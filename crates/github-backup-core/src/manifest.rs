@@ -9,7 +9,14 @@
 //! entry list) and does not cover the git clones; store a digest of the
 //! manifest elsewhere if tamper-evidence matters.  Files that record how runs
 //! went rather than what was backed up (`backup_history.json`,
-//! `backup_state.json`, the checkpoint and the lock) are left out.
+//! `backup_state.json`, the checkpoint and the lock) are left out, and so are
+//! temporary files of an unfinished write
+//! ([`is_temp_name`](github_backup_types::atomic_file::is_temp_name)).
+//!
+//! Files are hashed as a stream, so a multi-gigabyte release asset never has
+//! to fit in memory.  Entry paths use `/` as the separator on every platform,
+//! and the manifest itself is written atomically (a synced temporary file
+//! renamed into place).
 //!
 //! [`verify_manifest`] re-reads the manifest and recomputes every digest,
 //! reporting any files that are missing, added, or have changed content.
@@ -31,8 +38,10 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Component, Path};
 
+use github_backup_types::atomic_file;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::info;
@@ -40,7 +49,7 @@ use tracing::info;
 /// A single file entry in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestEntry {
-    /// Path relative to the manifest root directory.
+    /// Path relative to the manifest root directory, with `/` separators.
     pub path: String,
     /// Lowercase hex-encoded SHA-256 digest of the file contents.
     pub sha256: String,
@@ -106,7 +115,8 @@ pub fn write_manifest(root: &Path, created_at: &str) -> Result<usize, String> {
 
     let json =
         serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialise manifest: {e}"))?;
-    std::fs::write(&manifest_path, json).map_err(|e| format!("write manifest: {e}"))?;
+    atomic_file::write(&manifest_path, json.as_bytes())
+        .map_err(|e| format!("write manifest: {e}"))?;
 
     info!(
         path = %manifest_path.display(),
@@ -129,11 +139,19 @@ pub fn verify_manifest(root: &Path) -> Result<VerifyReport, String> {
     let manifest: Manifest =
         serde_json::from_str(&content).map_err(|e| format!("parse manifest: {e}"))?;
 
-    // Build a map of expected path → digest.
+    // Build a map of expected path → digest.  Manifests written on Windows
+    // by older versions used `\` as the separator.
     let expected: HashMap<String, String> = manifest
         .entries
         .into_iter()
-        .map(|e| (e.path, e.sha256))
+        .map(|e| {
+            let path = if cfg!(windows) {
+                e.path.replace('\\', "/")
+            } else {
+                e.path
+            };
+            (path, e.sha256)
+        })
         .collect();
 
     // Build a set of actual files on disk.
@@ -196,12 +214,9 @@ fn visit_dir(
         let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
         let path = entry.path();
 
-        if path == exclude
-            || (dir == root
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|n| OPERATIONAL_FILES.contains(&n)))
+        let name = entry.file_name();
+        let name = name.to_str();
+        if path == exclude || (dir == root && name.is_some_and(|n| OPERATIONAL_FILES.contains(&n)))
         {
             continue;
         }
@@ -210,17 +225,13 @@ fn visit_dir(
 
         if ft.is_dir() {
             visit_dir(root, &path, exclude, out)?;
-        } else if ft.is_file() {
+        } else if ft.is_file() && !name.is_some_and(atomic_file::is_temp_name) {
             let digest = hash_file(&path)?;
             let rel = path
                 .strip_prefix(root)
                 .map_err(|e| format!("strip prefix: {e}"))?;
-            let rel_str = rel
-                .to_str()
-                .ok_or_else(|| format!("non-UTF-8 path: {}", path.display()))?
-                .to_string();
             out.push(ManifestEntry {
-                path: rel_str,
+                path: portable(rel).ok_or_else(|| format!("non-UTF-8 path: {}", path.display()))?,
                 sha256: digest,
             });
         }
@@ -229,10 +240,35 @@ fn visit_dir(
     Ok(())
 }
 
-/// Returns the hex-encoded SHA-256 digest of the file at `path`.
+/// `rel` with its components joined by `/`, whatever the platform's separator;
+/// `None` if a component is not UTF-8.
+fn portable(rel: &Path) -> Option<String> {
+    let parts: Option<Vec<&str>> = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect();
+    parts.map(|parts| parts.join("/"))
+}
+
+/// Returns the hex-encoded SHA-256 digest of the file at `path`, reading it in
+/// chunks (release assets can be larger than the memory available).
 fn hash_file(path: &Path) -> Result<String, String> {
-    let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    Ok(lower_hex(&Sha256::digest(&data)))
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        }
+    }
+    Ok(lower_hex(&hasher.finalize()))
 }
 
 /// Returns the hex-encoded SHA-256 digest of `data` bytes.
@@ -443,6 +479,85 @@ mod tests {
         let report = verify_manifest(root).expect("verify");
         assert!(report.is_clean());
         assert_eq!(report.ok, 4, "ok counter must increment per matching file");
+    }
+
+    /// Regression: temporary files of an unfinished write were hashed into
+    /// the manifest (and then reported as missing once swept).
+    #[test]
+    fn temporary_files_are_neither_listed_nor_reported_as_unexpected() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("repos/r/releases/v1")).expect("mkdir");
+        std::fs::write(root.join("repos/r/issues.json"), b"[]").expect("data");
+        std::fs::write(root.join(".repos.json.tmp-12-3"), b"partial").expect("tmp");
+        std::fs::write(
+            root.join("repos/r/releases/v1/.big.bin.part-12-4"),
+            b"partial",
+        )
+        .expect("part");
+        write_manifest(root, &iso_now()).expect("manifest");
+        let manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(root.join(MANIFEST_FILENAME)).expect("read"))
+                .expect("parse");
+        let paths: Vec<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["repos/r/issues.json"]);
+
+        std::fs::write(root.join("repos/r/.issues.json.tmp-12-9"), b"partial").expect("tmp");
+        let report = verify_manifest(root).expect("verify");
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    /// Entry paths use `/` on every platform, so a manifest verifies wherever
+    /// the backup is restored.
+    #[test]
+    fn entry_paths_use_forward_slashes() {
+        let rel = Path::new("repos").join("r").join("issues.json");
+        assert_eq!(portable(&rel).as_deref(), Some("repos/r/issues.json"));
+        assert_eq!(portable(Path::new("a.json")).as_deref(), Some("a.json"));
+    }
+
+    /// Hashing streams the file: the digest of a file larger than the read
+    /// buffer matches the digest of its bytes.
+    #[test]
+    fn large_files_are_hashed_in_chunks_to_the_same_digest() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("asset.bin");
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &data).expect("write");
+        assert_eq!(hash_file(&path).expect("hash"), sha256_hex(&data));
+    }
+
+    /// A manifest written by an earlier version (same format) still verifies.
+    #[test]
+    fn a_manifest_from_an_earlier_version_still_verifies() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("repos/r")).expect("mkdir");
+        std::fs::write(root.join("repos/r/issues.json"), b"[1]").expect("data");
+        let old = serde_json::json!({
+            "tool_version": "0.3.0",
+            "created_at": "2026-01-01T00:00:00Z",
+            "root": root.display().to_string(),
+            "entries": [{"path": "repos/r/issues.json", "sha256": sha256_hex(b"[1]")}],
+        });
+        std::fs::write(root.join(MANIFEST_FILENAME), old.to_string()).expect("manifest");
+        let report = verify_manifest(root).expect("verify");
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.ok, 1);
+    }
+
+    #[test]
+    fn the_manifest_is_written_without_leaving_a_temporary_file() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.json"), b"x").expect("write");
+        write_manifest(dir.path(), &iso_now()).expect("first");
+        write_manifest(dir.path(), &iso_now()).expect("second");
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.json", MANIFEST_FILENAME]);
     }
 
     #[test]
