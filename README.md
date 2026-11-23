@@ -237,7 +237,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Issues and pull requests | Lists, comments, events, commits and reviews as GitHub's complete JSON |
 | Releases | Metadata plus optional asset download (streamed, verified) |
 | Gists and wikis | Owned gists and wikis cloned; starred gists as metadata |
-| Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, advisories, Actions, environments, packages |
+| Metadata | Topics, branches and protection rules, labels, milestones, hooks, deploy keys, collaborators, advisories, Actions, environments, packages, Discussions (with comments and replies, through GraphQL) |
 | User and org data | Starred, watched, followers, following, org members and teams |
 | Repo filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
 | Incremental | Per-repository watermarks; lists always fetched in full and merged; `--full` to refresh everything |
@@ -253,8 +253,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Dry run | `--dry-run` lists what would be backed up and writes nothing |
 | Monitoring | JSON report, Prometheus textfile metrics, webhook, run history |
 
-Not backed up: **Discussions and Projects** (no REST endpoints; the flags do
-nothing), Actions secrets, code-scanning and Dependabot alerts, issue
+Not backed up: Actions secrets, code-scanning and Dependabot alerts, issue
 attachments, and repository clones in S3.  See
 [the limits](https://tomtom215.github.io/github-backup-rust/restore.html#what-is-not-restored-or-not-backed-up).
 

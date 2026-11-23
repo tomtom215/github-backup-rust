@@ -71,7 +71,9 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   slow but steady transfer is not cut off).
 - **GraphQL**: `graphql(query, variables)` posts a query to `/graphql` (GHES:
   `/api/graphql`) with the same handling and fails on a non-empty `errors`
-  array.
+  array.  Discussions are read this way (`client/endpoints/discussions.rs`),
+  every connection followed with its cursor and nested ones completed with
+  `node(id:)` queries.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
   `/gists`, which include private repositories and secret gists.
@@ -109,7 +111,7 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (`GET /repos/{o}/{r}`), repository clone,
   wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
   advisories, branches and rulesets, deploy keys, collaborators, actions,
-  environments, commit comments.  Inside a category an item that fails (one
+  environments, commit comments, discussions.  Inside a category an item that fails (one
   issue's comments) is recorded and the category carries on; a category that
   answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
   warning per category per run).
@@ -118,7 +120,9 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   succeeded, trusted only for the categories it was recorded with, set 15
   minutes before the run started.  Lists are always fetched in full and merged
   (`backup/merge.rs`); the watermark only decides which per-item requests
-  (comments, events, commits, reviews) can be skipped.  `--full` ignores it; an
+  (comments, events, commits, reviews) can be skipped.  Discussions are the
+  exception: their GraphQL listing is ordered by `updatedAt` and stops at the
+  watermark, and the stored list is merged with what it returned.  `--full` ignores it; an
   explicit `--since` replaces it and is never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
   current run and a fingerprint of the owner and options; a later run resumes

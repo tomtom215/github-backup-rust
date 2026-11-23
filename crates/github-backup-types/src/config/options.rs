@@ -166,11 +166,12 @@ pub struct BackupOptions {
     pub environments: bool,
 
     // ── GitHub Discussions ────────────────────────────────────────────────
-    /// Requested backup of GitHub Discussions.
+    /// Backup GitHub Discussions of each repository that has them enabled,
+    /// through the GraphQL API (the REST API has no route for them).
     ///
-    /// GitHub serves Discussions through GraphQL only and the backup does not
-    /// speak GraphQL yet, so **nothing is backed up**: the run logs one
-    /// warning saying so.  Not included in [`BackupOptions::all`].
+    /// Saves `discussion_categories.json`, `discussions.json` and
+    /// `discussion_comments/<number>.json` (comments with their replies) to
+    /// each repository's metadata directory.
     pub discussions: bool,
 
     // ── Projects ──────────────────────────────────────────────────────────
@@ -280,7 +281,8 @@ pub struct BackupOptions {
 
 impl BackupOptions {
     /// Names of the enabled categories that an incremental watermark can vouch
-    /// for: the per-item files fetched for each issue and pull request.
+    /// for: the per-item files fetched for each issue and pull request, and
+    /// the discussions (whose listing stops at the watermark).
     ///
     /// The names are what [`RepoWatermark::covers`](crate::RepoWatermark::covers)
     /// stores, in a fixed order.
@@ -292,6 +294,7 @@ impl BackupOptions {
             (self.pull_comments, "pull_comments"),
             (self.pull_commits, "pull_commits"),
             (self.pull_reviews, "pull_reviews"),
+            (self.discussions, "discussions"),
         ]
         .into_iter()
         .filter_map(|(enabled, name)| enabled.then_some(name))
@@ -305,8 +308,7 @@ impl BackupOptions {
     /// a category the token may not read is a warning, not a failure.
     ///
     /// Not enabled: `clone_starred` and `action_runs`, which can generate very
-    /// large outputs and are opt-in, and `discussions`, which are not backed
-    /// up (GitHub serves them through GraphQL only).
+    /// large outputs and are opt-in.
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -348,8 +350,7 @@ impl BackupOptions {
             actions: true,
             action_runs: false, // opt-in only; can generate very large files
             environments: true,
-            // Not backed up yet (GraphQL only); `--all` must not claim it.
-            discussions: false,
+            discussions: true,
             projects: true,
             commit_comments: true,
             packages: true,

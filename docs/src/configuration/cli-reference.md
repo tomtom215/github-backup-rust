@@ -155,7 +155,7 @@ workflow run history.
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | **Nothing is backed up yet.**  GitHub serves Discussions through GraphQL only; one warning per run says so.  Not part of `--all`. |
+| `--discussions` | Discussions of each repository that has them enabled, with every comment and reply, and the discussion categories (`discussions.json`, `discussion_comments/<n>.json`, `discussion_categories.json`), read through the GraphQL API. |
 | `--projects` | The owner's Projects (v2): projects, fields and items with their field values (needs `read:project`). |
 | `--packages` | Package metadata of the target user or organisation (needs `read:packages`). |
 | `--commit-comments` | Comments made on the commits of each repository (`commit_comments.json`). |
