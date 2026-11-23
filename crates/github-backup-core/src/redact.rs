@@ -11,16 +11,30 @@
 //!
 //! Three kinds of secret are recognised:
 //!
-//! 1. **Exact values** the caller knows about (the access token in use).
-//! 2. **GitHub token formats** — every official prefix, whatever the value.
-//! 3. **Credentials embedded in a URL** — `scheme://user:password@host`.
+//! 1. **Exact values** the caller knows about (the access token in use, and
+//!    any other credential the caller passes, such as a mirror token).
+//! 2. **Token formats** — every official GitHub prefix (`ghp_`, `github_pat_`,
+//!    ...) and GitLab's `glpat-`, whatever the value, when the prefix starts a
+//!    word (`laughs_x` is not a token).
+//! 3. **Credentials embedded in a URL** — `scheme://user:password@host`, and
+//!    for HTTP(S) any `scheme://userinfo@host` (a token is often sent as the
+//!    user name alone).
 
 /// Exact values shorter than this are not redacted: a three-character
 /// "secret" would corrupt unrelated text and is not worth hiding.
 const MIN_EXACT_LEN: usize = 6;
 
-/// GitHub token prefixes, longest first so `github_pat_` wins over `gh*_`.
-const GITHUB_PREFIXES: &[&str] = &["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
+/// Token prefixes: GitHub's (longest first so `github_pat_` wins over
+/// `gh*_`) and GitLab's personal access token prefix.
+const TOKEN_PREFIXES: &[&str] = &[
+    "github_pat_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "glpat-",
+];
 
 /// Returns `text` with every secret replaced by `<redacted>`.
 ///
@@ -35,56 +49,65 @@ pub fn secrets(text: &str, known: &[&str]) -> String {
             out = out.replace(value, "<redacted>");
         }
     }
-    out = github_tokens(&out);
+    out = prefixed_tokens(&out);
     url_credentials(&out)
 }
 
-/// Replaces the body of every GitHub-format token, keeping its prefix.
-fn github_tokens(s: &str) -> String {
+/// A character that can be part of a token body (GitLab's include `-`).
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Replaces the body of every prefixed token, keeping its prefix.
+///
+/// A prefix counts only at the start of a word: preceded by nothing or by a
+/// character that cannot be part of a token, and followed by a body.
+fn prefixed_tokens(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while !rest.is_empty() {
-        let mut hit: Option<(usize, &'static str)> = None;
-        for prefix in GITHUB_PREFIXES {
-            if let Some(idx) = rest.find(prefix) {
-                if hit.map(|(j, _)| idx < j).unwrap_or(true) {
-                    hit = Some((idx, prefix));
-                }
-            }
-        }
-        match hit {
-            Some((idx, prefix)) => {
-                out.push_str(&rest[..idx]);
+    let mut i = 0;
+    while i < s.len() {
+        let at_word_start = s[..i].chars().next_back().is_none_or(|c| !is_token_char(c));
+        let prefix = TOKEN_PREFIXES
+            .iter()
+            .find(|p| at_word_start && s[i..].starts_with(*p));
+        if let Some(prefix) = prefix {
+            let after = &s[i + prefix.len()..];
+            let body = after.find(|c| !is_token_char(c)).unwrap_or(after.len());
+            if body > 0 {
                 out.push_str(prefix);
                 out.push_str("<redacted>");
-                let after = &rest[idx + prefix.len()..];
-                // Skip the alphanumeric run that constitutes the token body.
-                let body_end = after
-                    .char_indices()
-                    .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
-                    .map(|(i, _)| i)
-                    .unwrap_or(after.len());
-                rest = &after[body_end..];
-            }
-            None => {
-                out.push_str(rest);
-                break;
+                i += prefix.len() + body;
+                continue;
             }
         }
+        let c = s[i..]
+            .chars()
+            .next()
+            .expect("i is on a char boundary below len");
+        out.push(c);
+        i += c.len_utf8();
     }
     out
 }
 
-/// Replaces the `user:password` part of `scheme://user:password@host` URLs.
+/// Replaces the userinfo of `scheme://userinfo@host` URLs.
 ///
-/// Only a userinfo part that contains a `:` is treated as a credential; a bare
-/// `ssh://git@github.com/...` user name is left alone because it is not secret
+/// A userinfo with a `:` (`user:password`) is always a credential.  Without a
+/// `:` it is one in HTTP(S) URLs, where a token is commonly sent as the user
+/// name (`https://glpat-...@gitlab.example/...`); an SSH user name such as the
+/// `git` in `ssh://git@github.com/...` is left alone because it is not secret
 /// and the message would be less useful without it.
 fn url_credentials(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(pos) = rest.find("://") {
         let (head, tail) = rest.split_at(pos + 3);
+        let scheme = head[..pos]
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || "+-.".contains(c)))
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let http = scheme == "http" || scheme == "https";
         out.push_str(head);
         // The authority ends at the first '/', whitespace or quote.
         let authority_end = tail
@@ -92,7 +115,7 @@ fn url_credentials(s: &str) -> String {
             .unwrap_or(tail.len());
         let authority = &tail[..authority_end];
         match authority.rfind('@') {
-            Some(at) if authority[..at].contains(':') => {
+            Some(at) if http || authority[..at].contains(':') => {
                 out.push_str("<redacted>");
                 out.push_str(&authority[at..]);
             }
@@ -188,6 +211,48 @@ mod tests {
     fn keeps_a_url_user_name_without_a_password() {
         let text = "ssh://git@github.com/o/r.git";
         assert_eq!(secrets(text, &[]), text);
+    }
+
+    /// Regression: a token sent as the user name alone (no `:`) leaked.
+    #[test]
+    fn redacts_a_token_used_as_the_user_name_of_an_http_url() {
+        let out = secrets(
+            "fatal: unable to access 'https://glpat-AbC123xyz@gitlab.example.com/o/r.git/': 403",
+            &[],
+        );
+        assert!(!out.contains("AbC123xyz"), "{out}");
+        assert!(
+            out.contains("https://<redacted>@gitlab.example.com/o/r.git/"),
+            "{out}"
+        );
+        let out = secrets("see http://s3cr3tvalue@h/x", &[]);
+        assert_eq!(out, "see http://<redacted>@h/x");
+    }
+
+    /// Regression: a prefix inside a word was taken for a token
+    /// (`laughs_x` became `laughs_<redacted>`).
+    #[test]
+    fn a_prefix_inside_a_word_is_not_a_token() {
+        for text in [
+            "laughs_x and laughs_out",
+            "the thoughs_y field",
+            "keep shgho_x intact",
+        ] {
+            assert_eq!(secrets(text, &[]), text);
+        }
+        assert_eq!(secrets("ghp_", &[]), "ghp_", "no body, nothing to hide");
+        assert_eq!(
+            secrets("(ghp_abc) 'gho_def' x=ghs_ghi", &[]),
+            "(ghp_<redacted>) 'gho_<redacted>' x=ghs_<redacted>"
+        );
+    }
+
+    #[test]
+    fn replaces_gitlab_tokens() {
+        assert_eq!(
+            secrets("token glpat-Ab_c-12345 rejected", &[]),
+            "token glpat-<redacted> rejected"
+        );
     }
 
     #[test]
