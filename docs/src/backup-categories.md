@@ -91,9 +91,15 @@ repositories the account owns are listed this way; repositories owned by
 organisations are backed up with `--org`.
 
 For any other user, without a token, or with a token that cannot call
-`GET /user` (a GitHub App installation token; a warning is logged), only public
-repositories are visible.  Organisation targets (`--org`) list private
-repositories the token can see, as before.
+`GET /user` (a GitHub App installation token given as `--token`; a warning is
+logged), only public repositories are visible.  Organisation targets (`--org`)
+list private repositories the token can see, as before.
+
+Authenticated as a [GitHub App](getting-started/authentication.md#github-app)
+(`--app-id`), the tool lists `GET /installation/repositories` instead, for a
+user or an organisation: every repository of OWNER that the installation can
+access, private ones included (only the selected ones when the App was
+installed on selected repositories).
 
 ---
 

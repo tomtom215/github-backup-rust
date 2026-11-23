@@ -28,7 +28,7 @@ for every kind of setting:
 
 | Kind of setting | Rule |
 |-----------------|------|
-| Single values (`owner`, `token`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values including `mirror_type`, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
+| Single values (`owner`, `token`, `app_id`, `app_key_path`, `app_installation_id`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values including `mirror_type`, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
 | `clone_type` | A `--clone-type` given on the command line wins, including `--clone-type mirror`.  The file applies only when the flag was not given. |
 | Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `prune`, `prefer_ssh`, `mirror_private`, `mirror_public`, `s3_include_assets`) | **Either one turns it on.**  A category that is `true` in the file is turned off for one run with `--skip <name>`; the other switches only by editing the file. |
 | Lists (`include_repos`, `exclude_repos`, `skip`) | The entries of the file and of the command line are **combined**. |
@@ -61,6 +61,9 @@ owner = "octocat"
 
 # Authentication (prefer GITHUB_TOKEN environment variable instead)
 # token = "ghp_xxx"
+# ... or a GitHub App instead of a token:
+# app_id       = "Iv23li0123456789abcd"
+# app_key_path = "/etc/github-backup/app.pem"
 
 # Output directory
 output = "/var/backup/github"
@@ -225,6 +228,9 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 |-----|------|---------|-------------|
 | `owner` | string | the token's account | GitHub username or org |
 | `token` | string | — | Personal access token (prefer env var) |
+| `app_id` | string | — | GitHub App client ID or App ID: authenticate as the App instead of with a token (see [GitHub App](../getting-started/authentication.md#github-app)) |
+| `app_key_path` | path | — | Path of the GitHub App's private key (`.pem`); the key itself may instead be in `GITHUB_APP_PRIVATE_KEY`, never in this file |
+| `app_installation_id` | integer | the App's installation on `owner` | GitHub App installation to act as |
 | `api_url` | string | `https://api.github.com` | GitHub API base URL (for GitHub Enterprise Server) |
 | `clone_host` | string | *(from API)* | Override git clone hostname (GHES split-hostname) |
 | `output` | path | `.` | Output root directory |
