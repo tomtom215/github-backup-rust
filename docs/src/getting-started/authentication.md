@@ -140,9 +140,16 @@ You will see:
 ```
 
 Open the URL, enter the code and authorise the app; `github-backup` polls for
-the token.  If you do not authorise in time the flow ends with an
-"expired" error; just run the command again.  `--oauth-client-id` is only valid
-together with `--device-auth`.
+the token.  A lost connection or a server error while polling is retried until
+the code expires.  If you do not authorise in time the flow ends with an
+"expired" error; just run the command again.  Any other refusal is reported
+with GitHub's own description (for example when the app does not have
+**Enable Device Flow** ticked).  `--oauth-client-id` is only valid together
+with `--device-auth`.
+
+The flow honours the [proxy variables](../configuration/environment.md#proxy).
+With `--api-url` it signs in on that GitHub Enterprise Server instead of
+github.com (see [GitHub Enterprise](../configuration/github-enterprise.md#authentication)).
 
 ### Scopes
 

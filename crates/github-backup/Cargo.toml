@@ -7,7 +7,6 @@ rust-version.workspace  = true
 authors.workspace       = true
 license.workspace       = true
 repository.workspace    = true
-homepage.workspace      = true
 documentation.workspace = true
 keywords.workspace      = true
 categories.workspace    = true
@@ -41,11 +40,6 @@ bytes = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
-hyper-rustls = { workspace = true }
-rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
-chrono = { workspace = true }
-fslock = { workspace = true }
 
 [dev-dependencies]
 github-backup-client = { workspace = true, features = ["test-support"] }

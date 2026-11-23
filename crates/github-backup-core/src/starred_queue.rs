@@ -18,8 +18,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use chrono::Utc;
-
 use github_backup_types::starred_queue::{CloneState, StarredCloneQueue, StarredQueueItem};
 use github_backup_types::{Raw, Repository};
 
@@ -80,7 +78,7 @@ pub fn load_or_create(
             .map_err(|e| CoreError::io(path.display().to_string(), e))?;
         serde_json::from_str::<StarredCloneQueue>(&data)?
     } else {
-        let now = Utc::now().to_rfc3339();
+        let now = crate::time::now_utc();
         StarredCloneQueue {
             version: QUEUE_VERSION,
             owner: owner.to_string(),
@@ -122,7 +120,7 @@ pub fn begin_pass(queue: &mut StarredCloneQueue) {
 ///
 /// Returns [`CoreError`] on I/O or serialisation failure.
 pub fn save(queue: &mut StarredCloneQueue, path: &Path) -> Result<(), CoreError> {
-    queue.updated_at = Utc::now().to_rfc3339();
+    queue.updated_at = crate::time::now_utc();
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

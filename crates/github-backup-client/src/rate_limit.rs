@@ -35,7 +35,8 @@ impl RateLimitInfo {
         let limit = parse_u64(headers, "x-ratelimit-limit")?;
         let remaining = parse_u64(headers, "x-ratelimit-remaining")?;
         let reset_timestamp = parse_u64(headers, "x-ratelimit-reset")?;
-        let used = parse_u64(headers, "x-ratelimit-used").unwrap_or(limit - remaining);
+        let used =
+            parse_u64(headers, "x-ratelimit-used").unwrap_or(limit.saturating_sub(remaining));
 
         Some(Self {
             limit,
@@ -122,11 +123,7 @@ pub(crate) fn classify(
     }
     let info = RateLimitInfo::from_headers(headers);
     let exhausted = info.is_some_and(|i| i.is_exhausted());
-    let explicit = RateLimitInfo::retry_after(headers).or_else(|| {
-        info.filter(RateLimitInfo::is_exhausted)
-            .map(|i| i.seconds_until_reset(now_secs))
-    });
-    if let Some(secs) = explicit {
+    if let Some(secs) = explicit_wait(headers, now_secs) {
         return Some(RateLimitWait::Explicit(secs));
     }
     let message = String::from_utf8_lossy(body).to_ascii_lowercase();
@@ -134,6 +131,39 @@ pub(crate) fn classify(
         return Some(RateLimitWait::Unspecified);
     }
     None
+}
+
+/// Like [`classify`] for a GraphQL response with status 200: GitHub reports
+/// both the primary and (sometimes) the secondary GraphQL rate limit with a
+/// `200` whose `errors` array says so (`"type": "RATE_LIMITED"` or a
+/// "rate limit" message).  The wait is `Retry-After`, else the
+/// `X-RateLimit-Reset` of an exhausted budget, else unspecified.
+pub(crate) fn classify_graphql(
+    headers: &HeaderMap,
+    body: &[u8],
+    now_secs: u64,
+) -> Option<RateLimitWait> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let limited = value.get("errors")?.as_array()?.iter().any(|error| {
+        error.get("type").and_then(serde_json::Value::as_str) == Some("RATE_LIMITED")
+            || error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|m| m.to_ascii_lowercase().contains("rate limit"))
+    });
+    limited.then(|| {
+        explicit_wait(headers, now_secs).map_or(RateLimitWait::Unspecified, RateLimitWait::Explicit)
+    })
+}
+
+/// The wait a rate-limit response names: `Retry-After`, else the time until
+/// `X-RateLimit-Reset` when `X-RateLimit-Remaining` is 0.
+fn explicit_wait(headers: &HeaderMap, now_secs: u64) -> Option<u64> {
+    RateLimitInfo::retry_after(headers).or_else(|| {
+        RateLimitInfo::from_headers(headers)
+            .filter(RateLimitInfo::is_exhausted)
+            .map(|i| i.seconds_until_reset(now_secs))
+    })
 }
 
 fn parse_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
@@ -374,5 +404,48 @@ mod tests {
         );
         assert_eq!(classify(404, &exhausted, b"", 0), None);
         assert_eq!(classify(500, &retry, b"", 0), None);
+    }
+
+    #[test]
+    fn more_remaining_than_the_limit_does_not_underflow() {
+        // A misbehaving proxy or server; `used` must not wrap or panic.
+        let headers = make_headers(&[
+            ("x-ratelimit-limit", "10"),
+            ("x-ratelimit-remaining", "20"),
+            ("x-ratelimit-reset", "1"),
+        ]);
+        let info = RateLimitInfo::from_headers(&headers).expect("parse");
+        assert_eq!(info.used, 0);
+    }
+
+    #[test]
+    fn classify_graphql_recognises_rate_limit_errors_only() {
+        let exhausted = make_headers(&[
+            ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1030"),
+        ]);
+        let none = make_headers(&[]);
+        let typed = br#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit already exceeded for user ID 1."}]}"#;
+        let secondary = br#"{"errors":[{"message":"You have exceeded a secondary rate limit."}]}"#;
+        assert_eq!(
+            classify_graphql(&exhausted, typed, 1000),
+            Some(RateLimitWait::Explicit(32))
+        );
+        assert_eq!(
+            classify_graphql(&none, secondary, 0),
+            Some(RateLimitWait::Unspecified)
+        );
+        assert_eq!(
+            classify_graphql(&make_headers(&[("retry-after", "9")]), secondary, 0),
+            Some(RateLimitWait::Explicit(9))
+        );
+        // Other errors, data, or no JSON at all are not rate limits, even
+        // when the request happened to use the last point of the budget.
+        let not_found =
+            br#"{"data":null,"errors":[{"type":"NOT_FOUND","message":"Could not resolve"}]}"#;
+        assert_eq!(classify_graphql(&exhausted, not_found, 1000), None);
+        assert_eq!(classify_graphql(&exhausted, br#"{"data":{}}"#, 1000), None);
+        assert_eq!(classify_graphql(&none, b"not json", 0), None);
     }
 }

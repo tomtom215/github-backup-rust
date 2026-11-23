@@ -177,7 +177,7 @@ where
     /// the lock, or the run was cancelled.
     pub async fn run(&self, owner: &str) -> Result<BackupStats, CoreError> {
         let stats = BackupStats::new();
-        let started_at = chrono::Utc::now();
+        let started_at = jiff::Timestamp::now();
         info!(owner, dry_run = self.opts.dry_run, "starting backup");
 
         if self.opts.dry_run {
@@ -539,8 +539,7 @@ where
                         }
                         // Mark complete in the checkpoint.
                         let mut guard = cp.lock().await;
-                        let now =
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let now = crate::time::now_utc();
                         if guard.run_started_at.is_empty() {
                             guard.run_started_at = now.clone();
                         }
@@ -607,13 +606,13 @@ where
 
 /// How long after its last activity an interrupted run's checkpoint is still
 /// resumed.
-const CHECKPOINT_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);
+const CHECKPOINT_MAX_AGE: jiff::SignedDuration = jiff::SignedDuration::from_hours(6);
 
 /// `true` if `cp` is too old (or of unknown age) to resume.
 fn checkpoint_is_stale(cp: &BackupCheckpoint) -> bool {
-    match chrono::DateTime::parse_from_rfc3339(&cp.last_updated_at) {
-        Ok(last) => chrono::Utc::now().signed_duration_since(last) > CHECKPOINT_MAX_AGE,
-        Err(_) => true,
+    match crate::time::parse_rfc3339(&cp.last_updated_at) {
+        Some(last) => crate::time::age(last) > CHECKPOINT_MAX_AGE,
+        None => true,
     }
 }
 

@@ -432,7 +432,7 @@ async fn resume_skips_repositories_the_interrupted_run_finished() {
     let out = OutputConfig::new(root.path());
     let mut cp = BackupCheckpoint {
         run_started_at: "2026-01-01T00:00:00Z".into(),
-        last_updated_at: chrono::Utc::now().to_rfc3339(),
+        last_updated_at: crate::time::now_utc(),
         ..Default::default()
     };
     cp.mark_complete_and_save("octocat/a", &out.backup_checkpoint_path(OWNER))
@@ -602,7 +602,10 @@ async fn an_explicit_since_never_becomes_a_stored_watermark() {
 async fn an_old_checkpoint_is_not_resumed_so_every_repository_is_refreshed() {
     let root = tempfile::tempdir().expect("tempdir");
     let out = OutputConfig::new(root.path());
-    let day_ago = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let day_ago = crate::time::format_utc(crate::time::minus(
+        jiff::Timestamp::now(),
+        jiff::SignedDuration::from_hours(24),
+    ));
     let mut cp = BackupCheckpoint {
         run_started_at: day_ago.clone(),
         last_updated_at: day_ago,

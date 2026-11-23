@@ -34,7 +34,6 @@
 //! could not be fetched, an S3 upload that errored — is listed in `failures`
 //! with its `scope`, `step` and `message`, and makes the run unsuccessful.
 
-use chrono::{DateTime, TimeZone, Utc};
 use github_backup_core::BackupStats;
 
 /// Builds the JSON summary report.
@@ -127,176 +126,11 @@ pub(crate) fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Formats a Unix timestamp (seconds since epoch) as an RFC 3339 / ISO 8601
-/// UTC string in the form `"YYYY-MM-DDTHH:MM:SSZ"`.
-#[must_use]
-pub fn unix_secs_to_iso8601(secs: u64) -> String {
-    let dt: DateTime<Utc> = Utc
-        .timestamp_opt(secs as i64, 0)
-        .single()
-        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
-    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-/// Checks whether a string is a valid ISO 8601 / RFC 3339 timestamp.
-///
-/// Accepts the common forms used with the GitHub API:
-/// - `YYYY-MM-DDTHH:MM:SSZ`
-/// - `YYYY-MM-DDTHH:MM:SS+HH:MM` / `...−HH:MM`
-///
-/// Uses chrono for full validation including calendar correctness (month
-/// range, day-in-month range, hour/minute/second range).  An explicit check
-/// for the `T` separator at position 10 is applied first because some chrono
-/// versions accept a space in that position (which RFC 3339 forbids).
-#[must_use]
-pub fn is_valid_iso8601(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    // A bare date ("2024-01-01") or anything under 20 chars is not a full
-    // RFC 3339 datetime.
-    if bytes.len() < 20 {
-        return false;
-    }
-    // RFC 3339 §5.6 requires 'T' (case-insensitive) as the separator.
-    if bytes[10] != b'T' && bytes[10] != b't' {
-        return false;
-    }
-    DateTime::parse_from_rfc3339(s).is_ok()
-}
-
-/// Normalises a `--since` value to `YYYY-MM-DDTHH:MM:SSZ` (UTC).
-///
-/// Accepts a bare date (`2024-01-01`, taken as midnight UTC) or a full RFC 3339
-/// timestamp with any offset.
-///
-/// # Errors
-///
-/// Returns what is wrong with `value` when it is neither.
-pub fn normalise_since(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if is_valid_iso8601(value) {
-        let dt = DateTime::parse_from_rfc3339(value).map_err(|e| e.to_string())?;
-        return Ok(dt
-            .with_timezone(&Utc)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string());
-    }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .ok_or_else(|| {
-            "expected a date like 2024-01-01 or a timestamp like 2024-01-01T00:00:00Z".to_string()
-        })
-}
+pub use github_backup_core::time::{normalise_since, unix_secs_to_utc as unix_secs_to_iso8601};
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn normalise_since_accepts_dates_and_timestamps() {
-        use super::normalise_since;
-        assert_eq!(
-            normalise_since("2024-01-01").unwrap(),
-            "2024-01-01T00:00:00Z"
-        );
-        assert_eq!(
-            normalise_since("2024-01-01T12:00:00+02:00").unwrap(),
-            "2024-01-01T10:00:00Z",
-            "offsets are converted to UTC"
-        );
-        assert_eq!(
-            normalise_since(" 2024-01-01T00:00:00Z ").unwrap(),
-            "2024-01-01T00:00:00Z"
-        );
-        for bad in [
-            "",
-            "yesterday",
-            "2024-13-01",
-            "2024-02-30",
-            "2024-01-01 00:00:00",
-        ] {
-            assert!(normalise_since(bad).is_err(), "{bad:?} must be rejected");
-        }
-    }
-
     use super::*;
-
-    // ── is_valid_iso8601 ──────────────────────────────────────────────────
-
-    #[test]
-    fn valid_utc_z_suffix() {
-        assert!(is_valid_iso8601("2024-01-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn valid_positive_offset() {
-        assert!(is_valid_iso8601("2024-01-01T12:00:00+05:30"));
-    }
-
-    #[test]
-    fn valid_negative_offset() {
-        assert!(is_valid_iso8601("2024-01-01T12:00:00-08:00"));
-    }
-
-    #[test]
-    fn invalid_too_short() {
-        assert!(!is_valid_iso8601("2024-01-01"));
-    }
-
-    #[test]
-    fn invalid_missing_t_separator() {
-        assert!(!is_valid_iso8601("2024-01-01 00:00:00Z"));
-    }
-
-    #[test]
-    fn invalid_non_digit_year() {
-        assert!(!is_valid_iso8601("XXXX-01-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn invalid_missing_dashes() {
-        assert!(!is_valid_iso8601("20240101T000000Z"));
-    }
-
-    #[test]
-    fn invalid_empty_string() {
-        assert!(!is_valid_iso8601(""));
-    }
-
-    /// Previously the hand-rolled validator accepted out-of-range values.
-    #[test]
-    fn invalid_out_of_range_values() {
-        assert!(!is_valid_iso8601("2024-99-99T99:99:99Z"));
-        assert!(!is_valid_iso8601("2024-13-01T00:00:00Z"));
-        assert!(!is_valid_iso8601("2024-01-32T00:00:00Z"));
-        assert!(!is_valid_iso8601("2024-01-01T25:00:00Z"));
-        assert!(!is_valid_iso8601("2024-02-30T00:00:00Z"));
-    }
-
-    // ── unix_secs_to_iso8601 ──────────────────────────────────────────────
-
-    #[test]
-    fn epoch_formats_correctly() {
-        assert_eq!(unix_secs_to_iso8601(0), "1970-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn known_timestamp_formats_correctly() {
-        // Unix timestamp 1_705_305_600 = 2024-01-15T08:00:00Z
-        assert_eq!(unix_secs_to_iso8601(1_705_305_600), "2024-01-15T08:00:00Z");
-    }
-
-    #[test]
-    fn new_years_2026() {
-        // Unix timestamp 1_767_225_600 = 2026-01-01T00:00:00Z
-        assert_eq!(unix_secs_to_iso8601(1_767_225_600), "2026-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn output_matches_is_valid_iso8601() {
-        let s = unix_secs_to_iso8601(1_700_000_000);
-        assert_eq!(s.len(), 20);
-        assert!(is_valid_iso8601(&s), "output must be valid ISO 8601: {s}");
-    }
 
     // ── write_atomic ──────────────────────────────────────────────────────
 

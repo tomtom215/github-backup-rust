@@ -995,7 +995,7 @@ async fn finish_run_records_a_manifest_failure_as_a_run_failure() {
     std::fs::write(dir.join("octocat").join("json"), b"not a dir").unwrap();
 
     let stats = BackupStats::new();
-    crate::finish_run(&stats, &out, "octocat", chrono::Utc::now(), true).await;
+    crate::finish_run(&stats, &out, "octocat", jiff::Timestamp::now(), true).await;
     assert!(
         stats.has_failures(),
         "a manifest that was asked for but not written is a failure"

@@ -14,15 +14,19 @@
 
 use std::path::Path;
 
-use fslock::LockFile;
-
 const LOCK_FILENAME: &str = ".github-backup.lock";
 
 /// RAII guard that holds an exclusive lock on the output directory.
 ///
 /// Dropping this value releases the lock.
 pub struct OutputLock {
-    _inner: LockFile,
+    _inner: std::fs::File,
+}
+
+impl Drop for OutputLock {
+    fn drop(&mut self) {
+        github_backup_core::lock::release(&self._inner);
+    }
 }
 
 /// Acquires an exclusive lock on `output_dir`.
@@ -53,23 +57,23 @@ pub fn acquire(output_dir: &Path) -> Result<OutputLock, String> {
 
     let lock_path = output_dir.join(LOCK_FILENAME);
 
-    let mut lock = LockFile::open(&lock_path)
+    let file = github_backup_core::lock::open_lock_file(&lock_path)
         .map_err(|e| format!("cannot open lock file {}: {e}", lock_path.display()))?;
 
-    let acquired = lock
-        .try_lock()
-        .map_err(|e| format!("cannot acquire output directory lock: {e}"))?;
-
-    if !acquired {
-        return Err(format!(
-            "another github-backup process is already running against {}.\n\
-             If you are sure no other process is running, delete {} and retry.",
+    match file.try_lock() {
+        Ok(()) => Ok(OutputLock { _inner: file }),
+        // The operating system releases the lock when its holder exits, however
+        // it exits, so a held lock always means a live process: deleting the
+        // file would not help and is not suggested.
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
+            "another github-backup process is already running against {}; \
+             wait for it to finish (the lock is released automatically when it exits)",
             output_dir.display(),
-            lock_path.display(),
-        ));
+        )),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(format!("cannot acquire output directory lock: {e}"))
+        }
     }
-
-    Ok(OutputLock { _inner: lock })
 }
 
 /// Writes and removes a tiny marker file to confirm that we can actually
@@ -106,15 +110,16 @@ mod tests {
     }
 
     #[test]
-    fn double_acquire_same_process_fails() {
+    fn a_second_acquire_fails_while_the_first_is_held() {
         let dir = tempdir().expect("tempdir");
-        let _guard = acquire(dir.path()).expect("first acquire");
-        // A second acquire in the same process must fail because `fslock`
-        // uses POSIX file locking, which is per-process on Linux.
-        // On some platforms (macOS, Windows) this may succeed; we accept either.
-        let _second = acquire(dir.path());
-        // We don't assert failure here because behaviour is platform-dependent,
-        // but we do assert no panic.
+        let guard = acquire(dir.path()).expect("first acquire");
+        // `File::try_lock` locks an open file description (flock on Unix,
+        // LockFileEx on Windows), so a second handle in the same process is
+        // refused just like another process would be.
+        let err = acquire(dir.path()).err().expect("second acquire must fail");
+        assert!(err.contains("already running"), "{err}");
+        drop(guard);
+        acquire(dir.path()).expect("free again after the guard is dropped");
     }
 
     #[test]
