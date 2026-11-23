@@ -299,7 +299,13 @@ fn tui_rejects_flags_it_cannot_honour() {
 #[test]
 fn the_default_config_file_is_loaded_and_combines_with_the_command_line() {
     let home = scratch("config");
-    let dir = home.join(".config").join("github-backup");
+    // The default location: `%APPDATA%\github-backup` on Windows,
+    // `$HOME/.config/github-backup` elsewhere (no `XDG_CONFIG_HOME` here).
+    let (var, dir) = if cfg!(windows) {
+        ("APPDATA", home.join("github-backup"))
+    } else {
+        ("HOME", home.join(".config").join("github-backup"))
+    };
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.toml"),
@@ -308,7 +314,7 @@ fn the_default_config_file_is_loaded_and_combines_with_the_command_line() {
     .unwrap();
     let out = run(
         &["--mirror-type", "gitlab", "--list-scopes"],
-        &[("HOME", home.to_str().unwrap())],
+        &[(var, home.to_str().unwrap())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
