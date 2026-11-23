@@ -34,6 +34,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file;
+
 // ── Backup state ─────────────────────────────────────────────────────────────
 
 /// Incremental watermark for one repository.
@@ -137,25 +139,16 @@ impl BackupState {
 
     /// Writes the state to `path`, creating parent directories as needed.
     ///
-    /// The write is atomic (temporary file, then rename) so a crash cannot
+    /// The write is atomic and durable (see [`atomic_file`]) so a crash cannot
     /// leave a truncated file that would be discarded as corrupt.
     ///
     /// # Errors
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create state directory: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise state: {e}"))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write state file: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("replace state file: {e}")
-        })
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write state file: {e}"))
     }
 
     /// Loads the state from `path`.
@@ -239,21 +232,15 @@ impl BackupRunHistory {
 
     /// Saves the history to `path`, creating parent directories as needed.
     ///
-    /// Writes are atomic (write-then-rename) to prevent corrupt files.
+    /// Writes are atomic and durable (see [`atomic_file`]).
     ///
     /// # Errors
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create history directory: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise history: {e}"))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write history tmp: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename history file: {e}"))
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write history file: {e}"))
     }
 }
 
@@ -280,6 +267,14 @@ pub struct BackupCheckpoint {
     /// older versions, which are therefore never resumed.
     #[serde(default)]
     pub last_updated_at: String,
+
+    /// Identifies the work the run that wrote this checkpoint was doing (its
+    /// owner and options).  Only a run with the same fingerprint resumes it: a
+    /// run that backs up more categories must not skip repositories that a
+    /// narrower run finished.  Empty in files written by older versions,
+    /// which are therefore never resumed.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 impl BackupCheckpoint {
@@ -291,8 +286,8 @@ impl BackupCheckpoint {
 
     /// Marks `full_name` as completed and persists the checkpoint to `path`.
     ///
-    /// Writes are atomic at the file-system level (write-then-rename) to
-    /// ensure the checkpoint is never left in a half-written state.
+    /// Writes are atomic and durable (see [`atomic_file`]), so the checkpoint
+    /// is never left in a half-written state.
     ///
     /// # Errors
     ///
@@ -324,16 +319,9 @@ impl BackupCheckpoint {
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create checkpoint dir: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise checkpoint: {e}"))?;
-        // Write to a temp file then rename for atomicity.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write checkpoint tmp: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename checkpoint: {e}"))
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write checkpoint: {e}"))
     }
 
     /// Removes the checkpoint file after a successful run.
@@ -389,8 +377,13 @@ mod tests {
         );
         assert_eq!(loaded.repos_backed_up, 1);
         assert_eq!(loaded.repos["o/a"].at, "2026-01-01T23:45:00Z");
-        assert!(
-            !dir.path().join("state.json.tmp").exists(),
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["state.json"],
             "no temporary file may be left behind"
         );
     }
@@ -524,6 +517,7 @@ mod tests {
             completed_repos: BTreeSet::new(),
             run_started_at: "2026-01-01T00:00:00Z".to_string(),
             last_updated_at: String::new(),
+            fingerprint: String::new(),
         };
         cp.mark_complete_and_save("owner/repo-a", &path)
             .expect("save");

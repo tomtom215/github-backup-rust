@@ -56,7 +56,9 @@ a few; nothing is left half-written under its real name.  What to expect:
    were finished.
 2. Re-run the same command.  Within 6 hours of the interruption the run resumes
    and skips those repositories; after that the checkpoint is ignored and every
-   repository is refreshed.  Either way the git clones are only updated, not
+   repository is refreshed.  A run with different options (other categories,
+   another clone type, other filters) never resumes it, and a `--dry-run`
+   leaves it untouched.  Either way the git clones are only updated, not
    cloned again, and a repository that was in the middle of its **first** clone
    starts that clone again (the partial one is in a hidden staging directory,
    removed automatically).
@@ -69,8 +71,11 @@ The operating-system lock is released by the kernel, so **no stale lock
 exists** and nothing has to be deleted before the next run (the lock files
 stay on disk; they are only markers).  A `git` process may keep running for a
 while after its parent was killed (it is not told to stop); it ends on its own,
-and the next run removes leftover staging directories.  Start the next run
-normally.
+and the next run removes leftover staging directories.  A `git` killed with the
+process can leave `.lock` files inside a repository; the next run removes those
+older than the stall limit (10 minutes) before it updates the repository, and
+a run started sooner reports that repository as failed with a hint.  Start the
+next run normally.
 
 ---
 
@@ -87,7 +92,7 @@ owner or `post-processing`), the **step** and the error text.
 | `git ... made no progress for 600s and was stopped` | `git` printed nothing for 10 minutes (a stalled connection).  A slow but progressing clone is not interrupted.  Re-run; if it repeats, check the network or a proxy. |
 | `GitHub API error 403 ... rate limit` / `rate limit exceeded` | See [Rate limit](#rate-limit). |
 | `GitHub API error 404` on a category | Feature not available for that repository (no Actions, no environments); informational for most categories. |
-| `no space left on device` | The disk is full: the run stops (`fatal error`, exit `1`). |
+| `no space left on device`, `disk quota exceeded` | The disk is full or the quota is used up (seen by the tool or by `git`): the run stops (`fatal error`, exit `1`). |
 | `S3 ... AccessDenied` / `NoSuchBucket` / `SignatureDoesNotMatch` | See [S3 failures](#s3-failures). |
 
 Re-running retries what failed and keeps everything that succeeded.

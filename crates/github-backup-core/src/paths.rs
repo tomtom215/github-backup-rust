@@ -12,10 +12,41 @@
 use std::path::PathBuf;
 
 /// `true` if `name` can be used verbatim as one path component: non-empty, not
-/// `.` or `..`, and free of path separators and NUL.
+/// `.` or `..`, and free of path separators and NUL.  On Windows a reserved
+/// device name (see [`is_windows_reserved`]) is not safe either, because such
+/// a file or directory cannot be created there.
 #[must_use]
 pub(crate) fn is_safe_component(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', '\0'])
+        && !(cfg!(windows) && is_windows_reserved(name))
+}
+
+/// `true` for the names Windows reserves for devices: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM0`-`COM9` and `LPT0`-`LPT9` (also with the superscript digits
+/// ¹²³), in any case, alone or followed by an extension (`nul.git`,
+/// `Con.txt`) or trailing spaces.
+#[must_use]
+pub(crate) fn is_windows_reserved(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => ["COM", "LPT"].iter().any(|device| {
+            stem.strip_prefix(device).is_some_and(|digit| {
+                matches!(
+                    digit,
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+                ) || matches!(digit, "\u{b9}" | "\u{b2}" | "\u{b3}")
+            })
+        }),
+    }
 }
 
 /// Reduces `name` to a single safe file name: any directory part is dropped, and
@@ -66,6 +97,37 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "a\\b", "../x", "x\0y"] {
             assert!(!is_safe_component(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn windows_device_names_are_recognised() {
+        for reserved in [
+            "con",
+            "CON",
+            "Aux",
+            "nul.git",
+            "prn.tar.gz",
+            "com1",
+            "LPT9.md",
+            "com\u{b9}",
+            "nul ",
+        ] {
+            assert!(is_windows_reserved(reserved), "{reserved:?}");
+        }
+        for ordinary in [
+            "console",
+            "auxiliary",
+            "com",
+            "com10",
+            "lpt",
+            "nul-repo",
+            "my.con",
+            "conf",
+        ] {
+            assert!(!is_windows_reserved(ordinary), "{ordinary:?}");
+        }
+        // Only Windows refuses them.
+        assert_eq!(is_safe_component("con"), !cfg!(windows));
     }
 
     #[test]

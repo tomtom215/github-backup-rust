@@ -430,14 +430,6 @@ async fn cancelling_before_the_run_does_no_work() {
 async fn resume_skips_repositories_the_interrupted_run_finished() {
     let root = tempfile::tempdir().expect("tempdir");
     let out = OutputConfig::new(root.path());
-    let mut cp = BackupCheckpoint {
-        run_started_at: "2026-01-01T00:00:00Z".into(),
-        last_updated_at: chrono::Utc::now().to_rfc3339(),
-        ..Default::default()
-    };
-    cp.mark_complete_and_save("octocat/a", &out.backup_checkpoint_path(OWNER))
-        .expect("seed checkpoint");
-
     let git = SpyGitRunner::default();
     let client = MockBackupClient::new().with_user_repos(vec![repo("a"), repo("b")]);
     let engine = engine_with(
@@ -447,6 +439,14 @@ async fn resume_skips_repositories_the_interrupted_run_finished() {
         root.path(),
         opts(),
     );
+    let mut cp = BackupCheckpoint {
+        run_started_at: "2026-01-01T00:00:00Z".into(),
+        last_updated_at: crate::time::now_utc(),
+        fingerprint: engine.checkpoint_fingerprint(OWNER),
+        ..Default::default()
+    };
+    cp.mark_complete_and_save("octocat/a", &out.backup_checkpoint_path(OWNER))
+        .expect("seed checkpoint");
 
     let stats = engine.run(OWNER).await.expect("run");
 
@@ -604,7 +604,10 @@ async fn an_explicit_since_never_becomes_a_stored_watermark() {
 async fn an_old_checkpoint_is_not_resumed_so_every_repository_is_refreshed() {
     let root = tempfile::tempdir().expect("tempdir");
     let out = OutputConfig::new(root.path());
-    let day_ago = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let day_ago = crate::time::format_utc(crate::time::minus(
+        jiff::Timestamp::now(),
+        jiff::SignedDuration::from_hours(24),
+    ));
     let mut cp = BackupCheckpoint {
         run_started_at: day_ago.clone(),
         last_updated_at: day_ago,
@@ -709,4 +712,324 @@ async fn cancelling_interrupts_the_repository_listing_request() {
         .expect("cancel must end the run promptly")
         .expect("no panic");
     assert!(matches!(result, Err(CoreError::Interrupted)), "{result:?}");
+}
+
+/// The git verification and stall limit chosen on the engine reach every git
+/// command it runs (they used to be unreachable: always off / 600 s).
+#[test]
+fn git_settings_reach_the_clone_options() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with(
+        MockBackupClient::new(),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        opts(),
+    );
+    let defaults = engine.make_clone_opts(CancelFlag::new());
+    assert!(!defaults.run_fsck);
+    assert_eq!(defaults.stall_timeout_secs, 600);
+
+    let engine = engine.with_git_fsck(true).with_git_stall_timeout(30);
+    let chosen = engine.make_clone_opts(CancelFlag::new());
+    assert!(chosen.run_fsck);
+    assert_eq!(chosen.stall_timeout_secs, 30);
+    assert_eq!(
+        engine
+            .with_git_stall_timeout(0)
+            .make_clone_opts(CancelFlag::new())
+            .stall_timeout_secs,
+        1,
+        "a zero limit would stop every git at once"
+    );
+}
+
+// ── Checkpoint fingerprint, dry run, failures around the checkpoint ──────────
+
+fn seed_recent_checkpoint(root: &Path, fingerprint: String, done: &[&str]) -> PathBuf {
+    let path = OutputConfig::new(root).backup_checkpoint_path(OWNER);
+    let mut cp = BackupCheckpoint {
+        run_started_at: crate::time::now_utc(),
+        last_updated_at: crate::time::now_utc(),
+        fingerprint,
+        ..Default::default()
+    };
+    for name in done {
+        cp.mark_complete_and_save(name, &path)
+            .expect("seed checkpoint");
+    }
+    path
+}
+
+/// Regression: an interrupted narrow run (only `--repositories`) followed
+/// within the resume window by a run with more categories skipped the
+/// repositories the narrow run had finished, so their issues were never
+/// backed up, and the run reported success.
+#[tokio::test]
+async fn a_checkpoint_of_a_run_with_other_options_is_not_resumed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let narrow = BackupOptions {
+        issues: false,
+        labels: false,
+        ..opts()
+    };
+    let narrow_engine = engine_with(
+        MockBackupClient::new(),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        narrow,
+    );
+    seed_recent_checkpoint(
+        root.path(),
+        narrow_engine.checkpoint_fingerprint(OWNER),
+        &["octocat/a"],
+    );
+
+    let storage = MemStorage::default();
+    let git = SpyGitRunner::default();
+    let client = MockBackupClient::new()
+        .with_user_repos(vec![repo("a"), repo("b")])
+        .with_issues(vec![issue(1, "2024-01-01T00:00:00Z")]);
+    let engine = engine_with(client, storage.clone(), git.clone(), root.path(), opts());
+    assert_ne!(
+        engine.checkpoint_fingerprint(OWNER),
+        narrow_engine.checkpoint_fingerprint(OWNER)
+    );
+
+    let stats = engine.run(OWNER).await.expect("run");
+
+    assert_eq!(stats.repos_skipped(), 0);
+    assert_eq!(git.recorded_calls().len(), 2, "a is backed up again");
+    assert!(storage
+        .get(&meta(root.path(), "a", "issues.json"))
+        .is_some());
+
+    // Concurrency does not change the work, so it does not change the print.
+    let wider = engine_with(
+        MockBackupClient::new(),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        BackupOptions {
+            concurrency: 8,
+            ..opts()
+        },
+    );
+    assert_eq!(
+        wider.checkpoint_fingerprint(OWNER),
+        engine.checkpoint_fingerprint(OWNER)
+    );
+}
+
+/// Regression: `--dry-run` deleted the checkpoint of an interrupted run.
+#[tokio::test]
+async fn a_dry_run_keeps_the_checkpoint() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let dry = BackupOptions {
+        dry_run: true,
+        ..opts()
+    };
+    let engine = engine_with(
+        MockBackupClient::new().with_user_repos(vec![repo("a")]),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        dry,
+    );
+    let path = seed_recent_checkpoint(root.path(), "anything".into(), &["octocat/a"]);
+    let before = std::fs::read(&path).expect("read");
+
+    engine.run(OWNER).await.expect("run");
+
+    assert_eq!(std::fs::read(&path).expect("still there"), before);
+}
+
+/// A checkpoint that cannot be deleted at the end would make the next run
+/// skip repositories: that is a failure of the run, not a log line.
+#[tokio::test]
+async fn a_checkpoint_that_cannot_be_deleted_is_a_failure() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = OutputConfig::new(root.path()).backup_checkpoint_path(OWNER);
+    // A directory in its place cannot be removed as a file.
+    std::fs::create_dir_all(path.join("blocker")).expect("mkdir");
+    let engine = engine_with(
+        MockBackupClient::new().with_user_repos(vec![repo("a")]),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        opts(),
+    );
+
+    let stats = engine.run(OWNER).await.expect("run");
+
+    let failures = stats.failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].step, "checkpoint");
+}
+
+/// Regression: temporary files left by a killed run stayed for ever (and went
+/// into the manifest and the S3 upload).  A run sweeps them once it holds the
+/// lock; a dry run touches nothing.
+#[tokio::test]
+async fn a_run_sweeps_temporary_files_left_by_a_killed_run() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let json_dir = OutputConfig::new(root.path()).owner_json_dir(OWNER);
+    std::fs::create_dir_all(json_dir.join("repos/a")).expect("mkdir");
+    let leftover = json_dir.join("repos/a/.issues.json.tmp-999-1");
+    std::fs::write(&leftover, b"partial").expect("write");
+
+    let dry = BackupOptions {
+        dry_run: true,
+        ..opts()
+    };
+    engine_with(
+        MockBackupClient::new().with_user_repos(vec![repo("a")]),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        dry,
+    )
+    .run(OWNER)
+    .await
+    .expect("dry run");
+    assert!(leftover.exists(), "a dry run writes and deletes nothing");
+
+    engine_with(
+        MockBackupClient::new().with_user_repos(vec![repo("a")]),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        opts(),
+    )
+    .run(OWNER)
+    .await
+    .expect("run");
+    assert!(!leftover.exists());
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<EngineEvent>) -> Vec<EngineEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// Every `RepoStarted` is followed by a `RepoCompleted` for the same name.
+fn assert_every_start_completes(events: &[EngineEvent]) {
+    for event in events {
+        if let EngineEvent::RepoStarted { name } = event {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    EngineEvent::RepoCompleted { name: done, .. } if done == name
+                )),
+                "{name} started but never completed: {events:?}"
+            );
+        }
+    }
+}
+
+/// Regression: filtered-out, dry-run and panicked repositories were reported
+/// as started but never as completed, so the TUI showed them running for ever.
+#[tokio::test]
+async fn every_started_repository_is_reported_as_completed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let client = MockBackupClient::new().with_user_repos(vec![
+        repo("ok"),
+        repo_with("secret", true, true),
+        repo("boom"),
+    ]);
+    let git = SpyGitRunner::default().failing_when_url_contains("/boom.git", SpyFailure::Panic);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let no_private = BackupOptions {
+        private: false,
+        ..opts()
+    };
+    let engine = engine_with(client, MemStorage::default(), git, root.path(), no_private)
+        .with_event_channel(tx);
+
+    let stats = engine.run(OWNER).await.expect("run");
+    let events = drain(&mut rx);
+
+    assert_every_start_completes(&events);
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            EngineEvent::RepoStarted { name } if name == "octocat/secret"
+        )),
+        "a filtered-out repository is not started: {events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EngineEvent::RepoCompleted { name, success: false, error: Some(msg) }
+            if name == "octocat/boom" && msg.contains("panicked")
+    )));
+    assert_eq!(stats.repos_errored(), 1);
+
+    // A dry run starts nothing.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    engine_with(
+        MockBackupClient::new().with_user_repos(vec![repo("a")]),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        BackupOptions {
+            dry_run: true,
+            ..opts()
+        },
+    )
+    .with_event_channel(tx)
+    .run(OWNER)
+    .await
+    .expect("dry run");
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::RepoStarted { .. })),
+        "{events:?}"
+    );
+}
+
+// ── Unparsed repository objects ──────────────────────────────────────────────
+
+/// Regression: repository objects the typed model could not read were dropped
+/// from repos.json and never cloned, silently, with exit status 0.  They are
+/// now written verbatim and the run records a failure naming how many.
+#[tokio::test]
+async fn unreadable_repository_objects_are_kept_and_reported() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage = MemStorage::default();
+    let good = serde_json::to_value(repo("a")).expect("json");
+    let odd = serde_json::json!({"id": 99, "full_name": "octocat/odd", "name": null});
+    let client = MockBackupClient::new().with_raw("user_repos", vec![good, odd.clone()]);
+    let git = SpyGitRunner::default();
+    let engine = engine_with(client, storage.clone(), git.clone(), root.path(), opts());
+
+    let stats = engine.run(OWNER).await.expect("run");
+
+    let failures = stats.failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].step, "repository list");
+    assert!(
+        failures[0].message.starts_with("1 repository object"),
+        "{}",
+        failures[0].message
+    );
+    let path = OutputConfig::new(root.path())
+        .owner_json_dir(OWNER)
+        .join("repos.json");
+    let written: Vec<serde_json::Value> =
+        serde_json::from_slice(&storage.get(&path).expect("repos.json")).expect("parse");
+    assert_eq!(written.len(), 2, "{written:?}");
+    assert!(written.contains(&odd), "kept verbatim: {written:?}");
+    assert_eq!(
+        git.recorded_calls().len(),
+        1,
+        "only the readable one is cloned"
+    );
 }

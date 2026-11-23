@@ -232,7 +232,7 @@ See the [Restore guide](../restore.md).
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--manifest` | `false` | After the run, write `json/backup_manifest.json` with the SHA-256 of every data file under `json/` (not the history, state, checkpoint and lock files, which change on every run). |
+| `--manifest` | `false` | After the run, write `json/backup_manifest.json` with the SHA-256 of every data file under `json/` (not the history, state, checkpoint and lock files, which change on every run, nor temporary files). |
 | `--verify` | `false` | Check the manifest of an existing backup and exit.  Needs OWNER (and `--output` unless the backup is in the current directory); no network.  Covers the files under `json/` only, not the git clones.  Conflicts with `--all`. |
 
 ## Monitoring

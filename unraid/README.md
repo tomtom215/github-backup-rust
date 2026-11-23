@@ -19,6 +19,14 @@ The template has been authored against the v7.2.x DockerMan / CA conventions
 documented at <https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/>.
 It sets no `<MinVer>`; it has not been tested on Unraid 6.x.
 
+**Image tag.** The template pulls `ghcr.io/tomtom215/github-backup-rust:edge`,
+which is built from `main` on every change to the code or the image.  It does
+not use `:latest` because `:latest` is the last release, v0.3.2, whose image
+has no entrypoint wrapper: started from this form it would only print the help
+text.  Once a release newer than v0.3.2 is published, you can set
+*Repository* to `:latest` (or a version such as `:X.Y.Z`) in the container
+settings for a release build.
+
 **Permissions.** The template passes `--user 99:100` (`nobody:users`, the owner of
 Unraid shares), so files the backup writes belong to the same user SMB clients
 act as.  If you ran an earlier version of this template (the container ran as
@@ -35,8 +43,8 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 | Output Directory                  | `/backup` (Path)         | `/mnt/user/backups/github/`      | Required. Point at an Unraid share. |
 | GitHub Owner                      | `GITHUB_OWNER`           | _(empty)_                        | Required. User / org to back up. |
 | GitHub Token                      | `GITHUB_TOKEN`           | _(empty)_                        | Required, **masked**. |
-| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:latest --tui` from the Unraid terminal. |
-| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted). The characters `;`, backtick, `$`, `(` and `)` are refused. |
+| Run Mode                          | `BACKUP_MODE` (dropdown) | `--all`                          | `--doctor`, `--check`, `--list-scopes`, `--verify`, `--print-config-template` also available (`--verify` needs a manifest: add `--manifest` to Extra CLI Flags on the backup runs).  `--tui` needs a terminal: run `docker run -it --rm --user 99:100 ghcr.io/tomtom215/github-backup-rust:edge --tui` from the Unraid terminal. |
+| Extra CLI Flags                   | `BACKUP_FLAGS`           | _(empty)_                        | e.g. `--org --concurrency 8 --include-repos rust-*` (split on spaces, quotes are not interpreted; nothing is run through a shell). |
 | GitHub API URL (GHES)             | `GITHUB_API_URL`         | _(empty)_                        | Advanced. |
 | GitHub Clone Host (split GHES)    | `GITHUB_CLONE_HOST`      | _(empty)_                        | Advanced. |
 | OAuth App Client ID               | `GITHUB_OAUTH_CLIENT_ID` | _(empty)_                        | Advanced. Pair with `--device-auth` in Extra CLI Flags. |
@@ -50,7 +58,7 @@ so that the User Scripts pattern below (`docker start github-backup`) works.
 
 CLI / Compose / Kubernetes users invoke the binary directly:
 
-    docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:latest octocat --all
+    docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:edge octocat --all
 
 That continues to work unchanged.
 
@@ -62,11 +70,13 @@ POSIX shell wrapper (`docker/entrypoint.sh`) which behaves as follows:
   The CLI / Compose / Kubernetes contract is preserved.
 - **Otherwise → reconstruct argv from `GITHUB_OWNER`, `BACKUP_MODE`,
   and `BACKUP_FLAGS`.** This is the Unraid path.
-- **Both empty → `github-backup --help`.**
+- **All three empty → `github-backup --help`.**
 
-`BACKUP_MODE` is restricted to a whitelist of known run modes plus
-any flag starting with `--` (so future modes work without an image
-rebuild); shell metacharacters are rejected up-front.
+`BACKUP_MODE` must be a flag starting with `--` (the wrapper exits with
+status `64` otherwise, which catches `all` typed for `--all`).  Nothing is
+run through a shell: the values are only split on spaces, so characters such
+as `;`, `|` or `$` reach `github-backup` literally and it rejects what it does
+not understand.
 
 ## First run
 

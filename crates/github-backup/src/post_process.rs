@@ -15,10 +15,12 @@ use thiserror::Error;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use std::collections::HashSet;
+
+use github_backup_core::BackupStats;
 use github_backup_mirror::{
     config::{GitLabConfig, GiteaConfig},
-    gitlab_runner::push_mirrors_gitlab,
-    runner::push_mirrors,
+    runner::{push_mirrors, MirrorDestination, MirrorPlan, MirrorStats},
     GitLabClient, GiteaClient,
 };
 use github_backup_s3::{
@@ -47,25 +49,46 @@ pub enum MirrorDest {
     GitLab(GitLabConfig),
 }
 
-/// Dispatches the mirror push to the appropriate runner.
+/// Pushes every local clone to the mirror destination.
+///
+/// Repositories whose backup failed in this run (`stats`) are not pushed:
+/// their clone may be stale or partial, and pushing it would rewind the
+/// mirror.
 ///
 /// # Errors
 ///
-/// Returns [`PostProcessError::Mirror`] if the mirror client fails to
-/// initialise or the push fails.
+/// Returns [`PostProcessError::Mirror`] if the mirror client cannot be built
+/// (no token, not `https://`, no CA certificates) or any repository failed to
+/// push.
 pub async fn run_mirror_push_dest(
     dest: &MirrorDest,
     output: &OutputConfig,
     owner: &str,
+    stats: &BackupStats,
 ) -> Result<(), PostProcessError> {
-    match dest {
-        MirrorDest::Gitea(config) => run_mirror_push_gitea(config, output, owner)
-            .await
-            .map_err(PostProcessError::Mirror),
-        MirrorDest::GitLab(config) => run_mirror_push_gitlab(config, output, owner)
-            .await
-            .map_err(PostProcessError::Mirror),
-    }
+    let failed = failed_repo_names(stats);
+    let result = match dest {
+        MirrorDest::Gitea(config) => match GiteaClient::new(config.clone()) {
+            Ok(client) => run_mirror_push(&client, output, owner, &failed).await,
+            Err(e) => Err(e.to_string()),
+        },
+        MirrorDest::GitLab(config) => match GitLabClient::new(config.clone()) {
+            Ok(client) => run_mirror_push(&client, output, owner, &failed).await,
+            Err(e) => Err(e.to_string()),
+        },
+    };
+    result.map_err(PostProcessError::Mirror)
+}
+
+/// Names of the repositories whose git backup (the `repository` step, or the
+/// whole task) failed in this run.
+fn failed_repo_names(stats: &BackupStats) -> HashSet<String> {
+    stats
+        .failures()
+        .into_iter()
+        .filter(|f| f.step == "repository" || f.step == "task")
+        .filter_map(|f| f.scope.split_once('/').map(|(_, name)| name.to_owned()))
+        .collect()
 }
 
 /// Names of the repositories the backup's `repos.json` lists as public.
@@ -90,7 +113,7 @@ fn public_repo_names(repos_json: &std::path::Path) -> std::collections::HashSet<
 /// Turns the per-repository results of a mirror push into the run's outcome:
 /// any failed repository makes the push an error (the CLI maps it to a
 /// non-zero exit status), with every failure named.
-fn mirror_outcome(stats: &github_backup_mirror::runner::MirrorStats) -> Result<(), String> {
+fn mirror_outcome(stats: &MirrorStats) -> Result<(), String> {
     if stats.errored == 0 {
         return Ok(());
     }
@@ -102,73 +125,36 @@ fn mirror_outcome(stats: &github_backup_mirror::runner::MirrorStats) -> Result<(
     ))
 }
 
-/// Pushes repositories to a Gitea-compatible destination.
-async fn run_mirror_push_gitea(
-    config: &GiteaConfig,
+/// Pushes the clones under `<output>/<owner>/git/repos` to `dest`.
+async fn run_mirror_push<D: MirrorDestination>(
+    dest: &D,
     output: &OutputConfig,
     owner: &str,
+    failed_repos: &HashSet<String>,
 ) -> Result<(), String> {
-    let client = GiteaClient::new(config.clone()).map_err(|e| e.to_string())?;
     let repos_dir = output.repos_dir(owner);
-
     if !repos_dir.exists() {
         warn!(dir = %repos_dir.display(), "repos directory does not exist; skipping mirror push");
         return Ok(());
     }
-
     let description_prefix = format!("GitHub mirror of {owner}/");
     let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
     let stats = push_mirrors(
-        &client,
-        config,
-        &repos_dir,
-        &description_prefix,
-        &public_repos,
+        dest,
+        &MirrorPlan {
+            repos_dir: &repos_dir,
+            description_prefix: &description_prefix,
+            public_repos: &public_repos,
+            failed_repos,
+        },
     )
-    .await
-    .map_err(|e| e.to_string())?;
-
+    .await;
     info!(
         pushed = stats.pushed,
+        skipped = stats.skipped.len(),
         errored = stats.errored,
-        "Gitea mirror push complete"
+        "mirror push complete"
     );
-
-    mirror_outcome(&stats)
-}
-
-/// Pushes repositories to a GitLab destination.
-async fn run_mirror_push_gitlab(
-    config: &GitLabConfig,
-    output: &OutputConfig,
-    owner: &str,
-) -> Result<(), String> {
-    let client = GitLabClient::new(config.clone()).map_err(|e| e.to_string())?;
-    let repos_dir = output.repos_dir(owner);
-
-    if !repos_dir.exists() {
-        warn!(dir = %repos_dir.display(), "repos directory does not exist; skipping GitLab mirror push");
-        return Ok(());
-    }
-
-    let description_prefix = format!("GitHub mirror of {owner}/");
-    let public_repos = public_repo_names(&output.owner_json(owner, "repos.json"));
-    let stats = push_mirrors_gitlab(
-        &client,
-        config,
-        &repos_dir,
-        &description_prefix,
-        &public_repos,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    info!(
-        pushed = stats.pushed,
-        errored = stats.errored,
-        "GitLab mirror push complete"
-    );
-
     mirror_outcome(&stats)
 }
 
@@ -327,6 +313,11 @@ fn mirror_forced_private(args: &Args) -> bool {
 
 /// Builds a [`MirrorDest`] from CLI args, or returns `None` if no mirror
 /// destination is configured.
+///
+/// A missing token is not rejected here (the clients refuse to be built
+/// without one, which records a failure); call [`validate_post_processing`]
+/// at start-up to report it before the backup runs.  Destination pruning
+/// follows `--prune`, like the local clones.
 #[must_use]
 pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
     let base_url = args.mirror_to.clone()?;
@@ -342,14 +333,43 @@ pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
             token,
             namespace: owner,
             private: mirror_forced_private(args),
+            prune: args.prune,
         })),
         _ => Some(MirrorDest::Gitea(GiteaConfig {
             base_url,
             token,
             owner,
             private: mirror_forced_private(args),
+            prune: args.prune,
         })),
     }
+}
+
+/// Checks the mirror and S3 settings before the backup starts, so that a
+/// missing token, a non-`https://` mirror URL or missing S3 credentials are
+/// reported at once instead of after a long backup.  Does nothing when
+/// neither is configured.
+///
+/// # Errors
+///
+/// Returns a message naming the setting that is missing or unusable and how
+/// to supply it.
+pub fn validate_post_processing(args: &Args) -> Result<(), String> {
+    if let Some(dest) = build_mirror_dest(args) {
+        let (base_url, token, owner) = match &dest {
+            MirrorDest::Gitea(c) => (&c.base_url, &c.token, &c.owner),
+            MirrorDest::GitLab(c) => (&c.base_url, &c.token, &c.namespace),
+        };
+        github_backup_mirror::client::check_destination(base_url, token)
+            .map_err(|e| format!("--mirror-to: {e}"))?;
+        if owner.trim().is_empty() {
+            return Err("--mirror-to: no owner at the destination; set --mirror-owner".to_string());
+        }
+    }
+    if let Some(s3) = build_s3_config(args) {
+        check_s3_config(&s3)?;
+    }
+    Ok(())
 }
 
 /// Builds an [`S3Config`] from CLI args, or returns `None` if no S3 bucket
@@ -824,8 +844,66 @@ mod tests {
             pushed: 1,
             errored: 1,
             failures: vec!["r2: boom".to_owned()],
+            skipped: Vec::new(),
         };
         let err = mirror_outcome(&bad).expect_err("must fail");
         assert!(err.contains("1 of 2") && err.contains("r2: boom"), "{err}");
+    }
+
+    /// Only a failed git backup (or a crashed task) keeps a repository from
+    /// being mirrored; a failed issue download does not.
+    #[test]
+    fn repositories_whose_git_backup_failed_are_not_mirrored() {
+        let stats = BackupStats::new();
+        stats.record_failure("octocat/broken", "repository", "fetch failed");
+        stats.record_failure("octocat/panicked", "task", "panic");
+        stats.record_failure("octocat/fine", "issues", "API 502");
+        stats.record_failure("gists", "gist", "clone failed");
+        let failed = failed_repo_names(&stats);
+        let expected: HashSet<String> = ["broken", "panicked"].map(str::to_owned).into();
+        assert_eq!(failed, expected);
+    }
+
+    #[test]
+    fn mirror_pruning_follows_the_prune_flag() {
+        let prune = |extra: &[&str]| {
+            let mut argv = vec![
+                "github-backup",
+                "octocat",
+                "--mirror-to",
+                "https://codeberg.example",
+            ];
+            argv.extend(extra);
+            match build_mirror_dest(&crate::cli::test_support::parse(&argv)).unwrap() {
+                MirrorDest::Gitea(c) => c.prune,
+                MirrorDest::GitLab(c) => c.prune,
+            }
+        };
+        assert!(!prune(&[]), "refs deleted on GitHub stay in the mirror");
+        assert!(prune(&["--prune"]));
+        assert!(prune(&["--prune", "--mirror-type", "gitlab"]));
+    }
+
+    #[test]
+    fn missing_mirror_token_and_plain_http_are_reported_before_the_backup() {
+        let check = |extra: &[&str]| {
+            let mut argv = vec!["github-backup", "octocat"];
+            argv.extend(extra);
+            validate_post_processing(&crate::cli::test_support::parse(&argv))
+        };
+        assert!(check(&[]).is_ok(), "nothing configured");
+        let err = check(&["--mirror-to", "https://codeberg.example"]).unwrap_err();
+        assert!(err.contains("MIRROR_TOKEN"), "{err}");
+        let err = check(&["--mirror-to", "http://gitea.lan", "--mirror-token", "t"]).unwrap_err();
+        assert!(err.contains("https://"), "{err}");
+        assert!(check(&[
+            "--mirror-to",
+            "https://codeberg.example",
+            "--mirror-token",
+            "t"
+        ])
+        .is_ok());
+        let err = check(&["--s3-bucket", "b"]).unwrap_err();
+        assert!(err.contains("AWS_ACCESS_KEY_ID"), "{err}");
     }
 }

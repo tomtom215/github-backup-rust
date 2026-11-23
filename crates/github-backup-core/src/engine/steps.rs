@@ -20,13 +20,17 @@ use crate::{cancel::CancelFlag, error::CoreError, redact, stats::BackupStats};
 /// Shared by every task of one run: the cancellation switch and the first
 /// fatal error.
 ///
-/// Once either is set the scheduler starts no new repository, running tasks
-/// skip their remaining steps, and the engine reports the error after the tasks
-/// have wound down.
+/// Once either is set the scheduler starts no new repository, running steps
+/// (and the git processes they run) are stopped at once, and the engine
+/// reports the error after the tasks have wound down.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunControl {
     fatal: Arc<Mutex<Option<CoreError>>>,
+    /// The user's switch.
     cancel: CancelFlag,
+    /// Triggered by the first fatal error (and, through the engine, by the
+    /// user's switch): what in-flight work watches.
+    stop: CancelFlag,
 }
 
 impl RunControl {
@@ -34,30 +38,38 @@ impl RunControl {
         Self {
             fatal: Arc::default(),
             cancel,
+            stop: CancelFlag::new(),
         }
     }
 
-    /// Records `error` as the reason the run stops.  The first one wins.
+    /// Records `error` as the reason the run stops (the first one wins) and
+    /// stops the work in flight.
     pub(crate) fn set_fatal(&self, error: CoreError) {
         let mut slot = self.fatal.lock().unwrap_or_else(|p| p.into_inner());
         if slot.is_none() {
             *slot = Some(error);
         }
+        drop(slot);
+        self.stop.cancel();
     }
 
-    /// Completes when the run is cancelled.
-    pub(crate) async fn cancelled(&self) {
-        self.cancel.cancelled().await;
+    /// The flag that is triggered when the run must stop for a fatal error;
+    /// hand it to git work as its cancellation flag.
+    pub(crate) fn stop_flag(&self) -> CancelFlag {
+        self.stop.clone()
+    }
+
+    /// Completes when the run is cancelled or hits a fatal error.
+    pub(crate) async fn stopped(&self) {
+        tokio::select! {
+            () = self.cancel.cancelled() => {}
+            () = self.stop.cancelled() => {}
+        }
     }
 
     /// `true` once nothing further should be started.
     pub(crate) fn should_stop(&self) -> bool {
-        self.cancel.is_cancelled()
-            || self
-                .fatal
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .is_some()
+        self.cancel.is_cancelled() || self.stop.is_cancelled()
     }
 
     /// Takes the error the run stops with, if it must stop: the first fatal
@@ -123,12 +135,13 @@ impl<'a> Steps<'a> {
             self.clean = false;
             return None;
         }
-        // Cancellation abandons an in-flight API request at once instead of
-        // waiting for it.  Dropping a step mid-way is safe: files are written
-        // atomically and nothing is recorded as complete until it finishes.
+        // Cancellation, or a fatal error in another step, abandons an
+        // in-flight API request at once instead of waiting for it.  Dropping a
+        // step mid-way is safe: files are written atomically and nothing is
+        // recorded as complete until it finishes.
         let outcome = tokio::select! {
             outcome = work => outcome,
-            () = self.control.cancelled() => Err(CoreError::Interrupted),
+            () = self.control.stopped() => Err(CoreError::Interrupted),
         };
         match outcome {
             Ok(value) => Some(value),
@@ -250,6 +263,43 @@ mod tests {
             0,
             "the fatal error is the run's result"
         );
+        assert!(matches!(
+            control.take_stop_reason(),
+            Some(CoreError::Client(ClientError::ApiError { status: 401, .. }))
+        ));
+    }
+
+    /// Regression: a fatal error (401, rate limit) stopped only new steps;
+    /// a step already running (a long clone, a paginated listing) carried on
+    /// to its end.  It is now abandoned at once, and git work watching the
+    /// stop flag is stopped too.
+    #[tokio::test]
+    async fn a_fatal_error_stops_steps_already_in_flight() {
+        let stats = BackupStats::new();
+        let control = RunControl::default();
+        let git_flag = control.stop_flag();
+
+        let running = {
+            let (stats, control) = (stats.handle(), control.clone());
+            tokio::spawn(async move {
+                let mut steps = Steps::new("o/slow", &stats, &control, &[]);
+                steps
+                    .run("clone", std::future::pending::<Result<(), CoreError>>())
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let mut steps = Steps::new("o/r", &stats, &control, &[]);
+        steps.run("issues", async { Err::<(), _>(api(401)) }).await;
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), running)
+            .await
+            .expect("the step in flight must stop promptly")
+            .expect("no panic");
+        assert_eq!(outcome, None);
+        assert!(git_flag.is_cancelled(), "git work must be told to stop");
+        assert_eq!(stats.failure_count(), 0, "only the fatal error is reported");
         assert!(matches!(
             control.take_stop_reason(),
             Some(CoreError::Client(ClientError::ApiError { status: 401, .. }))

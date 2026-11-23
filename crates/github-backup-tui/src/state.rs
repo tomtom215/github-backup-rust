@@ -219,26 +219,10 @@ impl Default for ConfigState {
 /// Highest concurrency the form accepts.
 pub const MAX_CONCURRENCY: usize = 64;
 
-/// Normalises a `since` value to `YYYY-MM-DDTHH:MM:SSZ` (UTC).
-///
-/// Accepts a bare date (`2024-01-01`, midnight UTC) or an RFC 3339 timestamp.
+/// Normalises a `since` value (see [`github_backup_core::time::normalise_since`]),
+/// with the message phrased for the form's "Since" field.
 fn normalise_since(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.len() >= 20 && matches!(value.as_bytes()[10], b'T' | b't') {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-            return Ok(dt
-                .with_timezone(&chrono::Utc)
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string());
-        }
-    }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .ok_or_else(|| {
-            "Since must be a date like 2024-01-01 or a timestamp like 2024-01-01T00:00:00Z".into()
-        })
+    github_backup_core::time::normalise_since(value).map_err(|e| format!("Since: {e}"))
 }
 
 impl ConfigState {

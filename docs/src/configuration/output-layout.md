@@ -108,8 +108,8 @@ neither a clone nor a metadata directory.
 | `repos.json` | The repositories this backup covers, as GitHub listed them: only the ones the options include, merged with earlier listings so that a repository deleted on GitHub stays recorded.  `--diff-with` compares it between two backups. |
 | `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
 | `backup_history.json` | One entry per run (time, repositories backed up, duration, `success`, `failures`, tool version), newest last, at most `--history-size` entries. |
-| `backup_checkpoint.json` | Which repositories an **interrupted** run had finished.  Removed when a run completes.  A later run resumes from it only if it is less than 6 hours old; an older one is ignored. |
-| `backup_manifest.json` | `--manifest`: SHA-256 of every data file under `json/`, except the history, state, checkpoint and lock files (the git clones are not included). |
+| `backup_checkpoint.json` | Which repositories an **interrupted** run had finished.  Removed when a run completes (a checkpoint that cannot be removed is a failure of the run).  A later run resumes from it only if it is less than 6 hours old and the run has the same owner and options; otherwise it is ignored. |
+| `backup_manifest.json` | `--manifest`: SHA-256 of every data file under `json/`, except the history, state, checkpoint and lock files and temporary files of an unfinished write (the git clones are not included).  Paths use `/` on every platform. |
 | `starred_clone_queue.json` | `--clone-starred` progress; see [User data](../user-data.md#durable-queue-and-refresh). |
 
 ### Lock files
@@ -189,7 +189,7 @@ mirror clone plus the LFS objects in the same directory.
 
 ### Release assets
 
-Assets are downloaded to a temporary `.<file>.part` next to their destination
+Assets are downloaded to a temporary `.<file>.part-<pid>-<n>` next to their destination
 and renamed into place only when complete, so an interrupted run never leaves a
 truncated asset.  Each download is checked against the size GitHub reports and,
 when GitHub provides one, its SHA-256 digest; `<file>.sha256` records the
@@ -199,8 +199,9 @@ when GitHub has none, the sidecar).  Otherwise it is downloaded again.
 
 ## Clones Follow GitHub
 
-A mirror clone is updated with `git fetch --all`.  A branch or tag that is
-deleted on GitHub **stays** in the backup, so a deleted branch can still be
+A mirror clone is updated with `git fetch --all --no-prune --no-prune-tags`.
+A branch or tag that is deleted on GitHub **stays** in the backup (whatever
+`fetch.prune` says in your git configuration), so a deleted branch can still be
 recovered; a force-pushed branch is overwritten, and the commits it used to
 point at stay in the repository's object store only until `git gc` removes
 them.  Pass `--prune` (config key `prune`) to delete refs that were deleted on

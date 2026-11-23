@@ -38,7 +38,7 @@ use crate::metrics::write_prometheus_metrics;
 use crate::notify::{self, Notification, Status};
 use crate::post_process::{
     build_mirror_dest, build_s3_config, run_diff, run_mirror_push_dest, run_s3_sync_with,
-    MirrorDest, S3RunOptions,
+    validate_post_processing, MirrorDest, S3RunOptions,
 };
 use crate::report::{self, unix_secs_to_iso8601, write_report};
 use crate::{errors, lock, restore, shutdown, ui};
@@ -138,6 +138,13 @@ pub(crate) async fn execute(
     encrypt_key: Option<Zeroizing<[u8; 32]>>,
 ) -> ExitCode {
     let post = Post::from_args(&args);
+    // Unusable mirror or S3 settings are reported now, not after the backup.
+    if !post.dry_run {
+        if let Err(e) = validate_post_processing(&args) {
+            error!("{e}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    }
     let api_url = args.api_url.clone();
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
@@ -384,7 +391,7 @@ async fn finish(
 
     // ── Mirror push ──────────────────────────────────────────────────────────
     if let Some(dest) = &post.mirror {
-        if let Err(e) = run_mirror_push_dest(dest, output, owner).await {
+        if let Err(e) = run_mirror_push_dest(dest, output, owner, stats).await {
             record(stats, "mirror push", errors::redact_secrets(&e.to_string()));
         }
     }

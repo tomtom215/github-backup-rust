@@ -1,21 +1,24 @@
 # Docker Guide
 
 The repository ships a multi-stage `Dockerfile`.  The runtime image is based on
-`alpine:3.23` and contains the `github-backup` binary (a static musl build),
+`alpine:3.24` and contains the `github-backup` binary (a static musl build),
 `git`, `git-lfs`, `openssh-client`, the CA bundle and `tini`.  It is **not** a
 minimal or distroless image: it has a shell (`/bin/sh`) and the Alpine package
-manager.  Its size has not been measured for the current Dockerfile; build it
-and run `docker images` if it matters to you.
+manager.  The linux/amd64 image is about 79 MB unpacked (about 23 MB to
+download), measured for the alpine 3.24 build.
 
 > **Version note.**  Multi-architecture images (`linux/amd64`, `linux/arm64`)
-> are published to GHCR for every release: `latest` (most recent stable
-> release), `X.Y.Z` and `X.Y`.  `:latest` is the last **published release**; the
-> entrypoint wrapper, `--doctor` and the other behaviour described on this page
-> are not in v0.3.2.  Until the next release, build the image from the
-> repository (`docker build -t github-backup .`) and use that tag in the
-> examples below.  Pin a version in production instead of `:latest`.
+> are published to GHCR: `latest` (most recent stable release), `X.Y.Z` and
+> `X.Y` for every release, and `edge` (plus `sha-<commit>`) built from `main`
+> whenever the code or the image changes.  `:latest` is the last **published
+> release**; the entrypoint wrapper, `--doctor` and the other behaviour
+> described on this page are not in v0.3.2.  Until the next release, use
+> `:edge` (as the examples below do) or build the image yourself
+> (`docker build -t github-backup .`).  `edge` is not a release: pin a release
+> newer than v0.3.2 in production once one exists.
 
 ```
+ghcr.io/tomtom215/github-backup-rust:edge       # main (not a release)
 ghcr.io/tomtom215/github-backup-rust:latest     # latest stable release
 ghcr.io/tomtom215/github-backup-rust:X.Y.Z      # an exact release
 ghcr.io/tomtom215/github-backup-rust:X.Y        # latest patch of X.Y
@@ -29,17 +32,17 @@ ghcr.io/tomtom215/github-backup-rust:X.Y        # latest patch of X.Y
 
 ```sh
 # Pull the image (or build it: docker build -t github-backup .)
-docker pull ghcr.io/tomtom215/github-backup-rust:latest
+docker pull ghcr.io/tomtom215/github-backup-rust:edge
 
 # Check the setup first: git, output directory, network, token
 docker run --rm -e GITHUB_TOKEN \
-  ghcr.io/tomtom215/github-backup-rust:latest \
+  ghcr.io/tomtom215/github-backup-rust:edge \
   octocat --doctor
 
 # Run a backup
 docker run --rm -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:latest \
+  ghcr.io/tomtom215/github-backup-rust:edge \
   octocat --output /backup --all
 ```
 
@@ -89,13 +92,14 @@ The entrypoint is `tini` followed by a small POSIX shell wrapper
   interpreted, so write `--include-repos rust-*` and not
   `--include-repos 'rust-*'`).  This is the Unraid path.
 * **No arguments and none of those variables**: `github-backup --help`.
-* The wrapper refuses `;`, backticks, `$` and parentheses in `BACKUP_FLAGS` and
-  shell metacharacters in `BACKUP_MODE`, and a malformed `UMASK`, with exit
-  status `64`.
+* Nothing is run through a shell: the values are only split on whitespace, with
+  pathname expansion off, so `;`, `|`, `$` and the like reach `github-backup`
+  literally.  The wrapper exits with status `64` when `BACKUP_MODE` does not
+  start with `--` or `UMASK` is not an octal mask.
 * A variable that is **set but empty** (`VAR=`, which Compose and Unraid pass for
   every blank field) is removed for these: `GITHUB_TOKEN`, `GITHUB_API_URL`,
   `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`, `MIRROR_TOKEN`,
-  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `BACKUP_ENCRYPT_KEY`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `BACKUP_ENCRYPT_KEY`,
   `BACKUP_NOTIFY_WEBHOOK`, `GITHUB_BACKUP_RESTORE_YES` and the proxy variables.
 
 ## Docker Compose
@@ -192,15 +196,21 @@ the credentials of each profile; add any other variable (for example
   environment variable and a host-scoped credential helper; it is not written to
   a file and not placed in any argument list.
 * **SSH**: `--prefer-ssh` needs keys and a `known_hosts` file; the image ships
-  none.  Mount them and point `GIT_SSH_COMMAND` at them.
+  none.  Mount them and point `GIT_SSH_COMMAND` at them (include
+  `-o BatchMode=yes`: without a `GIT_SSH_COMMAND` the tool adds it itself, with
+  one it uses yours unchanged).
 * **tini as PID 1** forwards `SIGTERM` (`docker stop`, pod eviction) to the
   backup, which stops its `git` processes, releases its locks and exits with `143`
   within a few seconds, well inside Docker's default 10 s grace period.  The
   checkpoint it leaves lets the next run resume (within 6 hours).
 * **Atomic outputs**: reports, metrics and JSON files are written to a temporary
   name and renamed, so a monitor never reads a half-written file.
-* **Not covered**: the image is not signed or attested (only the release
-  binaries are), and it has not been scanned by the project.
+* **Provenance**: release images (after v0.3.2) and `edge` images are packaged
+  from the static Linux binaries built earlier in the same workflow run (a
+  release image holds exactly the attested release binary), and carry an SBOM,
+  BuildKit provenance and a GitHub attestation:
+  `gh attestation verify oci://ghcr.io/tomtom215/github-backup-rust:TAG --repo tomtom215/github-backup-rust`.
+* **Not covered**: the image has not been scanned by the project.
 
 ## Scheduled Backups
 
@@ -307,13 +317,13 @@ A job whose backup exits `3` (incomplete) counts as failed and is retried up to
 docker compose --profile doctor run --rm doctor octocat
 
 # Print the OAuth scopes a flag set needs (note: it does not expand --all)
-docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:latest \
+docker run --rm -e GITHUB_TOKEN ghcr.io/tomtom215/github-backup-rust:edge \
   octocat --org --repositories --issues --list-scopes
 
 # Validate a config file and connectivity without running a backup
 docker run --rm -e GITHUB_TOKEN \
   -v "$PWD/config.toml:/etc/github-backup/config.toml:ro" \
-  ghcr.io/tomtom215/github-backup-rust:latest \
+  ghcr.io/tomtom215/github-backup-rust:edge \
   --config /etc/github-backup/config.toml --check
 ```
 

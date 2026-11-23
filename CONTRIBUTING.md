@@ -8,10 +8,12 @@ Contributing*.)
 
 ### Prerequisites
 
-- Rust 1.88 or newer (`rust-version` in `Cargo.toml`; install via [rustup](https://rustup.rs))
+- [rustup](https://rustup.rs).  The repository pins its toolchain in
+  `rust-toolchain.toml`; rustup downloads and uses it automatically inside the
+  checkout, with `clippy` and `rustfmt`.  The minimum supported Rust version
+  (MSRV) is 1.89 (`rust-version` in `Cargo.toml`).
 - `git` on the `PATH` (several tests run real `git` against local repositories)
-- Optional: `git-lfs`, `cargo-deny` (`cargo install cargo-deny --locked`) and
-  `cargo-audit`
+- Optional: `git-lfs`, `cargo-deny` (`cargo install cargo-deny --locked`)
 
 ### Clone and Build
 
@@ -30,14 +32,29 @@ CI runs these; run them before opening a pull request:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
-cargo +1.88 build --workspace --locked        # MSRV
+cargo +1.89 check --workspace --all-targets --locked   # MSRV
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo deny check licenses bans advisories sources
-cargo audit
 ```
 
-The documentation book is built in CI with `mdbook` 0.4.40 and
-`mdbook-linkcheck` (`mdbook build docs`); a broken internal link fails the build.
+CI also runs the tests on macOS and Windows, builds the Docker image and runs
+[zizmor](https://docs.zizmor.sh/) on the workflows.  The documentation book is
+built with `mdbook` 0.4.52 and `mdbook-linkcheck` 0.7.7 (`mdbook build docs`);
+a broken internal link fails the build.  (mdbook-linkcheck does not support
+mdBook 0.5, so mdBook stays on 0.4.)
+
+### Toolchain and base images
+
+| What | Where | Notes |
+|---|---|---|
+| Rust toolchain (CI, releases, contributors) | `channel` in `rust-toolchain.toml` | Also set `ARG RUST_VERSION` in the `Dockerfile` to the same version; CI fails if they differ. Fix new clippy and rustdoc warnings in the same pull request. |
+| MSRV | `rust-version` in `Cargo.toml` | The MSRV CI job reads it. Update the MSRV in `README.md` and `docs/src/getting-started/installation.md` too. |
+| Alpine (image builder and runtime) | `ARG ALPINE_VERSION` in the `Dockerfile` | `rust:<RUST_VERSION>-alpine<ALPINE_VERSION>` must exist on Docker Hub. |
+| GitHub Actions | `.github/workflows/*.yml`, pinned by commit SHA | Dependabot proposes updates. |
+| mdBook, mdbook-linkcheck | `ci.yml` and `pages.yml` | Keep the two in step. |
+
+Dependabot cannot update the toolchain file or the Dockerfile's build
+arguments, so bump them by hand.
 
 ## Project Structure
 
@@ -104,6 +121,22 @@ GitHub's own terms.  Do not hard-code version numbers in examples (use
   applicable.
 - Fork, branch from `main`, make focused commits with tests, run the quality gates
   and open a pull request against `main`; CI runs the same checks.
+
+## Releasing
+
+1. Bump `[workspace.package].version` in `Cargo.toml` and add a
+   `## [X.Y.Z]` section to `CHANGELOG.md`.
+2. Optionally test the pipeline first: *Actions → Release → Run workflow* on
+   `main` is a dry run that builds every binary and the image but attests and
+   publishes nothing.
+3. Tag the commit on `main` and push the tag
+   (`git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin vX.Y.Z`).  The
+   workflow creates a draft release, pushes the image, and publishes the release
+   only when everything succeeded.
+4. The first release after v0.3.2: switch the default image tag from `edge`
+   back to `latest` in `docker-compose.yml`, `compose.example.env`,
+   `unraid/github-backup.xml`, `unraid/README.md`, `DOCKER.md` and the
+   installation page, and drop the v0.3.2 notes.
 
 ## Reporting Issues
 

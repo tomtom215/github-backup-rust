@@ -8,7 +8,9 @@
 //! cargo bench -p github-backup-types
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use github_backup_types::glob::glob_match;
 
 fn bench_glob_match(c: &mut Criterion) {

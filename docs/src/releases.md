@@ -78,7 +78,7 @@ json/repos/<repo>/
 ### How downloads are made safe
 
 - **Streamed, not buffered.** Each asset is written to disk as it arrives
-  (to `.<file>.part` in the same directory) and renamed into place when
+  (to `.<file>.part-<pid>-<n>` in the same directory) and renamed into place when
   complete, so memory use does not depend on the asset size and a crash,
   kill or full disk never leaves a truncated file under the real name.
 - **Verified.** The byte count must equal the `size` GitHub reports, and the

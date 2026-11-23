@@ -31,27 +31,57 @@ github-backup octocat \
 
 For each repository found under `<output>/octocat/git/repos/` the tool:
 
-1. checks whether the repository exists at the destination and creates it if not;
-2. verifies that it may write to it (see [Safety](#safety));
-3. pushes all branches and tags, and deletes destination branches and tags
-   that no longer exist locally (`git push --prune` with the refspecs
-   `+refs/heads/*:refs/heads/*` and `+refs/tags/*:refs/tags/*`).
+1. skips it if its backup failed in this run, if it is a shallow clone, or if
+   it has no branch or tag (see [What Is Skipped](#what-is-skipped));
+2. checks whether the repository exists at the destination and creates it if not;
+3. verifies that it may write to it (see [Safety](#safety));
+4. pushes all branches and tags (`git push` with the refspecs
+   `+refs/heads/*:refs/heads/*` and `+refs/tags/*:refs/tags/*`); with
+   `--prune` it also deletes destination branches and tags that no longer
+   exist locally (`git push --prune`).
 
 This happens after the local backup of the same run.  Under `--dry-run` it is
 skipped.
 
+> **A mirror is a replica, not a second backup.**  It holds what the local
+> clone holds: a branch that was force-pushed on GitHub is force-updated in
+> the mirror too, and with `--prune` a branch or tag deleted on GitHub is
+> deleted there as well.  Without `--prune` (the default, as for the local
+> clones) deleted branches and tags are kept in the mirror.  For history that
+> must survive a mistake on GitHub, keep snapshots of the backup directory
+> (restic, borg, ZFS).
+
 ## What Is and Is Not Pushed
 
-* **Branches and tags**: yes, force-updated, with deletions mirrored.
+* **Branches and tags**: yes, force-updated; deletions are mirrored only with
+  `--prune`.
 * **`refs/pull/*`** and other namespaces a GitHub mirror clone contains: **no**.
   GitHub-style hosts reject them, which makes a plain `git push --mirror` fail as
   a whole.
-* **Only directories ending in `.git` under `git/repos/`**: mirror, bare and
-  shallow clones and `--lfs`.  Working-tree clones (`--clone-type full`, stored
-  as `<repo>/`) are **not** pushed.  Wikis, gists and starred clones are not
-  pushed either.
+* **Only directories ending in `.git` under `git/repos/`**: mirror and bare
+  clones and `--lfs`.  **Shallow clones cannot be mirrored** (see below).
+  Working-tree clones (`--clone-type full`, stored as `<repo>/`) are **not**
+  pushed.  Wikis, gists and starred clones are not pushed either.
 * **LFS objects** are not pushed.
 * **Issues and other metadata** are not pushed; only git data.
+
+## What Is Skipped
+
+These repositories are not pushed, and this is **not** a failure of the run:
+
+* **Repositories whose backup failed in this run.**  Their clone may be stale
+  or incomplete, and pushing it could rewind the mirror.  (The backup failure
+  itself already makes the run incomplete.)  They are pushed again by the next
+  run whose backup succeeds.
+* **Shallow clones** (`--clone-type shallow:<n>`, or any clone with a `shallow`
+  file).  Git servers refuse a push that would make the receiving repository
+  shallow (`receive.shallowUpdate` is off by default, and Gitea, Forgejo and
+  GitLab do not turn it on), so these can never be mirrored.  One warning per
+  run lists them; use `--clone-type mirror` or `bare` for repositories you
+  want mirrored.
+* **Clones without any branch or tag** (an empty GitHub repository, or a
+  damaged clone).  There is nothing to push, and with `--prune` the push
+  would delete everything at the destination.
 
 ## Safety
 
@@ -70,6 +100,13 @@ skipped.
 * **The token never appears in a command line or a file.**  It is handed to the
   `git` child in an environment variable and answered by a credential helper that
   is limited to the destination's scheme, host and port.
+* **HTTPS only.**  The API token is sent in a request header, so `--mirror-to`
+  must be an `https://` URL; an `http://` URL is rejected at start-up.  A
+  self-hosted instance with a private certificate authority works when the CA
+  is in the system store (or `SSL_CERT_FILE` / `SSL_CERT_DIR` point to it).
+* **Settings are checked before the backup starts**: a missing token, an
+  `http://` URL or a missing owner ends the run at once (exit status `1`)
+  instead of after the backup.
 
 ## Mirror Flags
 
@@ -81,6 +118,7 @@ skipped.
 | `--mirror-owner <OWNER>` | none | User, organisation (Gitea) or namespace (GitLab) to create repositories under; default: the GitHub OWNER |
 | `--mirror-private` | none | Create every repository private (the default) |
 | `--mirror-public` | none | Create mirrors of public repositories as public |
+| `--prune` | none | Also delete destination branches and tags that no longer exist locally (the same flag prunes the local clones) |
 
 `--mirror-to`, `--mirror-token` (or `MIRROR_TOKEN`), `--mirror-owner`,
 `--mirror-private` and `--mirror-public` can also be set in the config file; `--mirror-type` cannot.
@@ -104,17 +142,23 @@ github-backup octocat --output /backup --repositories \
   --mirror-owner my-group-or-username
 ```
 
-`--mirror-owner` is the namespace path (a user or a group).  The token must be
-allowed to create projects there (a personal or group access token with the
-`api` scope).
+`--mirror-owner` is the namespace path: a user, a group or a subgroup
+(`group/subgroup`).  It is resolved to its id with `GET /api/v4/namespaces/<path>`
+and the project is created there with `POST /api/v4/projects` (`namespace_id`,
+`path`); a namespace that does not exist, or that the token cannot see, is an
+error for every repository.  The token must be allowed to create projects there
+(a personal or group access token with the `api` scope).
 
 ## Failures
 
 A destination that cannot be reached, a refused push or a foreign repository
 is logged per repository and **recorded as a failure** of the run (step
 `mirror push`, exit status `3`); the remaining repositories are still
-mirrored.  The destination's own API calls do not use `HTTPS_PROXY` (the `git
-push` itself follows git's proxy settings).
+mirrored.  An error answer from the API is quoted in the message (for example
+Forgejo's `422` for a repository name it rejects).  API calls that fail with a
+`5xx` status, a dropped connection or a timeout are tried up to three times.
+The destination's own API calls do not use `HTTPS_PROXY` (the `git push`
+itself follows git's proxy settings).
 
 ## Docker Compose Example
 
@@ -128,26 +172,4 @@ services:
     command: >
       octocat
       --output /backup
-      --repositories
-      --mirror-to https://codeberg.org
-      --mirror-owner your_username
-    volumes:
-      - backup_data:/backup
-
-volumes:
-  backup_data:
-```
-
-Export `GITHUB_TOKEN` and `MIRROR_TOKEN` in the shell (or an `.env` file) that
-runs Compose.  See the [Docker guide](docker.md) for the bundled Compose
-profiles (`codeberg`, `gitlab`).
-
-## Limitations
-
-* One-way: GitHub to destination.  Anything pushed to a mirror by hand on a
-  branch that exists on GitHub is overwritten at the next run.
-* The first push of a large repository can take a long time.  The push has no
-  stall timeout of its own.
-* The behaviour against real Codeberg, Gitea, Forgejo and GitLab servers has not
-  been verified by the project; it is tested with mock servers and local git
-  remotes.
+   

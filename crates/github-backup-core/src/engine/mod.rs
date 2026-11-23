@@ -35,7 +35,7 @@ use tracing::{error, info, warn};
 use github_backup_client::BackupClient;
 use github_backup_types::backup_state::BackupCheckpoint;
 use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
-use github_backup_types::{Raw, Repository};
+use github_backup_types::{Page, Raw, Repository};
 
 use self::incremental::{Incremental, RunSummary};
 use self::repo::{backup_one_repo, Refusals, RepoContext, RepoResult};
@@ -113,6 +113,10 @@ pub struct BackupEngine<C, S, G> {
     /// Optional channel for real-time per-repo progress events.
     engine_events: Option<EngineEventTx>,
     cancel: CancelFlag,
+    /// Check every repository with `git fsck` after cloning or updating it.
+    git_fsck: bool,
+    /// Seconds a git subprocess may stay silent before it is stopped.
+    git_stall_timeout_secs: u64,
 }
 
 impl<C, S, G> BackupEngine<C, S, G>
@@ -132,7 +136,33 @@ where
             opts,
             engine_events: None,
             cancel: CancelFlag::new(),
+            git_fsck: false,
+            git_stall_timeout_secs: CloneOptions::default().stall_timeout_secs,
         }
+    }
+
+    /// Checks every repository (owned, wiki, gist and starred clones) with
+    /// `git fsck --no-dangling` after it is cloned or updated.
+    ///
+    /// A repository that fails the check is recorded as a failure of its step
+    /// ([`CoreError::GitFsckFailed`]); a fresh clone that fails is not kept.
+    /// Off by default: the check reads every object, which takes a while for
+    /// large repositories.
+    #[must_use]
+    pub fn with_git_fsck(mut self, enabled: bool) -> Self {
+        self.git_fsck = enabled;
+        self
+    }
+
+    /// Sets how many seconds a git subprocess may go without printing
+    /// anything before it is stopped as stalled (default 600; at least 1).
+    ///
+    /// The same limit decides when a `.lock` file left in a repository counts
+    /// as stale and is removed before an update.
+    #[must_use]
+    pub fn with_git_stall_timeout(mut self, secs: u64) -> Self {
+        self.git_stall_timeout_secs = secs.max(1);
+        self
     }
 
     /// Attaches an event channel for real-time progress reporting.
@@ -177,7 +207,7 @@ where
     /// the lock, or the run was cancelled.
     pub async fn run(&self, owner: &str) -> Result<BackupStats, CoreError> {
         let stats = BackupStats::new();
-        let started_at = chrono::Utc::now();
+        let started_at = jiff::Timestamp::now();
         info!(owner, dry_run = self.opts.dry_run, "starting backup");
 
         if self.opts.dry_run {
@@ -189,11 +219,19 @@ where
         let _lock = if self.opts.dry_run {
             None
         } else {
-            Some(Self::acquire_lock(&json_dir, owner)?)
+            let lock = Self::acquire_lock(&json_dir, owner)?;
+            // With the lock held nobody else writes here: any temporary file
+            // is a leftover of a killed run.
+            crate::storage::sweep_temp_files(&json_dir);
+            Some(lock)
         };
 
         let control = RunControl::new(self.cancel.clone());
-        let clone_opts = self.make_clone_opts();
+        // A fatal error stops the work in flight the way a cancellation does,
+        // git processes included: they watch the run's stop flag, which the
+        // user's cancellation also triggers.
+        let _forward = forward_cancellation(&self.cancel, control.stop_flag());
+        let clone_opts = self.make_clone_opts(control.stop_flag());
         // The credential must never appear in a message that is stored or sent.
         let secrets: Arc<Vec<String>> = Arc::new(self.client.token().into_iter().collect());
 
@@ -302,7 +340,9 @@ where
         // still give way at once to a cancellation.
         let repos = tokio::select! {
             repos = self.fetch_repos(owner) => repos?,
-            () = control.cancelled() => return Err(CoreError::Interrupted),
+            () = control.stopped() => {
+                return Err(control.take_stop_reason().unwrap_or(CoreError::Interrupted));
+            }
         };
         let repo_count = repos.len();
         info!(owner, count = repo_count, "fetched repository list");
@@ -317,6 +357,22 @@ where
             self.write_repo_list(owner, &repos, &stats, &control, &secrets)
                 .await;
         }
+        if repos.unparsed_count() > 0 {
+            // Kept verbatim in repos.json, but never cloned: the run must say so.
+            let count = repos.unparsed_count();
+            warn!(
+                owner,
+                count, "repository objects the typed model cannot read"
+            );
+            Steps::new(owner, &stats, &control, &secrets).record(
+                "repository list",
+                &format!(
+                    "{count} repository object(s) in the listing could not be read and were not \
+                     backed up (they are kept verbatim in repos.json)"
+                ),
+            );
+        }
+        let repos = repos.into_items();
 
         let state_path = self.output.backup_state_path(owner);
         let incremental = Incremental::load(&state_path, &self.opts);
@@ -337,15 +393,26 @@ where
             return Err(e);
         }
 
-        // The run reached its end, so there is nothing to resume.  A repository
-        // that failed was not marked in the checkpoint, and the next run starts
-        // from scratch for it either way.
-        let checkpoint_path = self.output.backup_checkpoint_path(owner);
-        if let Err(e) = BackupCheckpoint::delete(&checkpoint_path) {
-            warn!(error = %e, "failed to delete checkpoint file after the run");
-        }
-
         if !self.opts.dry_run {
+            // The run reached its end, so there is nothing to resume.  A
+            // repository that failed was not marked in the checkpoint, and the
+            // next run starts from scratch for it either way.  A checkpoint
+            // that stays would make the next run (within its resume window)
+            // skip what this run finished, so failing to delete it is a
+            // failure of the run.
+            let checkpoint_path = self.output.backup_checkpoint_path(owner);
+            if let Err(e) = BackupCheckpoint::delete(&checkpoint_path) {
+                Steps::new(owner, &stats, &control, &secrets).record(
+                    "checkpoint",
+                    &format!(
+                        "{e}; a run started within {} hours would skip the repositories this run \
+                         finished: delete {} by hand",
+                        CHECKPOINT_MAX_AGE.as_hours(),
+                        checkpoint_path.display()
+                    ),
+                );
+            }
+
             let clean = stats.clean_repos();
             let summary = RunSummary {
                 started_at,
@@ -353,6 +420,8 @@ where
                 repos_backed_up: stats.repos_backed_up(),
                 fully_successful: !stats.has_failures(),
             };
+            // Not a failure of the backup: without the new state the next run
+            // only fetches more than it needs (stored watermarks are older).
             match incremental.finish(&state_path, &summary) {
                 Ok(()) => info!(path = %state_path.display(), "wrote backup state"),
                 Err(e) => warn!(error = %e, "failed to write backup state file"),
@@ -404,10 +473,13 @@ where
     }
 
     /// Fetches the repository list using the user or org API as appropriate.
-    async fn fetch_repos(&self, owner: &str) -> Result<Vec<Raw<Repository>>, CoreError> {
+    ///
+    /// The page keeps the repository objects the typed model cannot read, so
+    /// they can be written verbatim and reported.
+    async fn fetch_repos(&self, owner: &str) -> Result<Page<Repository>, CoreError> {
         match self.opts.target {
-            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?.into_items()),
-            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?.into_items()),
+            BackupTarget::User => Ok(self.client.list_user_repos(owner).await?),
+            BackupTarget::Org => Ok(self.client.list_org_repos(owner).await?),
         }
     }
 
@@ -415,18 +487,22 @@ where
     /// merged with earlier listings so a repository deleted on GitHub stays
     /// recorded.  Repositories the options exclude (forks, private, filters) are
     /// left out, so excluding something also keeps its metadata out of the
-    /// backup directory.
+    /// backup directory.  Objects the typed model cannot read cannot be
+    /// filtered either; they are written verbatim, so nothing GitHub sent is
+    /// lost.
     async fn write_repo_list(
         &self,
         owner: &str,
-        repos: &[Raw<Repository>],
+        repos: &Page<Repository>,
         stats: &BackupStats,
         control: &RunControl,
         secrets: &[String],
     ) {
-        let included: Vec<&Raw<Repository>> = repos
+        let included: Vec<&serde_json::Value> = repos
             .iter()
             .filter(|r| should_include(r, &self.opts))
+            .map(Raw::json)
+            .chain(repos.unparsed())
             .collect();
         let path = self.output.owner_json_dir(owner).join("repos.json");
         let mut steps = Steps::new(owner, stats, control, secrets);
@@ -457,6 +533,13 @@ where
     ) {
         let total = repos.len();
         let checkpoint_path = self.output.backup_checkpoint_path(owner);
+        let fingerprint = self.checkpoint_fingerprint(owner);
+        let fresh = || {
+            Arc::new(tokio::sync::Mutex::new(BackupCheckpoint {
+                fingerprint: fingerprint.clone(),
+                ..BackupCheckpoint::default()
+            }))
+        };
 
         // Load any existing checkpoint from an interrupted prior run.
         let checkpoint = match BackupCheckpoint::load(&checkpoint_path) {
@@ -465,8 +548,18 @@ where
                     last_activity = %cp.last_updated_at,
                     "ignoring a checkpoint that is too old to resume: every repository is refreshed"
                 );
-                Arc::new(tokio::sync::Mutex::new(BackupCheckpoint::default()))
+                fresh()
             }
+            // A run with other options (other categories, another clone type,
+            // other filters) did not do this run's work for the repositories it
+            // finished.
+            Ok(cp) if !cp.completed_repos.is_empty() && cp.fingerprint != fingerprint => {
+                warn!(
+                    "ignoring a checkpoint written by a run with different options: every repository is backed up"
+                );
+                fresh()
+            }
+            Ok(cp) if cp.completed_repos.is_empty() => fresh(),
             Ok(cp) => {
                 let resumed = cp.completed_repos.len();
                 if resumed > 0 {
@@ -481,7 +574,7 @@ where
             }
             Err(e) => {
                 warn!(error = %e, "failed to load checkpoint; starting fresh");
-                Arc::new(tokio::sync::Mutex::new(BackupCheckpoint::default()))
+                fresh()
             }
         };
 
@@ -536,15 +629,20 @@ where
             // Clone the event sender so the task can emit per-repo events.
             let event_tx = self.engine_events.clone();
             let name = repo.full_name.clone();
+            // A repository that is filtered out or only listed (dry run) is
+            // never reported as started: it would have no completion event,
+            // and a listener would show it as running for ever.
+            let attempted = !self.opts.dry_run && should_include(&repo, &self.opts);
 
             let handle = tokio::spawn(async move {
                 let _permit = permit; // released when task completes
 
-                // Notify listeners that this repo is starting.
-                if let Some(ref tx) = event_tx {
-                    let _ = tx.send(EngineEvent::RepoStarted {
-                        name: repo.full_name.clone(),
-                    });
+                if attempted {
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(EngineEvent::RepoStarted {
+                            name: repo.full_name.clone(),
+                        });
+                    }
                 }
 
                 let ctx = RepoContext {
@@ -583,8 +681,7 @@ where
                         }
                         // Mark complete in the checkpoint.
                         let mut guard = cp.lock().await;
-                        let now =
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let now = crate::time::now_utc();
                         if guard.run_started_at.is_empty() {
                             guard.run_started_at = now.clone();
                         }
@@ -624,14 +721,21 @@ where
             // reported: the repository was not backed up.
             if let Err(e) = handle.await {
                 error!(repo = %name, error = %e, "repository backup task panicked");
+                let message = format!("backup task panicked: {e}");
                 stats.inc_errored();
-                stats.record_failure(&name, "task", format!("backup task panicked: {e}"));
+                stats.record_failure(&name, "task", message.clone());
+                self.emit(EngineEvent::RepoCompleted {
+                    name,
+                    success: false,
+                    error: Some(message),
+                });
             }
         }
     }
 
-    /// Builds [`CloneOptions`] from the current `BackupOptions`.
-    fn make_clone_opts(&self) -> CloneOptions {
+    /// Builds [`CloneOptions`] from the current `BackupOptions`; git work stops
+    /// when `cancel` is triggered.
+    fn make_clone_opts(&self, cancel: CancelFlag) -> CloneOptions {
         let token = match self.opts.prefer_ssh {
             // SSH uses key-based auth; no token needed in clone opts.
             true => None,
@@ -643,21 +747,59 @@ where
         CloneOptions {
             token,
             prune: self.opts.prune,
-            cancel: self.cancel.clone(),
-            ..CloneOptions::default()
+            stall_timeout_secs: self.git_stall_timeout_secs,
+            run_fsck: self.git_fsck,
+            cancel,
         }
+    }
+
+    /// Identifies what a run does, so that a checkpoint is resumed only by a
+    /// run that would do the same work: the owner and every option except
+    /// those that change only how the work is scheduled or reported.
+    fn checkpoint_fingerprint(&self, owner: &str) -> String {
+        let opts = BackupOptions {
+            concurrency: 0,
+            dry_run: false,
+            ..self.opts.clone()
+        };
+        let described = serde_json::json!({
+            "owner": owner,
+            "options": opts,
+            "git_fsck": self.git_fsck,
+        });
+        crate::manifest::sha256_hex(described.to_string().as_bytes())
+    }
+}
+
+/// Triggers `stop` when `user` is triggered, for as long as the returned guard
+/// lives.
+fn forward_cancellation(user: &CancelFlag, stop: CancelFlag) -> AbortOnDrop {
+    let user = user.clone();
+    AbortOnDrop(tokio::spawn(async move {
+        user.cancelled().await;
+        stop.cancel();
+    }))
+}
+
+/// Aborts a background task when dropped.
+#[derive(Debug)]
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
 /// How long after its last activity an interrupted run's checkpoint is still
 /// resumed.
-const CHECKPOINT_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);
+const CHECKPOINT_MAX_AGE: jiff::SignedDuration = jiff::SignedDuration::from_hours(6);
 
 /// `true` if `cp` is too old (or of unknown age) to resume.
 fn checkpoint_is_stale(cp: &BackupCheckpoint) -> bool {
-    match chrono::DateTime::parse_from_rfc3339(&cp.last_updated_at) {
-        Ok(last) => chrono::Utc::now().signed_duration_since(last) > CHECKPOINT_MAX_AGE,
-        Err(_) => true,
+    match crate::time::parse_rfc3339(&cp.last_updated_at) {
+        Some(last) => crate::time::age(last) > CHECKPOINT_MAX_AGE,
+        None => true,
     }
 }
 

@@ -140,6 +140,15 @@ is bumped.
 
 ### Changed
 
+- **Minimum Rust version is 1.89** (was 1.88): the output-directory and per-owner
+  locks now use the standard library's `File::try_lock`, and the `fslock` crate is
+  gone.  The locks are released explicitly on drop, so a child process started on
+  another thread at that moment cannot keep them held.
+- **Dependencies:** the RustCrypto crates move together to their current generation
+  (`aes-gcm` 0.11, `aes` 0.9 with `zeroize` still enabled, `hmac` 0.13, `sha2` 0.11);
+  nonces and retry jitter come from `getrandom` directly.  `toml` 1, `nix` 0.32,
+  `criterion` 0.8.  Unused dependencies were removed from four crates.
+
 - **Rate limits** (403 or 429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a
   rate-limit message) are waited out and retried (up to 6 times, about an hour in
   total per request, at least a minute and doubling when GitHub gives no hint)
@@ -228,6 +237,12 @@ is bumped.
   validated and kept out of `Debug` output.
 - `github-backup-core` is `#![forbid(unsafe_code)]`.
 - Dependencies updated past five open advisories.
+- **Lock file refreshed past five more advisories** that had turned the scheduled
+  audit red: `rustls` 0.23.46 and `rustls-webpki` 0.103.17 (RUSTSEC-2026-0346,
+  -0347, -0348, -0349 and -0382).  `chrono`, declared unmaintained
+  (RUSTSEC-2026-0543), is replaced by `jiff`.  No advisory is ignored any more:
+  the stale `RUSTSEC-2026-0097` entries in `.cargo/audit.toml` and the CI audit job
+  no longer matched anything in `Cargo.lock` (reported in issue #37).
 - **Token redaction** in error output (`<prefix>_<redacted>`), and the credential
   type's `Debug` output no longer prints the token.
 

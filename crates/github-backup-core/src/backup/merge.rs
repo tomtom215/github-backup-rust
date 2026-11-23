@@ -20,7 +20,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use chrono::DateTime;
 use serde::Serialize;
 use serde_json::Value;
 use tracing::warn;
@@ -181,10 +180,10 @@ pub(crate) fn unchanged_since(updated_at: &str, since: Option<&str>) -> bool {
         return false;
     };
     match (
-        DateTime::parse_from_rfc3339(updated_at),
-        DateTime::parse_from_rfc3339(since),
+        crate::time::parse_rfc3339(updated_at),
+        crate::time::parse_rfc3339(since),
     ) {
-        (Ok(updated), Ok(since)) => updated < since,
+        (Some(updated), Some(since)) => updated < since,
         _ => false,
     }
 }

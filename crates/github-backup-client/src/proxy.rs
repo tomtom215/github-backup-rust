@@ -2,7 +2,8 @@
 // Copyright 2026 Tom F
 
 //! Proxy support shared by everything in the backup that talks HTTP(S): the
-//! GitHub API client, the webhook notifier and `--doctor`.
+//! GitHub API client, the OAuth device flow, the webhook notifier and
+//! `--doctor`.
 //!
 //! [`ProxySettings`] reads the conventional environment variables
 //! (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`, each in lower and
@@ -48,7 +49,9 @@ use crate::error::ClientError;
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 /// One proxy: where it listens and the optional `Proxy-Authorization` value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Its `Debug` output redacts the credentials.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Proxy host name or IP.
     pub host: String,
@@ -57,6 +60,19 @@ pub struct ProxyConfig {
     /// Ready-to-send `Proxy-Authorization: Basic <base64>` value, if the proxy
     /// URL carried credentials.
     pub auth_header: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "auth_header",
+                &self.auth_header.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 /// The proxy configuration of the process environment.
@@ -400,7 +416,7 @@ impl Service<Uri> for ProxyConnector {
     }
 }
 
-/// Sends `CONNECT host:port` to the proxy and waits for a `200` response.
+/// Sends `CONNECT host:port` to the proxy and waits for a `2xx` response.
 async fn connect_tunnel(
     mut stream: TcpStream,
     host: &str,
@@ -410,8 +426,13 @@ async fn connect_tunnel(
     let auth_line = auth
         .map(|a| format!("Proxy-Authorization: {a}\r\n"))
         .unwrap_or_default();
-    let request =
-        format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth_line}\r\n");
+    // An IPv6 literal is bracketed in an authority (RFC 3986, section 3.2.2).
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth_line}\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     // Read the response header (terminated by \r\n\r\n).
@@ -430,7 +451,15 @@ async fn connect_tunnel(
         }
     }
 
-    if !buf.starts_with(b"HTTP/1.1 200") && !buf.starts_with(b"HTTP/1.0 200") {
+    // Any 2xx status establishes the tunnel (RFC 9110, section 9.3.6).
+    let established = buf.starts_with(b"HTTP/1.")
+        && buf.get(8) == Some(&b' ')
+        && buf.get(9) == Some(&b'2')
+        && buf
+            .get(10..12)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+        && matches!(buf.get(12), Some(b' ' | b'\r'));
+    if !established {
         let line = String::from_utf8_lossy(&buf)
             .lines()
             .next()
@@ -505,6 +534,16 @@ impl ProxyClient {
             Kind::Direct(Client::builder(TokioExecutor::new()).build(https))
         };
         Self { kind, settings }
+    }
+
+    /// A client for tests against local plain-HTTP servers: no proxy, an
+    /// empty CA store, `http://` allowed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_tests() -> Self {
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        Self::new(ProxySettings::default(), tls, true)
     }
 
     /// The settings this client applies.
@@ -789,5 +828,45 @@ mod tests {
             false,
         );
         assert!(c.request(get("http://example.invalid/x")).await.is_err());
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_proxy_credentials() {
+        let s = settings(&[("HTTPS_PROXY", "http://alice:s3cr3t@proxy.example.com:1")]);
+        for text in [format!("{s:?}"), format!("{:?}", s.https.as_ref().unwrap())] {
+            assert!(!text.contains("YWxpY2U6czNjcjN0"), "{text}");
+            assert!(!text.contains("s3cr3t"), "{text}");
+            assert!(text.contains("proxy.example.com"), "{text}");
+            assert!(text.contains("[redacted]"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_brackets_an_ipv6_target() {
+        let (proxy_port, heads) = fake_server("HTTP/1.1 403 Forbidden\r\n\r\n").await;
+        let c = client(&[("HTTPS_PROXY", format!("http://127.0.0.1:{proxy_port}"))]);
+        let _ = c.request(get("https://[2001:db8::1]:8443/x")).await;
+        let head = heads.lock().unwrap()[0].clone();
+        assert!(
+            head.starts_with("CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_2xx_answer_to_connect_opens_the_tunnel() {
+        // RFC 9110 section 9.3.6: any 2xx means the tunnel is established.  The fake
+        // proxy then closes the connection, so the TLS handshake fails - but
+        // not with "proxy CONNECT failed".
+        let (proxy_port, _) = fake_server("HTTP/1.1 204 No Content\r\n\r\n").await;
+        let c = client(&[("HTTPS_PROXY", format!("http://127.0.0.1:{proxy_port}"))]);
+        let err = c
+            .request(get("https://api.example.invalid/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            !format!("{err:?}").contains("proxy CONNECT failed"),
+            "{err:?}"
+        );
     }
 }
