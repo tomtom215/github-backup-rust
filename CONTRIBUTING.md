@@ -33,7 +33,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 cargo +1.89 check --workspace --all-targets --locked   # MSRV
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked
 cargo deny check licenses bans advisories sources
 ```
 
