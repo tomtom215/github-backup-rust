@@ -148,15 +148,10 @@ pub(crate) fn write_prometheus_metrics(
             std::fs::create_dir_all(parent).map_err(|e| format!("create metrics dir: {e}"))?;
         }
     }
-    let tmp = match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp")),
-        None => path.with_extension("tmp"),
-    };
-    std::fs::write(&tmp, text.as_bytes()).map_err(|e| format!("write metrics tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename metrics tmp: {e}")
-    })
+    // The temporary name (`.<name>.tmp-…`) does not end in `.prom`, so the
+    // node_exporter textfile collector never reads a half-written file.
+    github_backup_types::atomic_file::write(path, text.as_bytes())
+        .map_err(|e| format!("write metrics {}: {e}", path.display()))
 }
 
 #[cfg(test)]

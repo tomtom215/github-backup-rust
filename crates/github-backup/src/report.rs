@@ -102,24 +102,12 @@ pub fn write_report(
     write_atomic(path, json.as_bytes())
 }
 
-/// Writes `bytes` to `path` atomically.
-///
-/// Writes to a sibling `*.tmp` file first, then renames over `path`.  This
-/// avoids leaving a half-written report visible to monitoring systems if the
-/// process is interrupted mid-write — a common failure mode when the host
-/// is shutting down (the same SIGTERM that kills `github-backup` also kills
-/// the Prometheus node exporter that reads the file moments later).
+/// Writes `bytes` to `path` atomically and durably (see
+/// [`github_backup_types::atomic_file`]), so a monitoring system never reads a
+/// half-written report, even when the host is shutting down.
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp")),
-        None => path.with_extension("tmp"),
-    };
-    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write report tmp: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        // Best-effort cleanup so we don't leave the .tmp on the filesystem.
-        let _ = std::fs::remove_file(&tmp);
-        format!("cannot rename report tmp into place: {e}")
-    })
+    github_backup_types::atomic_file::write(path, bytes)
+        .map_err(|e| format!("cannot write report {}: {e}", path.display()))
 }
 
 /// Current Unix time in seconds.
@@ -153,15 +141,12 @@ mod tests {
             b"{\"ok\": true}",
             "target should contain the bytes we wrote"
         );
-        // Neither `report.tmp` nor `report.json.tmp` should remain.
-        for ext in ["tmp", "json.tmp"] {
-            let stray = target.with_extension(ext);
-            assert!(
-                !stray.exists(),
-                "tmp file {} must not be left behind",
-                stray.display()
-            );
-        }
+        // Only the report itself remains: no temporary file is left behind.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["report.json"], "unexpected files: {names:?}");
     }
 
     #[test]
