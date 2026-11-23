@@ -1,31 +1,33 @@
 # SPDX-License-Identifier: MIT
 # Copyright 2026 Tom F
 #
-# Scheduled dependency advisory audit.  CI audits only when code changes; new
-# RustSec advisories appear independently of commits, so this runs daily
-# against the committed Cargo.lock and can also be started by hand.
+# Scheduled dependency advisory audit.  CI checks advisories (with cargo-deny)
+# only when code changes; new RustSec advisories appear independently of
+# commits, so this runs daily against the Cargo.lock on main and can also be
+# started by hand.  A failure shows up as a failed scheduled run on main.
 name: Advisory audit
 
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
-  pull_request:
-    paths:
-      - Cargo.lock
-      - deny.toml
-      - .github/workflows/audit.yml
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 jobs:
   cargo-deny:
-    name: cargo-deny
+    name: cargo-deny advisories
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      # Tag ref, not a commit SHA (see ci.yml); Dependabot keeps it current.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          command: check advisories sources bans licenses
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
+        with:
+          command: check advisories

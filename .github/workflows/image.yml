@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: MIT
+# Copyright 2026 Tom F
+#
+# Reusable workflow: package the static Linux binaries that the calling
+# workflow already built into the multi-arch container image, and (when
+# `push` is true) publish it to GHCR with an SBOM, max-mode build provenance
+# and a GitHub artifact attestation.
+#
+# Called by release.yml (release tags) and edge.yml (`:edge` from main).  The
+# caller must first upload the artefacts `github-backup-linux-x86_64` and
+# `github-backup-linux-aarch64`, each holding the binary and its `.sha256`.
+#
+# Nothing is compiled here: the Dockerfile's `prebuilt` stage copies the
+# binary in, so the image carries exactly the bytes of the release binary.
+# QEMU is still needed for the arm64 runtime stage's few RUN steps (apk add,
+# adduser, git config), which take seconds.
+
+name: Container image
+
+on:
+  workflow_call:
+    inputs:
+      push:
+        description: "Push to GHCR and attest (false: build only)"
+        type: boolean
+        required: true
+      tags:
+        description: "docker/metadata-action `tags` rules"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build${{ inputs.push && ' and push' || '' }} image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write          # push to GHCR
+      id-token: write          # sign the attestation
+      attestations: write      # store the attestation
+      artifact-metadata: write # storage record for the attested image
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the Linux binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist/
+          pattern: github-backup-linux-*
+          merge-multiple: true
+
+      - name: Verify checksums and lay out one binary per platform
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c github-backup-linux-x86_64.sha256 github-backup-linux-aarch64.sha256)
+          mkdir -p binaries/amd64 binaries/arm64
+          cp dist/github-backup-linux-x86_64  binaries/amd64/github-backup
+          cp dist/github-backup-linux-aarch64 binaries/arm64/github-backup
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      # Multi-platform output needs Buildx's docker-container driver.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: inputs.push
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: ${{ inputs.tags }}
+
+      - name: Build${{ inputs.push && ' and push' || '' }}
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          build-args: BINARY_STAGE=prebuilt
+          build-contexts: binaries=binaries
+          platforms: linux/amd64,linux/arm64
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest the image
+        if: inputs.push
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Smoke-test the pushed image on both platforms
+        if: inputs.push
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" "$IMAGE" --version
+          done
