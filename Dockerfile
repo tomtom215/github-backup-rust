@@ -52,6 +52,7 @@ COPY crates/github-backup-core/Cargo.toml    crates/github-backup-core/Cargo.tom
 COPY crates/github-backup-mirror/Cargo.toml  crates/github-backup-mirror/Cargo.toml
 COPY crates/github-backup-s3/Cargo.toml      crates/github-backup-s3/Cargo.toml
 COPY crates/github-backup-tui/Cargo.toml     crates/github-backup-tui/Cargo.toml
+COPY crates/github-backup-viewer/Cargo.toml  crates/github-backup-viewer/Cargo.toml
 COPY crates/github-backup/Cargo.toml         crates/github-backup/Cargo.toml
 
 # Create stub source files so the dependency graph can be resolved *and
@@ -63,7 +64,8 @@ COPY crates/github-backup/Cargo.toml         crates/github-backup/Cargo.toml
 # including the C/asm build of aws-lc-sys, into this cached layer, so an edit
 # to workspace source only recompiles the workspace crates.
 RUN for crate in github-backup-types github-backup-client github-backup-core \
-        github-backup-mirror github-backup-s3 github-backup-tui; do \
+        github-backup-mirror github-backup-s3 github-backup-tui \
+        github-backup-viewer; do \
       mkdir -p crates/${crate}/src && \
       echo "" > crates/${crate}/src/lib.rs; \
     done && \
@@ -83,7 +85,7 @@ RUN cargo clean --release \
         --package github-backup --package github-backup-types \
         --package github-backup-client --package github-backup-core \
         --package github-backup-mirror --package github-backup-s3 \
-        --package github-backup-tui && \
+        --package github-backup-tui --package github-backup-viewer && \
     cargo build --release --locked --package github-backup
 
 # ── Optional stage: export the bare binary ───────────────────────────────────

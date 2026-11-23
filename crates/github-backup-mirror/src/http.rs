@@ -3,7 +3,7 @@
 
 //! The HTTPS client shared by the Gitea and GitLab API clients: HTTPS only,
 //! the proxy environment honoured (the GitHub client's
-//! [`ProxyClient`](github_backup_client::ProxyClient)), a per-request
+//! [`ProxyClient`]), a per-request
 //! timeout, a cap on response bodies, and retries of transient failures.
 //!
 //! The API token travels in a request header, so the client refuses plain
