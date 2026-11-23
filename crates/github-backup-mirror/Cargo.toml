@@ -30,5 +30,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# The API client tests run a fake Gitea / GitLab server in-process.
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }

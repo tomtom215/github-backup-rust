@@ -137,10 +137,12 @@ Post-processing: push the cloned repositories to another host.
 - `GiteaClient` (REST v1) and `GitLabClient` (REST v4): check the destination,
   create it (private unless the source is known to be public), and verify that it
   is ours (description marker `GitHub mirror of <owner>/<repo>`) or empty.
-- `push.rs`: `git push --prune` of `refs/heads/*` and `refs/tags/*` only (never
-  `--mirror`), with the token in an environment variable and a credential helper
-  scoped to the destination origin.
-- `runner` / `gitlab_runner`: walk `git/repos/*.git` and report per-repository
+  HTTPS only, with retries of `5xx` and transport failures (`http.rs`).
+- `push.rs`: `git push` of `refs/heads/*` and `refs/tags/*` only (never
+  `--mirror`; `--prune` only with `--prune`), with the token in an environment
+  variable and a credential helper scoped to the destination origin.
+- `runner`: walk `git/repos/*.git`, skip repositories whose backup failed in
+  this run, shallow clones and clones without refs, and report per-repository
   failures.
 
 ### `github-backup-s3`
@@ -153,7 +155,11 @@ Post-processing: upload the JSON metadata to an S3-compatible store.
 - `sync_to_s3`: concurrent sync of `<output>/<owner>/json/`; an object is skipped
   only when its stored SHA-256 digest (keyed HMAC for encrypted uploads) and size
   match; guarded `--s3-delete-stale`.
-- `encrypt`: AES-256-GCM, wire format `[12-byte nonce | ciphertext | 16-byte tag]`.
+  Files larger than one part are streamed part by part (one part in memory per
+  upload).
+- `encrypt`: AES-256-GCM in the STREAM construction (`aead-stream` crate, 64 KiB
+  segments) under a per-object HKDF-SHA256 key; objects of the earlier
+  single-message format still decrypt.
 
 ### `github-backup-tui`
 

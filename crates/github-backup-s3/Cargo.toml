@@ -35,6 +35,9 @@ zeroize = { workspace = true }
 # round keys are wiped on drop only when the `aes` crate's `zeroize` feature is
 # enabled, so it is requested explicitly (see `docs/src/storage/encryption.md`).
 aes = { version = "0.9", features = ["zeroize"] }
+# The STREAM construction for segment-wise encryption of large files.  It
+# lived in `aead::stream` until `aead` 0.6 moved it to this RustCrypto crate.
+aead-stream = { version = "0.6", features = ["alloc"] }
 # Constant-time comparison of the stored and the recomputed plaintext digest.
 subtle = "2"
 # Nonces for AES-GCM and retry jitter come straight from the operating system.
