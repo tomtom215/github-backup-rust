@@ -184,7 +184,8 @@ jobs:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@bd12b495c90993a4301c73398142281a61499af3 # v0.9.0
         with:
-          version: 1.33.1
+          # The newest version this action release has a hash-pinned lock file for.
+          version: 1.33.0
           # Report findings as a failing check, without uploading SARIF (which
           # would need `security-events: write`).
           advanced-security: false
