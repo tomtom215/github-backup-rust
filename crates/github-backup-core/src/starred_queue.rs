@@ -3,10 +3,9 @@
 
 //! Persistence and management for the starred-repository clone queue.
 //!
-//! The queue is serialised as pretty-printed JSON and written **atomically**:
-//! a sibling `.tmp` file is written first, then renamed into place.  This
-//! guarantees that a crash or Ctrl+C can never leave the queue file in a
-//! truncated or partially-written state.
+//! The queue is serialised as pretty-printed JSON and written **atomically**
+//! (a synced temporary file renamed into place), so a crash, Ctrl+C or power
+//! cut never leaves the queue file truncated or empty.
 //!
 //! # Resuming
 //!
@@ -113,27 +112,17 @@ pub fn begin_pass(queue: &mut StarredCloneQueue) {
     }
 }
 
-/// Writes `queue` to `path` atomically.
-///
-/// The queue is serialised to a sibling `.tmp` file which is then renamed
-/// over `path`.  Creates parent directories as needed.
+/// Writes `queue` to `path` atomically and durably (see
+/// [`atomic_file`](github_backup_types::atomic_file)), creating parent
+/// directories as needed.
 ///
 /// # Errors
 ///
 /// Returns [`CoreError`] on I/O or serialisation failure.
 pub fn save(queue: &mut StarredCloneQueue, path: &Path) -> Result<(), CoreError> {
     queue.updated_at = Utc::now().to_rfc3339();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CoreError::io(parent.display().to_string(), e))?;
-    }
-
-    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(queue)?;
-    std::fs::write(&tmp, &json).map_err(|e| CoreError::io(tmp.display().to_string(), e))?;
-    std::fs::rename(&tmp, path).map_err(|e| CoreError::io(path.display().to_string(), e))?;
-    Ok(())
+    crate::storage::write_atomic(path, json.as_bytes())
 }
 
 /// Computes aggregate statistics from the current queue contents.

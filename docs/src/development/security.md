@@ -133,7 +133,8 @@ S3 credentials are accepted through `--s3-access-key` / `--s3-secret-key` /
 ## Integrity: What the Manifest Does and Does Not Do
 
 `--manifest` records SHA-256 digests of the data files under `json/` (not the
-history, state, checkpoint and lock files, which change on every run);
+history, state, checkpoint and lock files, which change on every run, nor
+temporary files of an unfinished write);
 `--verify` compares them.  It detects accidental damage and casual edits.  It
 does not cover the git clones, it is not signed (it sits next to the files it
 describes), and it has no digest of its own.
