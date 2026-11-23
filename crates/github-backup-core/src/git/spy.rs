@@ -39,6 +39,8 @@ pub enum SpyFailure {
     },
     /// The run was cancelled.
     Interrupted,
+    /// The call panics (a bug in a backup task).
+    Panic,
 }
 
 /// A recorded call to a [`GitRunner`] method.
@@ -124,6 +126,7 @@ impl SpyGitRunner {
         {
             None => Ok(()),
             Some((_, SpyFailure::Interrupted)) => Err(CoreError::Interrupted),
+            Some((_, SpyFailure::Panic)) => panic!("spy git runner told to panic for {url}"),
             Some((_, SpyFailure::Git { code, stderr })) => Err(CoreError::GitFailed {
                 args: format!("clone {url}"),
                 code: *code,

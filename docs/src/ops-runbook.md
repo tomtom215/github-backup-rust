@@ -56,7 +56,9 @@ a few; nothing is left half-written under its real name.  What to expect:
    were finished.
 2. Re-run the same command.  Within 6 hours of the interruption the run resumes
    and skips those repositories; after that the checkpoint is ignored and every
-   repository is refreshed.  Either way the git clones are only updated, not
+   repository is refreshed.  A run with different options (other categories,
+   another clone type, other filters) never resumes it, and a `--dry-run`
+   leaves it untouched.  Either way the git clones are only updated, not
    cloned again, and a repository that was in the middle of its **first** clone
    starts that clone again (the partial one is in a hidden staging directory,
    removed automatically).

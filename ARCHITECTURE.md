@@ -96,14 +96,21 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (comments, events, commits, reviews) can be skipped.  `--full` ignores it; an
   explicit `--since` replaces it and is never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
-  current run; a later run resumes from it only if it is less than 6 hours old.
+  current run and a fingerprint of the owner and options; a later run resumes
+  from it only if it is less than 6 hours old and the fingerprints match.
 - **Locking** (`lock.rs`): an operating-system exclusive lock (`fslock`: `flock` /
   `LockFileEx`) on `<owner>/json/.backup.lock`; the CLI takes another on
   `<output>/.github-backup.lock`.  The kernel releases them when the process dies,
   so there are no stale locks and no PID heuristics.
-- **Storage** (`storage.rs`): every JSON file is written to a temporary name and
-  renamed; release assets are streamed to `.<file>.part` and renamed after the
-  size and digest checks.
+- **Storage** (`storage.rs`, `github_backup_types::atomic_file`): every file is
+  written to a unique temporary name (`.<file>.tmp-<pid>-<n>`), synced to disk
+  and renamed, so neither a kill nor a power cut leaves a truncated or empty
+  file; release assets are streamed to `.<file>.part-<pid>-<n>` and renamed
+  after the size and digest checks.  A run sweeps temporary files left by a
+  killed run once it holds the lock.
+- **Repository list**: `repos.json` keeps repository objects the typed model
+  cannot read, verbatim; the run records a failure naming how many, since they
+  are not cloned.
 - **Git** (`git/`): clones are made into a hidden staging directory and renamed
   into place; updates use `fetch` with an explicit pruning choice (`--prune`
   only with `--prune`, otherwise `--no-prune --no-prune-tags`) (mirror: `--all`;
