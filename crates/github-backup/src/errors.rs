@@ -85,9 +85,9 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
     // An `errors` array in a GraphQL answer (ClientError::GraphQl).
     if r.contains("graphql error") {
         return Some(
-            "GitHub's GraphQL API rejected the query.  Check that the token has the \
-             scopes `github-backup --list-scopes` prints (Projects need read:project); \
-             a fine-grained token or GitHub App needs the matching permissions.",
+            "GitHub's GraphQL API (used for Discussions) rejected the query.  Check \
+             that the token has the scopes `github-backup --list-scopes` prints; a \
+             fine-grained token or GitHub App needs the matching permissions.",
         );
     }
 

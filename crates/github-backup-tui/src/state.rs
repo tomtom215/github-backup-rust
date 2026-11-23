@@ -598,9 +598,8 @@ impl ConfigState {
     }
 
     /// Returns `true` if every category `--all` selects (the ones `A`
-    /// toggles) is on.  The opt-in categories (`clone_starred`,
-    /// `action_runs`) and `discussions`, which `--all` leaves off, do not
-    /// count.
+    /// toggles) is on.  The opt-in categories `clone_starred` and
+    /// `action_runs`, which `--all` leaves off, do not count.
     pub fn all_categories_on(&self) -> bool {
         self.repositories
             && self.issues
@@ -631,6 +630,7 @@ impl ConfigState {
             && self.org_teams
             && self.actions
             && self.environments
+            && self.discussions
             && self.projects
             && self.packages
             && self.commit_comments
@@ -668,6 +668,7 @@ impl ConfigState {
         self.org_teams = val;
         self.actions = val;
         self.environments = val;
+        self.discussions = val;
         self.projects = val;
         self.packages = val;
         self.commit_comments = val;

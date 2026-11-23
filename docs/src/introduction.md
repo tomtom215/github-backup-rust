@@ -42,15 +42,15 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 
 ## What It Does Not Back Up
 
-- **Discussions and Projects**: GitHub's REST API has no endpoints for them
-  (`--discussions` and `--projects` are accepted but do nothing).
-- Actions secrets and variables, code-scanning and Dependabot alerts, rulesets,
-  issue attachments, commit comments and statuses.
+- Actions secrets and variables, code-scanning and Dependabot alerts, issue
+  attachments and commit statuses.
 - **Git LFS objects** unless you pass `--lfs` (requires `git-lfs`).
 - Repository **clones are not uploaded to S3**, only the JSON metadata.
 - It cannot see what the token cannot see: other users' private data, or
-  categories the token lacks permission for (a 403/404 is skipped with an `INFO`
-  line and is not counted as a failure).
+  categories the token lacks permission for.  A category that does not exist
+  for a repository (404/410) is skipped; one GitHub refuses (403) is a failure
+  when you asked for it by flag, and a single warning under `--all` or the
+  default selection.
 - Pull requests, comments and reactions cannot be restored; `--restore` handles
   labels, milestones and issues only.
 

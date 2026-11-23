@@ -85,7 +85,7 @@
 # actions = true
 # action_runs = false      # full run history — can be very large
 # environments = true
-# discussions = false      # not backed up yet: GitHub serves discussions through GraphQL only
+# discussions = true       # comments, replies and categories (GraphQL)
 # projects = true          # Projects (v2): fields and items; needs read:project
 # packages = true
 # commit_comments = true

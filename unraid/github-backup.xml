@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/tomtom215/github-backup-rust/issues</Support>
   <Project>https://github.com/tomtom215/github-backup-rust</Project>
-  <Overview>[b]github-backup[/b] is a CLI tool that backs up every kind of data GitHub keeps on a user or organisation — repositories (mirror / bare / shallow), issues, pull requests, releases, gists, wikis, topics, branches, deploy keys, collaborators, workflows, environments, packages, and account relationships (not Discussions or Projects: GitHub's REST API has no endpoints for them).&#xD;
+  <Overview>[b]github-backup[/b] is a CLI tool that backs up every kind of data GitHub keeps on a user or organisation — repositories (mirror / bare / shallow), issues, pull requests, releases, gists, wikis, topics, branches, deploy keys, collaborators, workflows, environments, packages, projects, discussions, and account relationships.&#xD;
 &#xD;
 [b]Run modes[/b] (set [code]BACKUP_MODE[/code] in the template):&#xD;
 [b]--doctor[/b] — pre-flight check (git, output directory, network, token accepted). Run this once on first install.&#xD;

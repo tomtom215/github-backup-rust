@@ -1240,8 +1240,7 @@ fn results_show_discussions() {
 // ── Select all, commit comments, owner from the token ─────────────────────────
 
 /// `A` selects what `--all` selects, and then a refusal is a warning, as
-/// with `--all`: commit comments included, the opt-in categories and the
-/// discussions (not backed up) left alone.
+/// with `--all`: commit comments included, the opt-in categories left alone.
 #[test]
 fn select_all_matches_the_all_flag() {
     use github_backup_types::config::BackupOptions;

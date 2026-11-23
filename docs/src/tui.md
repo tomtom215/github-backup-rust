@@ -81,8 +81,7 @@ date format, concurrency range; organisation mode needs an Owner) and shows
 what to fix in a dialog.
 
 `A` on the Categories tab selects what `--all` selects: every category except
-the opt-in *Clone Starred Repos* and *Action Runs*, and *Discussions* (not
-backed up yet).  As with `--all`, while all of those are on a category the
+the opt-in *Clone Starred Repos* and *Action Runs*.  As with `--all`, while all of those are on a category the
 token may not read (`403`) is a warning; once categories are picked one by
 one, it is a failure that makes the run incomplete, as on the command line.
 

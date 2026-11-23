@@ -121,9 +121,8 @@ actions          = true
 # ── Deployment environments ─────────────────────────────────────────────────
 environments     = true
 
-# ── Packages and projects ──────────────────────────────────────────────────
-# (`discussions` is accepted but backs up nothing yet: GitHub serves
-#  Discussions through GraphQL only; the run logs a warning.)
+# ── Discussions, packages and projects ─────────────────────────────────────
+discussions      = true   # comments, replies and categories (GraphQL)
 packages         = false  # requires the read:packages OAuth scope
 projects         = false  # Projects (v2); requires the read:project scope
 
@@ -283,7 +282,7 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
 | `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
 | `environments` | bool | `false` | Back up deployment environment configurations |
-| `discussions` | bool | `false` | Accepted, but backs up nothing yet (GitHub serves Discussions through GraphQL only); the run logs a warning |
+| `discussions` | bool | `false` | Back up GitHub Discussions with their comments, replies and categories (GraphQL API) |
 | `projects` | bool | `false` | Back up the owner's Projects (v2): projects, fields, items with field values |
 | `packages` | bool | `false` | Back up GitHub Packages metadata for the target user or organisation |
 | `commit_comments` | bool | `false` | Back up the comments made on commits of each repository |
