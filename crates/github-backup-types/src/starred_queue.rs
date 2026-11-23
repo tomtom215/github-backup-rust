@@ -25,6 +25,10 @@
 //!    └──failure (retries < max)──► Pending  (retried with backoff)
 //!    └──failure (retries ≥ max)──► Failed
 //! ```
+//!
+//! When no item is `Pending` any more, the next run starts a new pass: every
+//! item, `Done` and `Failed` alike, goes back to `Pending` with its retry
+//! count reset, so each run refreshes every starred repository.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +40,8 @@ pub enum CloneState {
     Pending,
     /// Successfully cloned or updated on disk.
     Done,
-    /// All retry attempts exhausted; will not be retried automatically.
+    /// All retry attempts of this pass exhausted (or the name is unsafe); retried
+    /// in the next pass.
     Failed,
 }
 
@@ -55,7 +60,8 @@ pub struct StarredQueueItem {
     pub size_kb: u64,
     /// Current processing state.
     pub state: CloneState,
-    /// Total failed attempts so far (reset to 0 on success).
+    /// Failed attempts in the current pass (reset to 0 when a new pass
+    /// starts, not on success).
     pub retries: u32,
     /// Human-readable last error, if any.
     pub last_error: Option<String>,
@@ -103,7 +109,8 @@ pub struct StarredCloneQueue {
     /// All known starred repositories across all runs.
     ///
     /// New entries are appended in [`CloneState::Pending`]; existing entries
-    /// (matched by repository ID) are never overwritten.
+    /// (matched by repository ID) keep their state but take the current name,
+    /// URLs and size.
     pub items: Vec<StarredQueueItem>,
 }
 

@@ -56,13 +56,15 @@ authorisation was denied" means you declined the request in the browser.
 
 ## Rate Limit Errors
 
-### `rate limited; waiting Ns (attempt K)`
+### `rate limited; pausing all requests for Ns (attempt K)`
 
 A `429` or a `403` with rate-limit information (`Retry-After`, no remaining
 requests, or a "rate limit" message): the client waits as long as GitHub says
-(at least a minute, doubling, when GitHub gives no time) and retries, up to 6
-times and about an hour of waiting per request.  Nothing to do unless it takes
-too long.
+(at least a minute, doubling, when GitHub gives no time) and retries.  The
+pause applies to every concurrent worker, as GitHub asks, not only to the
+request that was refused.  One request is retried up to 6 times; a single wait
+may last a little over an hour, and all waits of one request about two hours.
+Nothing to do unless it takes too long.
 
 ### `rate limit exceeded; retry after Ns`
 
@@ -73,8 +75,9 @@ checkpoint; run it again after the window resets.  To reduce the pressure:
 1. Lower concurrency: `--concurrency 1`.
 2. Enable fewer categories, or split the work with `--include-repos` over
    several runs.
-3. Leave the incremental state in place (`backup_state.json`): unchanged issues
-   and pull requests then cost no per-item requests.  (`--since` is not needed
+3. Leave the incremental state in place (`backup_state.json`): the issue and
+   pull request lists then cost about one request each, and unchanged issues
+   and pull requests no per-item requests.  (`--since` is not needed
    for this; it is an expert override.)
 
 ---
@@ -99,9 +102,8 @@ github-backup octocat --output /backup --all
 ```
 
 When a proxy variable is present the log says `HTTP proxy configured from the
-environment`.  `git` reads the same variables itself.  S3 requests and the
-Gitea/GitLab API calls of `--mirror-to` ignore proxy settings and connect
-directly.
+environment`.  `git` reads the same variables itself; S3 requests and the
+Gitea/GitLab API calls of `--mirror-to` use them too.
 
 ### `request timed out`
 

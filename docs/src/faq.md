@@ -12,28 +12,50 @@ Cloud uses `https://api.github.com` and needs nothing special.
 
 ### Can I back up a GitHub organisation?
 
-Yes.  Pass `--org`:
+Yes.  Name it; the tool recognises an organisation and backs it up as one (you
+may still pass `--org`):
 
 ```bash
-github-backup my-org --output /backup --org --all
+github-backup my-org --output /backup
 ```
+
+### What does a run back up when I give no category flags?
+
+Everything, as with `--all` (the plan banner says
+`everything (no category selected ...)`).  Name categories to back up only
+those (`--repositories --issues`), or leave some out of everything with
+`--skip`, for example `--skip release-assets,packages`.
+
+### Which account is backed up when I give no OWNER?
+
+The account the token belongs to; the log says `no OWNER given: backing up
+<login>`.  Give OWNER (or `owner` in the config file) for any other user or an
+organisation.  An anonymous run (no token anywhere) needs OWNER.
+
+### Can I run it as a long-lived service instead of with cron?
+
+Yes: `--every 24h` (or `6h`, `30m`, ...) backs up at once and then at that
+interval until it is stopped; see
+[Built-in schedule](deployment/cron.md#built-in-schedule---every).
 
 ### What is *not* backed up?
 
 See [What Is Not Restored, or Not Backed Up](restore.md#what-is-not-restored-or-not-backed-up).
-In short: Discussions and Projects (GitHub's REST API has no endpoints for them),
-Actions secrets and variables, code-scanning and Dependabot alerts, issue
-attachments, LFS objects unless `--lfs`, and the contents of starred gists.
+In short: Actions secrets and variables, code-scanning and Dependabot alerts, issue
+attachments unless `--attachments` (or `--all`), LFS objects unless `--lfs`, and
+the contents of starred gists.
 
 ### Does a second run overwrite the first?
 
 It updates it, and does not lose what the first run captured:
 
-- **Git clones** are updated in place with `git fetch`.  A branch or tag
+- **Git clones** are updated in place with `git fetch` (skipped when nothing
+  was pushed since the last clean backup, at most for 7 days).  A branch or tag
   deleted on GitHub stays in the clone (unless `--prune`), while a force-pushed
   branch is overwritten.
-- **`issues.json` and `pulls.json`** are fetched in full and **merged** into the
-  stored file; an item that disappears from GitHub stays in the backup.
+- **`issues.json` and `pulls.json`** are **merged** into the stored file; an
+  item that disappears from GitHub stays in the backup.  After the first run
+  only the items updated since are listed.
 - **Other JSON lists** are rewritten with the current response.
 - **Per-item files** (comments, events, commits, reviews) are re-fetched only for
   items that changed since the repository's watermark.
@@ -53,6 +75,18 @@ at the same time.
 
 Yes.  Each owner gets its own `<output>/<owner>/` directory, and S3 keys include
 the owner as well.
+
+### How do I read my backup without GitHub?
+
+Render it as a website and open it in a browser:
+
+```bash
+github-backup octocat --output /backup --render-html
+# then open /backup/octocat/site/index.html
+```
+
+Issues, pull requests with their reviews, releases, discussions, gists and
+projects become pages that work offline.  See [Browsing a Backup](viewer.md).
 
 ### How do I restore a repository from the backup?
 
@@ -84,22 +118,31 @@ never stop the other repositories.  See
 
 It depends on the categories; see
 [What each category needs](getting-started/authentication.md#what-each-category-needs).
-For a complete backup of your own account a classic token with `repo`, `gist`,
-`read:org` and `read:packages` is enough.  Public data needs no token.
+For a complete backup (the default) a classic token needs `repo`, `gist`,
+`read:org`, `read:packages`, `read:project` and `admin:repo_hook`; without one of
+them that category is skipped with a warning.  The GitHub CLI's login
+(`gh auth login`, used automatically) has `repo`, `gist` and `read:org`;
+`gh auth refresh -s read:packages,read:project` adds two more.
+`github-backup --list-scopes` prints what your selection needs.  Public data
+needs no token.
 
 ### My token expired.  What happens?
 
 GitHub answers 401; the run stops at once (exit status `1`), reports the reason
 and a hint, and writes the report, metrics and a `failure` webhook so monitoring
-sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file).
+sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file, or
+log in again with `gh auth login`).
 `github-backup --doctor` tells you whether the token is accepted.
 
-### Can I use a GitHub App token?
+### Can I run it as a GitHub App?
 
-An installation token is accepted as a bearer token, but it cannot call
-`GET /user`, so for a user target the tool cannot tell that the token belongs to
-the account and lists **public** repositories and gists only (it logs a
-warning).  Organisation targets work as far as the app's permissions reach.
+Yes: give `--app-id`, `--app-key` (the private key file, or the key itself in
+`GITHUB_APP_PRIVATE_KEY`) and optionally `--app-installation-id`.  The tool
+mints installation tokens and renews them before they expire, for API requests
+and git alike, and lists every repository the installation can see, private
+ones included.  See
+[GitHub App](getting-started/authentication.md#github-app) for the permissions
+to grant.
 
 ---
 
@@ -116,7 +159,8 @@ items on every run, plus the per-item requests for the items that changed.
 ### How do I speed it up?
 
 1. Raise `--concurrency` (for example 8), as far as the rate limit allows.
-2. Enable only the categories you need instead of `--all`.
+2. Back up only the categories you need (name them, or `--skip` the others)
+   instead of everything.
 3. Use `--clone-type shallow:10` to limit history (at the cost of a complete
    backup).
 4. Leave the incremental state alone: do not use `--full` on every run.
@@ -131,7 +175,8 @@ by an Enterprise Cloud organisation get more.  To reduce the load:
 
 - lower `--concurrency` (this slows the consumption, it does not reduce it),
 - enable fewer categories, or split the work with `--include-repos` over several runs,
-- keep the incremental state so per-item requests are skipped.
+- keep the incremental state so the issue and pull request lists are asked
+  only for changes and per-item requests are skipped.
 
 ---
 
@@ -172,14 +217,16 @@ with exit status `3`.
 ### `skipping hooks (no admin access)`
 
 `--hooks` (like `--deploy-keys`, `--collaborators` and the protection rules of
-`--branches`) needs admin access.  Without it GitHub answers 403/404, the tool
-logs an `INFO` line and writes no file for that repository.  This is **not**
-counted as a failure, so check for the files if you rely on them.
+`--branches`) needs admin access.  When GitHub refuses (403), a category you
+selected with its own flag is a failure naming the missing permission (exit
+status `3`); under the default selection or `--all` it is one warning per
+category per run.  A category that does not exist for a repository (404/410) is
+skipped without a failure.
 
 ### `skipping security advisories (not available)`
 
 Advisories exist only where the repository has them enabled and the token may
-read them; the same INFO-and-skip rule applies.
+read them; the same rule applies.
 
 ### `failed to write report: ...`
 

@@ -4,6 +4,14 @@ Run `github-backup` automatically on a schedule using a systemd service + timer 
 
 ## Setup
 
+The unit below runs `/usr/local/bin/github-backup`.  To put the release binary
+there (the install script verifies its checksum):
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/install.sh
+sudo sh install.sh --dir /usr/local/bin
+```
+
 ### 1. Create a dedicated user
 
 ```bash
@@ -138,6 +146,14 @@ path must be writable, which `StateDirectory=` provides.
 `systemctl stop` sends `SIGTERM`.  The backup stops its `git` processes, releases
 its lock and exits `143` within a few seconds; the next run resumes (within 6
 hours) from the checkpoint.  No cleanup of lock files is ever needed.
+
+## Without a Timer
+
+A plain service running `github-backup ... --every 24h` (with
+`Restart=on-failure`) also works; see
+[Built-in schedule](cron.md#built-in-schedule---every).  The timer is still
+the better choice on systemd: each run is a separate unit activation with its
+own exit status in the journal, and `OnFailure=` fires per run.
 
 ## Multiple Owners
 

@@ -35,12 +35,6 @@ pub fn recommended_scopes(args: &Args) -> Vec<&'static str> {
         // The restore flow writes to GitHub.
         set.insert("repo");
     }
-    if matches!(
-        args.mirror_type.as_str(),
-        "gitea-org" | "gitlab-group" | "org"
-    ) {
-        set.insert("read:org");
-    }
     finish(set)
 }
 
@@ -79,7 +73,9 @@ fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
         || opts.watched
         || opts.security_advisories
         || opts.actions
-        || opts.action_runs;
+        || opts.action_runs
+        || opts.discussions
+        || opts.attachments;
     if touches_repos {
         set.insert("public_repo");
     }
@@ -103,6 +99,9 @@ fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
         set.insert("gist");
     }
 
+    if opts.projects {
+        set.insert("read:project");
+    }
     if opts.packages {
         set.insert("read:packages");
     }
@@ -204,6 +203,20 @@ mod tests {
     }
 
     #[test]
+    fn attachments_read_repositories() {
+        let s = recommended_scopes(&args(&["--attachments"]));
+        assert_eq!(s, ["public_repo"]);
+        let s = recommended_scopes(&args(&["--attachments", "--private"]));
+        assert_eq!(s, ["repo"]);
+    }
+
+    #[test]
+    fn projects_require_read_project() {
+        let a = args(&["--projects"]);
+        assert!(recommended_scopes(&a).contains(&"read:project"));
+    }
+
+    #[test]
     fn packages_require_read_packages() {
         let a = args(&["--packages"]);
         assert!(recommended_scopes(&a).contains(&"read:packages"));
@@ -256,9 +269,20 @@ mod tests {
 
     #[test]
     fn render_recommendation_reports_anonymous_ok_when_no_scope_needed() {
-        // Just `octocat` with no categories → no scopes required.
-        let a = args(&[]);
+        // Followers and following are public data.  (A bare `octocat` used
+        // to be the example, but with no category selected a run now backs
+        // up everything.)
+        let a = args(&["--followers", "--following"]);
         let out = render_recommendation(&a);
         assert!(out.contains("anonymous access is sufficient"));
+    }
+
+    /// No category selected means everything, so the scopes are those of `--all`.
+    #[test]
+    fn no_category_recommends_the_scopes_of_all() {
+        assert_eq!(
+            recommended_scopes(&args(&[])),
+            recommended_scopes(&args(&["--all"]))
+        );
     }
 }

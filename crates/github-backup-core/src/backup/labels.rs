@@ -3,7 +3,9 @@
 
 //! Repository label backup.
 //!
-//! Saves `labels.json` containing all labels defined on the repository.
+//! Saves `labels.json`: every label defined on the repository, merged by `id`
+//! with what earlier runs stored, so a label deleted on GitHub stays in the
+//! backup.
 
 use std::path::Path;
 
@@ -12,7 +14,7 @@ use tracing::info;
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{backup::merge::merge_and_write, error::CoreError, storage::Storage};
 
 /// Backs up repository labels to `meta_dir/labels.json`.
 ///
@@ -35,7 +37,7 @@ pub async fn backup_labels(
 
     info!(owner, repo, "fetching labels");
     let labels = client.list_labels(owner, repo).await?;
-    storage.write_json(&meta_dir.join("labels.json"), &labels)?;
+    merge_and_write(storage, &meta_dir.join("labels.json"), &labels, "id")?;
     Ok(())
 }
 

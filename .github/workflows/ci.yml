@@ -25,41 +25,50 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the run for the superseded commit.
+# Runs on main are never cancelled, so every commit on main gets a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pinned toolchain: a new stable release (new clippy lints, new rustdoc
-  # warnings) must never turn CI red without a code change.  Bump it in a
-  # reviewed PR.  The MSRV job below checks the workspace `rust-version`.
-  RUST_TOOLCHAIN: "1.97.0"
-  # NOTE: third-party actions below are referenced by tag.  Pinning them to full
-  # commit SHAs needs the SHAs resolved from GitHub and checked; .github/dependabot.yml
-  # keeps these refs current in the meantime.
+
+# Toolchain: every job except MSRV uses the compiler pinned in
+# rust-toolchain.toml (rustup reads it; `rustup toolchain install` with no
+# argument installs it), so a new stable release never turns CI red without a
+# reviewed change to that file.
+#
+# Third-party actions are pinned to full commit SHAs (the comment names the
+# release); Dependabot keeps them current.
 
 jobs:
   # ── Format ──────────────────────────────────────────────────────────────────
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt
+          persist-credentials: false
+      - run: rustup toolchain install
       - run: cargo fmt --all -- --check
 
   # ── Clippy ──────────────────────────────────────────────────────────────────
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # ── Tests ───────────────────────────────────────────────────────────────────
@@ -68,108 +77,141 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --locked
 
   # ── MSRV ────────────────────────────────────────────────────────────────────
+  # The version comes from `rust-version` in Cargo.toml (the single source);
+  # `cargo +<version>` overrides rust-toolchain.toml.
   msrv:
-    name: MSRV (1.88)
+    name: MSRV
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: "1.88"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --locked
+          persist-credentials: false
+      - name: Install the MSRV toolchain
+        id: msrv
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          if [ -z "$msrv" ]; then
+            echo "::error file=Cargo.toml::no rust-version found"
+            exit 1
+          fi
+          rustup toolchain install "$msrv" --profile minimal
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv-${{ steps.msrv.outputs.version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check on the MSRV
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" check --workspace --all-targets --locked
 
   # ── Docs (rustdoc) ──────────────────────────────────────────────────────────
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo doc --workspace --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
 
   # ── mdBook (build + link check) ─────────────────────────────────────────────
+  # Prebuilt, checksum-verified binaries.  mdbook-linkcheck 0.7.7 needs
+  # mdBook 0.4.x, so mdBook stays on the 0.4 series.  Keep the versions in
+  # sync with pages.yml.
   book:
     name: mdBook
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - name: Install mdBook and link checker
-        run: |
-          cargo install mdbook --version "0.4.40" --locked
-          cargo install mdbook-linkcheck --version "0.7.7" --locked
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: mdbook@0.4.52,mdbook-linkcheck@0.7.7
       - run: mdbook build docs
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: book
           path: docs/book/
           retention-days: 7
 
-  # ── Security audit ──────────────────────────────────────────────────────────
-  audit:
-    name: Security audit
-    runs-on: ubuntu-latest
-    # rustsec/audit-check creates a check run and (optionally) an issue when an
-    # advisory is found, so it needs explicit write permission for both. Without
-    # these, the action errors out with
-    #   "Resource not accessible by integration"
-    # on the GitHub `checks` REST endpoint.
-    permissions:
-      contents: read
-      checks: write
-      issues: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2026-0097: `rand` is unsound when a custom logger calls
-          # `rand::rng()` from inside its `log` callback. Our runtime tree
-          # uses `rand >= 0.9.3` (patched). The remaining `rand 0.8.5` lock
-          # entry is pulled in transitively by `phf_generator`, which is a
-          # *build-time* proc macro used by `terminfo`/`termwiz` and is not
-          # compiled into our binary (we explicitly disable the termwiz
-          # backend in `crates/github-backup-tui/Cargo.toml`). The advisory
-          # therefore does not apply to any code we ship.
-          ignore: RUSTSEC-2026-0097
-
-  # ── cargo-deny ──────────────────────────────────────────────────────────────
+  # ── cargo-deny (licences, bans, advisories, sources) ────────────────────────
+  # Advisories against main are also checked daily by audit.yml.
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           command: check licenses bans advisories sources
 
+  # ── Workflow security lint ──────────────────────────────────────────────────
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@bd12b495c90993a4301c73398142281a61499af3 # v0.9.0
+        with:
+          # The newest version this action release has a hash-pinned lock file for.
+          version: 1.33.0
+          # Report findings as a failing check, without uploading SARIF (which
+          # would need `security-events: write`).
+          advanced-security: false
+
   # ── Docker image build + smoke test ─────────────────────────────────────────
   #
-  # Builds the exact Dockerfile that release.yml publishes (so a broken
-  # Dockerfile fails here, not at tag time) and runs the image's entrypoint
-  # contract: `--version`, `--help`, and the empty-variable handling that
-  # Compose / Unraid rely on.  No credentials are used: a dummy token only.
+  # Builds the exact Dockerfile that release.yml and edge.yml publish (so a
+  # broken Dockerfile fails here, not at tag time) and runs the image's
+  # entrypoint contract: `--version`, `--help`, and the empty-variable handling
+  # that Compose / Unraid rely on.  No credentials are used: a dummy token only.
   docker:
     name: Docker build + smoke test
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dockerfile RUST_VERSION matches rust-toolchain.toml
+        run: |
+          toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          dockerfile=$(sed -n 's/^ARG RUST_VERSION=//p' Dockerfile)
+          if [ -z "$toolchain" ] || [ "$toolchain" != "$dockerfile" ]; then
+            echo "::error file=Dockerfile::ARG RUST_VERSION=$dockerfile but rust-toolchain.toml has channel $toolchain"
+            exit 1
+          fi
       - name: Build image
         run: docker build --tag github-backup:ci .
       - name: --version and --help
@@ -187,6 +229,11 @@ jobs:
             -e BACKUP_ENCRYPT_KEY= -e GITHUB_API_URL= \
             -e BACKUP_MODE=--print-config-template \
             github-backup:ci > /dev/null
+      - name: BACKUP_MODE without a leading -- is refused with status 64
+        run: |
+          status=0
+          docker run --rm -e BACKUP_MODE=all github-backup:ci || status=$?
+          test "$status" -eq 64
       - name: git, git-lfs and ssh are present
         run: |
           docker run --rm --entrypoint git github-backup:ci --version
@@ -199,6 +246,16 @@ jobs:
             'git init -q /backup/r.git && git -C /backup/r.git status >/dev/null'
           docker run --rm --user 99:100 -v "$PWD/out:/backup" --entrypoint sh github-backup:ci -c \
             'git -C /backup/r.git status >/dev/null && echo ok-other-uid'
+      # The release and edge images package an already-built binary
+      # (BINARY_STAGE=prebuilt); check that path with the binary built above.
+      - name: Image from a prebuilt binary
+        run: |
+          docker build --target export --output type=local,dest=bins/amd64 .
+          docker build --build-arg BINARY_STAGE=prebuilt \
+            --build-context binaries=bins --tag github-backup:prebuilt .
+          docker run --rm github-backup:prebuilt --version
+          cmp bins/amd64/github-backup \
+            <(docker run --rm --entrypoint cat github-backup:prebuilt /usr/local/bin/github-backup)
 
   # ── Mutation testing (on-demand) ─────────────────────────────────────────────
   #
@@ -214,24 +271,28 @@ jobs:
   #
   # The exclusion list and rationale live in `.cargo/mutants.toml`.
   mutants:
-    name: Mutation testing (${{ github.event.inputs.mutants_scope }})
+    # A static name: a skipped job would otherwise show the unevaluated
+    # expression in the pull-request checks list.
+    name: Mutation testing
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # need full history for --in-diff
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+          save-if: false
 
       - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked
+        run: cargo install cargo-mutants --version 27.1.0 --locked
 
       - name: Run mutation tests (diff scope)
-        if: github.event.inputs.mutants_scope == 'diff'
+        if: inputs.mutants_scope == 'diff'
         run: |
           git fetch origin main
           git diff origin/main...HEAD > pr.diff
@@ -239,13 +300,13 @@ jobs:
             2>&1 | tee mutants-report.txt
 
       - name: Run mutation tests (full scope)
-        if: github.event.inputs.mutants_scope == 'full'
+        if: inputs.mutants_scope == 'full'
         run: |
           cargo mutants --workspace --timeout 120 -- --lib \
             2>&1 | tee mutants-report.txt
 
       - name: Upload mutation report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: mutants-report

@@ -3,9 +3,15 @@
 #
 # Docker Compose configurations for github-backup-rust.
 #
-# By default, every service pulls the published multi-arch image from
-# GHCR (`ghcr.io/tomtom215/github-backup-rust:latest`).  To build from a
-# local checkout instead, run:
+# By default, every service pulls the published multi-arch image
+# `ghcr.io/tomtom215/github-backup-rust:edge`, which is built from `main`
+# and so matches this file.  (`:latest` is the last release; v0.3.2 and
+# earlier lack the entrypoint wrapper the profiles below use.  Once a newer
+# release is out, set GITHUB_BACKUP_TAG to it in `.env` for unattended runs.)
+#
+# To build from a local checkout instead, uncomment `build: .` below, set
+# `GITHUB_BACKUP_TAG=local` in `.env` (so the build does not overwrite a
+# published tag on this machine), then run:
 #
 #     docker compose build
 #     docker compose run --rm backup octocat --all
@@ -64,11 +70,11 @@
 # Fixed per-profile flags live in `entrypoint:` (after tini and the wrapper),
 # so `docker compose run --rm SERVICE OWNER --all` *appends* your arguments
 # instead of replacing `command:` and silently dropping `--s3-bucket` etc.
-x-image: &image ghcr.io/tomtom215/github-backup-rust:${GITHUB_BACKUP_TAG:-latest}
+x-image: &image ghcr.io/tomtom215/github-backup-rust:${GITHUB_BACKUP_TAG:-edge}
 
 x-backup: &backup
   image: *image
-  # build: .                         # uncomment to build from local checkout
+  # build: .                         # uncomment to build from a local checkout (see top)
   # No `init: true`: the image already starts tini as PID 1.
   restart: "no"                      # run-to-completion tool
   # Numeric uid:gid that owns the backup directory.
@@ -82,6 +88,11 @@ x-env: &env
   GITHUB_API_URL:
   GITHUB_CLONE_HOST:
   GITHUB_OAUTH_CLIENT_ID:
+  # GitHub App instead of GITHUB_TOKEN (see compose.example.env).
+  GITHUB_APP_ID:
+  GITHUB_APP_PRIVATE_KEY:
+  GITHUB_APP_PRIVATE_KEY_PATH:
+  GITHUB_APP_INSTALLATION_ID:
   BACKUP_NOTIFY_WEBHOOK:
   BACKUP_ENCRYPT_KEY:
   GITHUB_BACKUP_RESTORE_YES:

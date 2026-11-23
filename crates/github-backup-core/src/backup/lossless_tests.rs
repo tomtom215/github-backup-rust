@@ -11,9 +11,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use github_backup_types::{
-    config::BackupOptions, Branch, BranchCommit, BranchProtection, Hook, Raw, Repository,
-};
+use github_backup_types::{config::BackupOptions, Branch, BranchCommit, Hook, Raw, Repository};
 
 use crate::backup::mock_client::MockBackupClient;
 use crate::backup::{
@@ -74,6 +72,7 @@ async fn issues_json_is_what_the_api_returned() {
         "Hello-World",
         &opts,
         None,
+        None,
         &meta(),
         &storage,
     )
@@ -98,11 +97,12 @@ async fn one_unparseable_issue_neither_aborts_nor_vanishes_and_the_rest_continue
         ..Default::default()
     };
 
-    let count = backup_issues(
+    let outcome = backup_issues(
         &client,
         "octocat",
         "Hello-World",
         &opts,
+        None,
         None,
         &meta(),
         &storage,
@@ -110,7 +110,6 @@ async fn one_unparseable_issue_neither_aborts_nor_vanishes_and_the_rest_continue
     .await
     .expect("a bad element must not fail the category");
 
-    assert_eq!(count, 2, "the two well-formed issues are counted");
     let issues = written(&storage, "issues.json");
     assert_eq!(
         issues.as_array().map(Vec::len),
@@ -126,6 +125,45 @@ async fn one_unparseable_issue_neither_aborts_nor_vanishes_and_the_rest_continue
             "comments of the parseable issue #{number} are still fetched"
         );
     }
+    // The three elements without a usable number (null, 42, `"number": "x"`)
+    // cannot get their comments, and say so: the run must not look complete.
+    let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
+    assert_eq!(
+        whats,
+        [
+            "issue at position 2 (without id or number)",
+            "issue at position 3 (without id or number)",
+            "issue at position 4 (number \"x\")",
+        ]
+    );
+}
+
+/// An issue the typed model cannot read but that has a `number` gets its
+/// comments and events like any other (it used to get none, silently).
+#[tokio::test]
+async fn an_unparseable_issue_with_a_number_still_gets_its_comments_and_events() {
+    let mut odd = values(ISSUES).remove(0);
+    odd["number"] = Value::from(77);
+    odd["user"] = Value::from("not an object");
+    let client = MockBackupClient::new()
+        .with_raw("issues", vec![odd])
+        .with_raw("issue_comments", values(ISSUE_COMMENTS));
+    let storage = MemStorage::default();
+    let opts = BackupOptions {
+        issue_comments: true,
+        issue_events: true,
+        ..Default::default()
+    };
+
+    let outcome = backup_issues(&client, "o", "r", &opts, None, None, &meta(), &storage)
+        .await
+        .expect("backup_issues");
+
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+    assert!(storage
+        .get(&meta().join("issue_comments/77.json"))
+        .is_some());
+    assert!(storage.get(&meta().join("issue_events/77.json")).is_some());
 }
 
 #[tokio::test]
@@ -144,6 +182,7 @@ async fn comments_are_stored_as_served() {
         "octocat",
         "Hello-World",
         &opts,
+        None,
         None,
         &meta(),
         &storage,
@@ -169,6 +208,7 @@ async fn pulls_json_is_what_the_api_returned_and_invents_nothing() {
         "octocat",
         "Hello-World",
         &opts,
+        None,
         None,
         &meta(),
         &storage,
@@ -267,12 +307,11 @@ fn branch(name: &str) -> Branch {
     }
 }
 
-fn protection(name: &str) -> BranchProtection {
-    serde_json::from_value(serde_json::json!({
+fn protection(name: &str) -> Value {
+    serde_json::json!({
         "url": format!("https://api.github.com/repos/o/r/branches/{name}/protection"),
         "required_status_checks": {"contexts": ["ci"], "checks": []}
-    }))
-    .expect("protection without `strict` parses")
+    })
 }
 
 #[tokio::test]

@@ -15,6 +15,48 @@ is bumped.
 
 ### Breaking changes and upgrade notes
 
+- **With no category selected, a run backs up everything** (as `--all` does).
+  Before, `github-backup OWNER` backed up nothing and still reported success.
+  `--skip <categories>` (or the `skip` config key) leaves categories out; any
+  category flag still selects just that subset.
+- **OWNER is optional**: it defaults to the account the token belongs to, and an
+  organisation is recognised without `--org`.  The token is also taken from
+  `GH_TOKEN` or the GitHub CLI (`gh auth token`) when no other source is set, and
+  `~/.config/github-backup/config.toml` (`%APPDATA%` on Windows) is loaded when
+  `--config` is not given.
+- **`--restore` needs `--restore-target-org`** naming an account other than the
+  source (or the explicit `--restore-into-source`): restoring into the
+  repositories that were backed up duplicated every issue there.
+- **Mirror destinations keep refs deleted on GitHub** unless `--prune` is given,
+  as the local clones do; repositories whose backup failed in the run, shallow
+  clones and clones without refs are no longer pushed.
+- **Encrypted S3 objects use a new streamed format** (see Security).  Objects in
+  the old format still decrypt; every encrypted object is uploaded once more
+  because its size changes.
+- **Release checksum sidecars moved** from `release_assets/<tag>/<asset>.sha256`
+  to `release_checksums/<tag>/`, so a real `<asset>.sha256` published by the
+  project is no longer overwritten; old sidecars are migrated.
+- **More files accumulate history** instead of being overwritten: releases,
+  labels, milestones, security advisories, workflows and their runs, gists and
+  their comments, packages, projects, commit comments and every per-issue and
+  per-pull-request file.  `--restore` therefore also recreates labels and
+  milestones that were deleted on GitHub.  Access and configuration files
+  (hooks, deploy keys, collaborators, environments, branches, protection,
+  rulesets, topics, followers and the like) remain snapshots.
+- **`info.json` is the full repository object** (`GET /repos/{owner}/{repo}`:
+  fork parent, template, merge settings, ...) instead of the shorter listing
+  entry; `topics.json` is taken from it.
+- **A repository deleted and recreated under the same name** no longer mixes two
+  repositories' data: the old backup is set aside as `<name>@<old id>`.
+- **Access refused (403) for a category you selected by flag is a failure**
+  naming the missing permission (exit `3`); under `--all` and the default
+  selection it is one warning per category per run.  A category that does not
+  exist for a repository (404/410) is not a failure.
+- **Minimum Rust version 1.89** (building from source only).  CI and the release
+  build with the toolchain pinned in `rust-toolchain.toml` (1.100.0).
+- **Container users:** `:latest` is still v0.3.2.  Compose and the Unraid
+  template use the new `:edge` image (built from `main`) until the next release.
+
 - **Exit status `3` is new.**  A run that finishes but could not back up
   everything now exits `3` (it used to exit `0` and report success).  Scripts and
   unit files that treated every non-zero status as "could not run" need no change
@@ -71,6 +113,68 @@ is bumped.
   glibc-linked and needed glibc 2.39 or newer.
 
 ### Added
+
+- **Proxy settings** (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) now
+  also apply to S3 uploads and to the Gitea/GitLab API calls of `--mirror-to`;
+  loopback hosts are always reached directly.
+- **TUI:** an empty Owner backs up the token's account; Commit Comments and
+  Attachments toggles; `A` selects exactly what `--all` selects.
+- **Docker:** with only `GITHUB_TOKEN` set, the container backs up the token's
+  account instead of printing help.
+
+- **`--render-html[=DIR]`** turns a backup into a static website you can read
+  offline (default `<output>/<owner>/site`): repositories, issues and pull
+  requests with comments, events, reviews, review comments and commits,
+  releases linked to their downloaded assets, labels, milestones, discussions,
+  gists, projects and the account lists.  No JavaScript, a strict
+  Content-Security-Policy and escaped HTML make the pages safe to open; a
+  re-render of the same backup is byte-identical.  New crate
+  `github-backup-viewer`.
+- **Discussions** (`--discussions`, part of the default backup) through the
+  GraphQL API: every discussion with labels, poll, reactions and answer, every
+  comment with all its replies, and the categories (`discussions.json`,
+  `discussion_comments/<n>.json`, `discussion_categories.json`).
+- **Attachments** (`--attachments`, part of the default backup): files and
+  images attached to issues, pull requests, discussions, comments, reviews,
+  commit comments and release notes are downloaded to
+  `repos/<repo>/attachments/<sha256>.<ext>` with an `attachments/index.json`.
+  Only GitHub's attachment hosts are contacted, files are capped at 100 MiB and
+  the stored JSON is left as GitHub sent it.  Attachments of private
+  repositories need a classic token; fine-grained and App tokens are reported to
+  get 404, which is recorded as missing and retried after 30 days or with
+  `--full`.
+- **GitHub App authentication** (`--app-id`, `--app-key`,
+  `--app-installation-id`, the `GITHUB_APP_*` variables and `app_*` config keys)
+  for unattended organisation backups.  Installation tokens are renewed before
+  they expire, once for all workers, for API requests and every git process;
+  `--doctor` checks the App, its installation and its permissions.
+
+- **Projects (v2)** of the owner, with their fields and every item's field
+  values (`json/projects/`); **repository rulesets** (`rulesets.json`);
+  **commit comments** (`--commit-comments`, `commit_comments.json`); **gist
+  comments**.  All are part of the default backup.
+- **Pull requests with more than 250 commits** are listed in full through the
+  compare API (the commits endpoint stops at 250).
+- **`--every <interval>`** runs the backup on a schedule from a long-running
+  process or container (minimum one minute), with each run's report, metrics and
+  history as before.
+- **`--verify-git`** checks every repository with `git fsck` after each clone and
+  update (a fresh clone that fails is discarded); **`--git-timeout`** sets how long
+  git may stay silent before it is stopped (default 600 s).
+- **`--notify-format json|slack|discord|healthchecks`** for the webhook; an
+  interrupted run is notified as `interrupted`.
+- **`--skip`**, the `mirror_type`, `skip`, `verify_git` and `git_timeout` config
+  keys, and `--restore-into-source`.
+- **Doctor** (`--doctor`, `--check`) validates the configuration exactly as a run
+  would and checks the owner, the selected categories and the mirror and S3
+  settings; mirror and S3 settings are checked before a backup starts.
+- **Install scripts** (`install.sh`, `install.ps1`) that verify checksums,
+  cargo-binstall metadata, an `:edge` container image from `main`, and container
+  images with an SBOM, provenance and a GitHub attestation.
+- **GraphQL support in the client** (used by Discussions), API version pinning
+  (`X-GitHub-Api-Version: 2022-11-28`, which keeps fields that `2026-03-10`
+  dropped) and a once-per-endpoint warning for GitHub `Deprecation`/`Sunset`
+  notices.
 
 - `--prune` and `--mirror-public` (and the config keys `prune`, `mirror_public`); see the
   upgrade notes above for what they change.
@@ -140,6 +244,54 @@ is bumped.
 
 ### Changed
 
+- **`--decrypt`** streams objects of the current format with bounded memory and
+  writes the output only after the last segment authenticates; a truncated,
+  tampered or wrong-key object leaves no output file.
+- The owner and organisation look-ups before a run use the client's retry and
+  rate-limit handling; hints cover device-flow refusals, pagination and GraphQL
+  errors, and `--doctor` recognises an answer that is not the GitHub API.
+
+- **Repeat runs ask only for what changed.**  Issues are listed with `since`
+  and pull requests newest-updated first until older ones, and both are merged
+  into the stored lists; `git fetch` is skipped for a repository nothing was
+  pushed to since its last clean backup when its clone is on disk and was
+  fetched within the last 7 days (wikis are always fetched).  An unchanged
+  repository costs about 18 requests whatever its size, instead of 15 plus one
+  per 100 issues and pull requests plus a fetch.  `--full` disables every
+  shortcut; the first run after upgrading lists and fetches everything once.
+
+- **Dependencies:** `chrono` (unmaintained) replaced by `jiff`; `fslock` replaced
+  by the standard library's file locks.
+- **Rate limits pause every worker** together instead of only the refused request.
+- **Every file is written durably**: data is flushed to disk before it replaces
+  the previous file, with temporary names unique per write; leftovers of a
+  killed run are removed at the next start.
+- **Full clones** update their checkout, local branches and tags on every run;
+  **shallow clones** hold every branch.
+- **A stopped git process** gets SIGTERM and two seconds to clean up before
+  SIGKILL, and SSH runs with `BatchMode=yes` unless you set your own SSH command.
+- **S3:** large files are uploaded part by part (memory no longer grows with file
+  size); a file that changes during upload is not completed; a lost
+  `CompleteMultipartUpload` answer is confirmed with HEAD.
+- **Mirror API calls** retry server errors; GitLab and Gitea refusals are reported
+  with the server's message instead of being treated as "already exists".
+- **Projects use the REST Projects (v2) API**; packages of an organisation use the
+  organisation endpoints and the token owner's packages `/user/packages`.
+- **`--device-auth`** works behind a proxy and on GitHub Enterprise Server, and its
+  default scopes cover every default category except webhooks.
+- **`--mirror-type`** accepts only `gitea` or `gitlab`; a typo is a usage error.
+- The deprecated `--keep-last`, `--max-age-days` and `--no-prune` are hidden from
+  `--help` and warn when used.
+
+- **Minimum Rust version is 1.89** (was 1.88): the output-directory and per-owner
+  locks now use the standard library's `File::try_lock`, and the `fslock` crate is
+  gone.  The locks are released explicitly on drop, so a child process started on
+  another thread at that moment cannot keep them held.
+- **Dependencies:** the RustCrypto crates move together to their current generation
+  (`aes-gcm` 0.11, `aes` 0.9 with `zeroize` still enabled, `hmac` 0.13, `sha2` 0.11);
+  nonces and retry jitter come from `getrandom` directly.  `toml` 1, `nix` 0.32,
+  `criterion` 0.8.  Unused dependencies were removed from four crates.
+
 - **Rate limits** (403 or 429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a
   rate-limit message) are waited out and retried (up to 6 times, about an hour in
   total per request, at least a minute and doubling when GitHub gives no hint)
@@ -177,6 +329,41 @@ is bumped.
 
 ### Fixed
 
+- Docker: a blank `BACKUP_NOTIFY_FORMAT` aborted every run.
+
+- **Refs that should be kept were deleted**: a `fetch.prune` setting in the
+  user's own git configuration pruned the backup, and a stale `.lock` file left
+  by a killed git triggered a pruning retry that then failed on every run.
+- **Silent data loss:** repository objects, issues, releases and gists that the
+  data model could not read were dropped (with their comments and assets) and the
+  run still exited `0`; repositories with Issues turned off lost every pull
+  request conversation; one failing item stopped the rest of its category.
+- **Checkpoints** from a narrower run made a later full run skip categories, and
+  `--dry-run` deleted the checkpoint.
+- **GitLab mirrors into a group** were created in the token user's namespace (and
+  could be public there).
+- **Quadratic merging** of large issue and pull request lists (40,000 items took
+  minutes per run).
+- **Memory:** the manifest and S3 sync read whole release assets into memory.
+- **Hangs:** a stalled error response from an asset download hung the run, and a
+  self-referencing pagination link looped forever.
+- **Renamed or transferred repositories** failed with HTTP 301 instead of being
+  followed.
+- **Ctrl+C and SIGTERM** during the mirror push, S3 sync or notification were
+  ignored, and an interrupted run wrote no report, metrics or history.
+- Fatal errors did not stop work already in flight; a full disk or quota
+  reported by git was not fatal.
+- Branch and package names were not URL-encoded (`release#2`).
+- Starred repositories: names were not path-checked, renames were ignored,
+  `--clone-host` was not applied and a corrupt queue failed every run.
+- Filtered repositories stayed "running" in the TUI; `--tui` ignored the config
+  file; the plan showed "Concurrency 0"; a closed output pipe panicked.
+- `--clone-host host:port`, `--prefer-ssh` for wikis, and the issue count (which
+  included pull requests).
+- Windows: `safe.directory` never matched, and reserved device names
+  (`con`, `aux`, ...) are refused for repositories instead of failing obscurely.
+- A flaky test ("Text file busy").
+
 - The CLI exited with a usage error whenever `AWS_ACCESS_KEY_ID`,
   `AWS_SECRET_ACCESS_KEY`, `MIRROR_TOKEN` or `GITHUB_OAUTH_CLIENT_ID` existed in the
   environment, even empty (every Compose, Unraid and Kubernetes launcher); the
@@ -205,6 +392,11 @@ is bumped.
 
 ### Removed
 
+- Classic Projects and the REST Discussions calls (neither worked), the extra
+  `/topics` request per repository, `GitHubClient`'s unused HTTP/2 feature,
+  the `rustsec/audit-check` CI job (cargo-deny covers advisories) and the
+  Dependabot Docker ecosystem (versions are now build arguments).
+
 - The `GIT_ASKPASS` script and the PID-file lock (and with it the workspace's only
   `unsafe` block).
 - The effect of `--keep-last` and `--max-age-days` (deprecated, see above).
@@ -212,6 +404,35 @@ is bumped.
   mount.
 
 ### Security
+
+- **GitHub App keys** are signed with `aws-lc-rs` (already part of the build
+  through rustls); the key and the minted tokens are wiped from memory when
+  dropped and never logged.
+- **Attachment downloads** send the token only to `https://github.com`, only
+  from a client configured for github.com, and never to the storage host GitHub
+  redirects to.
+
+- **Encrypted S3 objects** use the STREAM construction over AES-256-GCM in 64 KiB
+  segments with a per-object key from HKDF-SHA256 and a random salt (the layout of
+  the `age` file format), so truncation and reordering are detected and memory
+  is bounded.
+- **Every configured secret** (GitHub token, mirror token, S3 keys, encryption
+  key, webhook URL) is removed by value from logs, reports and notifications;
+  tokens used as a URL's user name and GitLab `glpat-` tokens are redacted too.
+- `--help` no longer prints the webhook URL from `BACKUP_NOTIFY_WEBHOOK`.
+- `temp_clone_token`, a short-lived credential GitHub can embed in any
+  repository object, is removed from every API response at every depth before
+  anything is stored.  GitHub's API description lists it on repository
+  objects, so it could otherwise reach `repos.json`, `info.json` and any file
+  holding a nested repository object, such as a pull request's `base.repo`.
+- Configuration and proxy `Debug` output redact secrets; a next-page link to
+  another origin is not followed with the token; the mirror API refuses
+  `http://` URLs and empty tokens.
+- Starred repositories named like a path are refused instead of cloned outside
+  the backup directory.
+- **CI hardening:** every action pinned by commit SHA, least-privilege
+  permissions, no persisted checkout credentials, no build cache in releases,
+  a zizmor workflow lint, and Windows tests.
 
 - **Git credentials** travel in an environment variable of the git child plus an
   inline credential helper bound to the clone URL's origin (after resetting
@@ -228,6 +449,12 @@ is bumped.
   validated and kept out of `Debug` output.
 - `github-backup-core` is `#![forbid(unsafe_code)]`.
 - Dependencies updated past five open advisories.
+- **Lock file refreshed past five more advisories** that had turned the scheduled
+  audit red: `rustls` 0.23.46 and `rustls-webpki` 0.103.17 (RUSTSEC-2026-0346,
+  -0347, -0348, -0349 and -0382).  `chrono`, declared unmaintained
+  (RUSTSEC-2026-0543), is replaced by `jiff`.  No advisory is ignored any more:
+  the stale `RUSTSEC-2026-0097` entries in `.cargo/audit.toml` and the CI audit job
+  no longer matched anything in `Cargo.lock` (reported in issue #37).
 - **Token redaction** in error output (`<prefix>_<redacted>`), and the credential
   type's `Debug` output no longer prints the token.
 

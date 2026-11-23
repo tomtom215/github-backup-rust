@@ -9,10 +9,12 @@
 //!
 //! Written at the end of every backup run.  Holds one **watermark per
 //! repository**: the instant before which everything that repository's
-//! incremental categories (issue comments and events, pull request comments,
-//! commits and reviews) contain has already been captured.  The next run skips
-//! re-fetching those per-item files for issues and pull requests that have not
-//! changed since — the lists themselves are always fetched in full.
+//! incremental categories (the issue and pull request lists, issue comments
+//! and events, pull request comments, commits and reviews, the git data)
+//! contain has already been captured.  The next run asks only for the issues
+//! and pull requests changed since, merging them into the stored lists, skips
+//! the per-item files of those that have not changed, and skips the `git
+//! fetch` of a repository nothing was pushed to.
 //!
 //! A repository's watermark only advances when *every* step for it succeeded,
 //! so a failure is retried by the next run instead of being skipped over.
@@ -34,6 +36,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file;
+
 // ── Backup state ─────────────────────────────────────────────────────────────
 
 /// Incremental watermark for one repository.
@@ -46,6 +50,12 @@ pub struct RepoWatermark {
     /// `"issue_comments"`).  A watermark vouches for these only: enabling
     /// another category later means the first run for it fetches everything.
     pub covers: Vec<String>,
+    /// RFC 3339 watermark of the last run that fetched this repository's git
+    /// data and finished cleanly; a run that skipped the fetch because
+    /// nothing was pushed keeps the earlier value.  Absent in files written
+    /// by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
 }
 
 /// What a finished run contributes to the persisted state.
@@ -114,17 +124,20 @@ impl BackupState {
 
     /// Folds the outcome of a finished run into the state.
     ///
-    /// * Every clean repository gets a fresh watermark.
+    /// * Every clean repository gets a fresh watermark; its `fetched_at` is
+    ///   carried over (the caller knows whether the git data was fetched).
     /// * A repository that was not clean keeps its **old** watermark (or none),
     ///   so whatever failed is fetched again next time.
     /// * `last_successful_run` only moves when the whole run succeeded.
     pub fn record_run(&mut self, run: &RunRecord<'_>) {
         for name in run.clean_repos {
+            let fetched_at = self.repos.get(name).and_then(|w| w.fetched_at.clone());
             self.repos.insert(
                 name.clone(),
                 RepoWatermark {
                     at: run.watermark.to_string(),
                     covers: run.categories.iter().map(|c| (*c).to_string()).collect(),
+                    fetched_at,
                 },
             );
         }
@@ -137,25 +150,16 @@ impl BackupState {
 
     /// Writes the state to `path`, creating parent directories as needed.
     ///
-    /// The write is atomic (temporary file, then rename) so a crash cannot
+    /// The write is atomic and durable (see [`atomic_file`]) so a crash cannot
     /// leave a truncated file that would be discarded as corrupt.
     ///
     /// # Errors
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create state directory: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise state: {e}"))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write state file: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("replace state file: {e}")
-        })
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write state file: {e}"))
     }
 
     /// Loads the state from `path`.
@@ -239,21 +243,15 @@ impl BackupRunHistory {
 
     /// Saves the history to `path`, creating parent directories as needed.
     ///
-    /// Writes are atomic (write-then-rename) to prevent corrupt files.
+    /// Writes are atomic and durable (see [`atomic_file`]).
     ///
     /// # Errors
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create history directory: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise history: {e}"))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write history tmp: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename history file: {e}"))
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write history file: {e}"))
     }
 }
 
@@ -280,6 +278,14 @@ pub struct BackupCheckpoint {
     /// older versions, which are therefore never resumed.
     #[serde(default)]
     pub last_updated_at: String,
+
+    /// Identifies the work the run that wrote this checkpoint was doing (its
+    /// owner and options).  Only a run with the same fingerprint resumes it: a
+    /// run that backs up more categories must not skip repositories that a
+    /// narrower run finished.  Empty in files written by older versions,
+    /// which are therefore never resumed.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 impl BackupCheckpoint {
@@ -291,8 +297,8 @@ impl BackupCheckpoint {
 
     /// Marks `full_name` as completed and persists the checkpoint to `path`.
     ///
-    /// Writes are atomic at the file-system level (write-then-rename) to
-    /// ensure the checkpoint is never left in a half-written state.
+    /// Writes are atomic and durable (see [`atomic_file`]), so the checkpoint
+    /// is never left in a half-written state.
     ///
     /// # Errors
     ///
@@ -324,16 +330,9 @@ impl BackupCheckpoint {
     ///
     /// Returns an error string on I/O or serialisation failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create checkpoint dir: {e}"))?;
-        }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialise checkpoint: {e}"))?;
-        // Write to a temp file then rename for atomicity.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("write checkpoint tmp: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename checkpoint: {e}"))
+        atomic_file::write(path, json.as_bytes()).map_err(|e| format!("write checkpoint: {e}"))
     }
 
     /// Removes the checkpoint file after a successful run.
@@ -389,8 +388,13 @@ mod tests {
         );
         assert_eq!(loaded.repos_backed_up, 1);
         assert_eq!(loaded.repos["o/a"].at, "2026-01-01T23:45:00Z");
-        assert!(
-            !dir.path().join("state.json.tmp").exists(),
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["state.json"],
             "no temporary file may be left behind"
         );
     }
@@ -465,6 +469,23 @@ mod tests {
     }
 
     #[test]
+    fn a_new_watermark_carries_the_last_fetch_time_over() {
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(&clean, vec![], true));
+        assert_eq!(state.repos["o/a"].fetched_at, None);
+        state.repos.get_mut("o/a").expect("o/a").fetched_at = Some("2026-01-01T00:00:00Z".into());
+        state.record_run(&RunRecord {
+            watermark: "2026-02-01T00:00:00Z",
+            ..record(&clean, vec![], true)
+        });
+        assert_eq!(
+            state.repos["o/a"].fetched_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
     fn last_successful_run_only_moves_when_nothing_failed() {
         let mut state = BackupState::default();
         let clean = vec!["o/a".to_string()];
@@ -524,6 +545,7 @@ mod tests {
             completed_repos: BTreeSet::new(),
             run_started_at: "2026-01-01T00:00:00Z".to_string(),
             last_updated_at: String::new(),
+            fingerprint: String::new(),
         };
         cp.mark_complete_and_save("owner/repo-a", &path)
             .expect("save");

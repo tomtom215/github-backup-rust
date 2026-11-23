@@ -4,9 +4,8 @@
 //! Mirror destination configuration types.
 //!
 //! Supports any Gitea-compatible instance (Gitea, Codeberg, Forgejo, etc.)
-//! as well as GitLab and generic HTTPS-accessible Git servers.
-
-use serde::{Deserialize, Serialize};
+//! as well as GitLab.  Neither type can be serialised, and their `Debug`
+//! output never contains the token.
 
 /// Configuration for mirroring repositories to a Gitea-compatible instance.
 ///
@@ -24,18 +23,16 @@ use serde::{Deserialize, Serialize};
 ///     token: "your_codeberg_token".to_string(),
 ///     owner: "your_username".to_string(),
 ///     private: true,
+///     prune: false,
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct GiteaConfig {
-    /// Base URL of the Gitea instance (e.g., `https://codeberg.org`).
-    ///
-    /// Must not have a trailing slash.
+    /// Base URL of the Gitea instance (e.g., `https://codeberg.org`).  Must
+    /// be `https://`.
     pub base_url: String,
 
     /// API token for the Gitea instance.
-    ///
-    /// Can also be set via the `MIRROR_TOKEN` environment variable.
     pub token: String,
 
     /// Username or organisation name at the mirror destination.
@@ -47,9 +44,26 @@ pub struct GiteaConfig {
     /// public.
     ///
     /// When `false`, a repository is created public only if its source is
-    /// *known* to be public (see `push::wants_private`); every other one is
-    /// private.  A private source is never published.
+    /// *known* to be public; every other one is private.  A private source is
+    /// never published.
     pub private: bool,
+
+    /// Delete branches and tags at the destination that no longer exist
+    /// locally (`--prune`).  Off by default, like the local backup: a branch
+    /// deleted on GitHub stays in the mirror.
+    pub prune: bool,
+}
+
+impl std::fmt::Debug for GiteaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GiteaConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &"[redacted]")
+            .field("owner", &self.owner)
+            .field("private", &self.private)
+            .field("prune", &self.prune)
+            .finish()
+    }
 }
 
 impl GiteaConfig {
@@ -74,8 +88,8 @@ impl GiteaConfig {
 /// Configuration for mirroring repositories to a GitLab instance.
 ///
 /// Works with GitLab.com (`https://gitlab.com`) and self-hosted GitLab CE/EE
-/// instances.  Uses the GitLab REST API v4 to create repositories and
-/// `git push --mirror` to push the bare clone contents.
+/// instances.  Uses the GitLab REST API v4 to create projects; branches and
+/// tags are then pushed with `git push`.
 ///
 /// # Example
 ///
@@ -88,28 +102,42 @@ impl GiteaConfig {
 ///     token: "glpat-xxxxxxxxxxxxxxxxxxxx".to_string(),
 ///     namespace: "alice".to_string(),
 ///     private: true,
+///     prune: false,
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct GitLabConfig {
-    /// Base URL of the GitLab instance (e.g., `https://gitlab.com`).
-    ///
-    /// Must not have a trailing slash.
+    /// Base URL of the GitLab instance (e.g., `https://gitlab.com`).  Must
+    /// be `https://`.
     pub base_url: String,
 
     /// GitLab personal access token (requires `api` scope).
-    ///
-    /// Can also be set via the `MIRROR_TOKEN` environment variable.
     pub token: String,
 
-    /// GitLab namespace (username or group path) under which repositories are
-    /// created.
+    /// GitLab namespace (username, group or `group/subgroup` path) under which
+    /// projects are created.
     pub namespace: String,
 
     /// Force every mirrored repository private, even one whose source is
     /// public.  When `false`, only repositories known to be public at the
     /// source are created public; a private source is never published.
     pub private: bool,
+
+    /// Delete branches and tags at the destination that no longer exist
+    /// locally (`--prune`).  Off by default.
+    pub prune: bool,
+}
+
+impl std::fmt::Debug for GitLabConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitLabConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &"[redacted]")
+            .field("namespace", &self.namespace)
+            .field("private", &self.private)
+            .field("prune", &self.prune)
+            .finish()
+    }
 }
 
 impl GitLabConfig {
@@ -141,6 +169,7 @@ mod tests {
             token: "secret".to_string(),
             owner: "alice".to_string(),
             private: true,
+            prune: false,
         }
     }
 
@@ -166,6 +195,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn debug_output_never_contains_the_token() {
+        let gitea = format!("{:?}", sample_config());
+        assert!(!gitea.contains("secret"), "{gitea}");
+        assert!(
+            gitea.contains("[redacted]") && gitea.contains("alice"),
+            "{gitea}"
+        );
+        let gitlab = format!("{:?}", sample_gitlab_config());
+        assert!(!gitlab.contains("glpat-secret"), "{gitlab}");
+        assert!(gitlab.contains("[redacted]"), "{gitlab}");
+    }
+
     // ── GitLabConfig pure-function tests ──────────────────────────────────
 
     fn sample_gitlab_config() -> GitLabConfig {
@@ -174,6 +216,7 @@ mod tests {
             token: "glpat-secret".to_string(),
             namespace: "octocat".to_string(),
             private: true,
+            prune: false,
         }
     }
 
@@ -181,7 +224,6 @@ mod tests {
     fn gitlab_api_base_appends_api_v4() {
         let cfg = sample_gitlab_config();
         assert_eq!(cfg.api_base(), "https://gitlab.com/api/v4");
-        assert!(!cfg.api_base().is_empty());
     }
 
     #[test]
@@ -196,6 +238,12 @@ mod tests {
         let mut cfg = sample_gitlab_config();
         cfg.base_url = "https://git.internal.example".to_string();
         assert_eq!(cfg.api_base(), "https://git.internal.example/api/v4");
+    }
+
+    #[test]
+    fn gitlab_repo_clone_url_distinct_for_distinct_repos() {
+        let cfg = sample_gitlab_config();
+        assert_ne!(cfg.repo_clone_url("a"), cfg.repo_clone_url("b"));
     }
 
     #[test]
@@ -215,12 +263,5 @@ mod tests {
             cfg.repo_clone_url("hello"),
             "https://gitlab.com/octocat/hello.git"
         );
-    }
-
-    #[test]
-    fn gitlab_repo_clone_url_distinct_for_distinct_repos() {
-        let cfg = sample_gitlab_config();
-        assert_ne!(cfg.repo_clone_url("a"), cfg.repo_clone_url("b"));
-        assert!(!cfg.repo_clone_url("foo").is_empty());
     }
 }

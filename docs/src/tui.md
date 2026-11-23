@@ -10,17 +10,24 @@ export GITHUB_TOKEN=ghp_your_token_here
 github-backup octocat --tui
 
 # Flags pre-fill the Configure screen
-github-backup octocat --tui --token "$GITHUB_TOKEN" --output /var/backup/github \
-  --all --private --dry-run --org --concurrency 8 --manifest
+github-backup octocat --tui --output /var/backup/github \
+  --private --dry-run --org --concurrency 8 --manifest
 ```
 
-The command line is resolved exactly as for a normal run, so `--all`,
-`--private`, `--forks`, `--dry-run`, `--org`, `--full`, `--since`,
-`--include-repos`, `--clone-type`, `--concurrency`, `--manifest` and the
-individual category flags all arrive in the Configure screen as initial
-values.  Review and adjust them, then start the backup.  Not carried over:
-`--config` files, `--clone-host`, and every option listed under
-[What the TUI cannot do](#what-the-tui-cannot-do).
+The command line and the config file (`--config`, or
+`~/.config/github-backup/config.toml` when it exists) are resolved exactly as
+for a normal run, so `--all`, `--skip`, `--private`, `--forks`, `--dry-run`,
+`--org`, `--full`, `--since`, `--include-repos`, `--clone-type`,
+`--concurrency`, `--manifest` and the individual category flags all arrive in
+the Configure screen as initial values; with no category selected every
+category starts switched on, as a command-line run would back up everything.
+The token is found as for a normal run (`GITHUB_TOKEN`, `GH_TOKEN`, the config
+file, the GitHub CLI).  OWNER may be left out, as on the command line: the
+backup is then of the account the token belongs to, looked up when the backup
+starts and shown on the Run screen (the Owner field keeps it afterwards).
+Review and adjust, then start the backup.  An option
+the TUI cannot carry out (see [What the TUI cannot do](#what-the-tui-cannot-do))
+is an error together with `--tui` (exit status 2), not silently dropped.
 
 The TUI needs an interactive terminal on stdout.  Without one (a pipe, cron,
 `docker run` without `-t`) it prints a one-line explanation and exits with
@@ -43,8 +50,9 @@ clipped screen.
 
 ### 1 — Dashboard
 
-Owner, output directory, token status (never shown, only "configured") and the
-last recorded run: time, repository count and result (`complete`, or
+Owner (or "(the token's account)" when the field is empty), output
+directory, token status (never shown, only "configured") and the last
+recorded run: time, repository count and result (`complete`, or
 `INCOMPLETE (N failures)`).  The last run is read from
 `<output>/<owner>/json/backup_history.json`, falling back to
 `backup_state.json`, and refreshed whenever you return to the Dashboard.
@@ -57,7 +65,7 @@ Six tabs:
 |-----|----------|
 | Auth | GitHub token (always masked), API URL for GitHub Enterprise (`https://` only) |
 | Target | Owner, output directory, organisation mode, since date, **Full backup (ignore state)** |
-| Categories | 34 backup-category toggles |
+| Categories | 36 backup-category toggles, commit comments and attachments included |
 | Clone | Clone type (mirror/bare/full/shallow), forks, private, LFS, prefer-SSH, prune deleted refs, concurrency (1–64) |
 | Filter | include / exclude repository globs (comma-separated) |
 | Output | Write SHA-256 manifest, dry run |
@@ -68,8 +76,14 @@ ends with a note: **Command line only: mirror push, S3 sync, JSON report,
 Prometheus metrics, webhook notification and device-flow sign-in.**
 
 The focused field's help text is shown under the list when there is room.
-Starting a backup validates the form (owner, token, `https://` API URL, date
-format, concurrency range) and shows what to fix in a dialog.
+Starting a backup validates the form (owner name, token, `https://` API URL,
+date format, concurrency range; organisation mode needs an Owner) and shows
+what to fix in a dialog.
+
+`A` on the Categories tab selects what `--all` selects: every category except
+the opt-in *Clone Starred Repos* and *Action Runs*.  As with `--all`, while all of those are on a category the
+token may not read (`403`) is a warning; once categories are picked one by
+one, it is a failure that makes the run incomplete, as on the command line.
 
 ### 3 — Run
 
@@ -143,7 +157,7 @@ selected failure's full text is shown underneath when there is room.
 | `Space` | Toggle a checkbox |
 | `Enter` | Edit a text field (toggles a checkbox) |
 | `←` / `→` | Change the Clone type |
-| `A` | Categories tab: select all, or none when all are on |
+| `A` | Categories tab: select what `--all` selects, or none when all of those are on |
 | `s` / `F5` | Start the backup |
 | `Esc` | Back to the Dashboard |
 
@@ -191,8 +205,15 @@ These exist only on the command line, and the TUI does not offer them:
 - mirror push (Gitea/GitLab), S3 sync, JSON report, Prometheus metrics, webhook
   notification;
 - device-flow sign-in (a token is required);
-- `--config` files and `--clone-host`;
+- `--clone-host` and `--diff-with`;
+- `--every` and the other modes (`--restore`, `--doctor`, ...);
 - the CLI-level output lock.
+
+Given together with `--tui`, `--mirror-to`, `--s3-bucket`, `--report`,
+`--prometheus-metrics`, `--notify-webhook`, `--diff-with`, `--clone-host` and
+`--device-auth` (also from the config file, except the webhook, which is only
+refused on the command line) stop the program with exit status 2 and a
+message naming them.
 
 What the TUI does after a run, like the CLI: the engine writes the incremental
 state, the TUI appends a run-history entry (shown on the Dashboard, including

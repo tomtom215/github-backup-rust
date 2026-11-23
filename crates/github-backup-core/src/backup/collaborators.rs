@@ -14,16 +14,17 @@ use crate::{error::CoreError, storage::Storage};
 
 /// Backs up the collaborator list for a single repository.
 ///
-/// Writes `meta_dir/collaborators.json` when `opts.collaborators` is enabled.
+/// Writes `meta_dir/collaborators.json` when `opts.collaborators` is enabled:
+/// a snapshot of who has access now, replaced on every run (someone whose
+/// access was removed must not look as if they still had it).
 ///
-/// Admin access to the repository is required by the GitHub API.  When the
-/// API returns 403 or 404, the function logs an informational message and
-/// returns `Ok(())` — the same graceful-degradation pattern used for hooks
-/// and security advisories.
+/// The GitHub API requires write, maintain or admin access to the
+/// repository; how a refusal is reported is decided by the engine.
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from storage writes or non-403/404 API errors.
+/// Propagates [`CoreError`] from the API call (including a 403 refusal) or
+/// the storage write.
 pub async fn backup_collaborators(
     client: &impl BackupClient,
     owner: &str,
@@ -36,28 +37,14 @@ pub async fn backup_collaborators(
         return Ok(());
     }
 
-    match client.list_collaborators(owner, repo_name).await {
-        Ok(collaborators) => {
-            info!(
-                owner,
-                repo = repo_name,
-                count = collaborators.len(),
-                "fetched collaborators"
-            );
-            storage.write_json(&meta_dir.join("collaborators.json"), &collaborators)?;
-        }
-        Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping collaborators (insufficient permissions)"
-            );
-        }
-        Err(e) => return Err(e.into()),
-    }
-
-    Ok(())
+    let collaborators = client.list_collaborators(owner, repo_name).await?;
+    info!(
+        owner,
+        repo = repo_name,
+        count = collaborators.len(),
+        "fetched collaborators"
+    );
+    storage.write_json(&meta_dir.join("collaborators.json"), &collaborators)
 }
 
 #[cfg(test)]

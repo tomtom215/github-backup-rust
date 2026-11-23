@@ -8,12 +8,13 @@
 
 use std::path::Path;
 
+use serde::Serialize;
 use tracing::info;
 
-use github_backup_client::BackupClient;
+use github_backup_client::{BackupClient, ClientError};
 use github_backup_types::config::{BackupOptions, BackupTarget};
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{backup::Outcome, error::CoreError, storage::Storage};
 
 /// Backs up owner-level relationship and social data.
 ///
@@ -29,61 +30,111 @@ use crate::{error::CoreError, storage::Storage};
 /// - `org_members.json` – organisation member list
 /// - `org_teams.json`   – organisation team list
 ///
+/// Each file is a snapshot of the current relationship (who follows the
+/// owner *now*), replaced on every run.  Each list is independent: one that
+/// cannot be fetched is recorded in [`Outcome::failed`] and the others are
+/// still backed up.
+///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from API calls or storage writes.
+/// Propagates storage errors and any fatal error.
 pub async fn backup_user_data(
     client: &impl BackupClient,
     username: &str,
     opts: &BackupOptions,
     owner_json_dir: &Path,
     storage: &impl Storage,
-) -> Result<(), CoreError> {
+) -> Result<Outcome, CoreError> {
+    let mut outcome = Outcome::default();
     if opts.dry_run {
         info!(username, "dry-run: skipping owner data backup");
-        return Ok(());
+        return Ok(outcome);
     }
+    let org = opts.target == BackupTarget::Org;
+    let save = |file: &str| owner_json_dir.join(file);
 
     if opts.starred {
         info!(username, "fetching starred repositories");
-        let starred = client.list_starred(username).await?;
-        storage.write_json(&owner_json_dir.join("starred.json"), &starred)?;
+        let result = client.list_starred(username).await;
+        store(
+            storage,
+            &save("starred.json"),
+            "starred repositories",
+            result,
+            &mut outcome,
+        )?;
     }
-
     if opts.watched {
         info!(username, "fetching watched repositories");
-        let watched = client.list_watched(username).await?;
-        storage.write_json(&owner_json_dir.join("watched.json"), &watched)?;
+        let result = client.list_watched(username).await;
+        store(
+            storage,
+            &save("watched.json"),
+            "watched repositories",
+            result,
+            &mut outcome,
+        )?;
     }
-
     if opts.followers {
         info!(username, "fetching followers");
-        let followers = client.list_followers(username).await?;
-        storage.write_json(&owner_json_dir.join("followers.json"), &followers)?;
+        let result = client.list_followers(username).await;
+        store(
+            storage,
+            &save("followers.json"),
+            "followers",
+            result,
+            &mut outcome,
+        )?;
     }
-
     if opts.following {
         info!(username, "fetching following");
-        let following = client.list_following(username).await?;
-        storage.write_json(&owner_json_dir.join("following.json"), &following)?;
+        let result = client.list_following(username).await;
+        store(
+            storage,
+            &save("following.json"),
+            "following",
+            result,
+            &mut outcome,
+        )?;
+    }
+    if org && opts.org_members {
+        info!(org = username, "fetching org members");
+        let result = client.list_org_members(username).await;
+        store(
+            storage,
+            &save("org_members.json"),
+            "organisation members",
+            result,
+            &mut outcome,
+        )?;
+    }
+    if org && opts.org_teams {
+        info!(org = username, "fetching org teams");
+        let result = client.list_org_teams(username).await;
+        store(
+            storage,
+            &save("org_teams.json"),
+            "organisation teams",
+            result,
+            &mut outcome,
+        )?;
     }
 
-    // Org-specific data — only fetched when target is an organisation.
-    if opts.target == BackupTarget::Org {
-        if opts.org_members {
-            info!(org = username, "fetching org members");
-            let members = client.list_org_members(username).await?;
-            storage.write_json(&owner_json_dir.join("org_members.json"), &members)?;
-        }
+    Ok(outcome)
+}
 
-        if opts.org_teams {
-            info!(org = username, "fetching org teams");
-            let teams = client.list_org_teams(username).await?;
-            storage.write_json(&owner_json_dir.join("org_teams.json"), &teams)?;
-        }
+/// Writes a fetched list, or records why it could not be fetched.
+fn store<T: Serialize>(
+    storage: &impl Storage,
+    path: &Path,
+    what: &str,
+    result: Result<T, ClientError>,
+    outcome: &mut Outcome,
+) -> Result<(), CoreError> {
+    match result {
+        Ok(list) => storage.write_json(path, &list),
+        Err(e) => outcome.item_error(what, e),
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -324,5 +375,32 @@ mod tests {
                 .is_some(),
             "org_teams.json should be written for org target"
         );
+    }
+
+    /// The owner-level lists used to be one step: a failing starred list cost
+    /// the followers too.
+    #[tokio::test]
+    async fn one_failing_list_does_not_cost_the_others() {
+        let client = MockBackupClient::new().with_error("starred", 500);
+        let storage = MemStorage::default();
+        let opts = BackupOptions {
+            starred: true,
+            followers: true,
+            ..Default::default()
+        };
+        let outcome = backup_user_data(
+            &client,
+            "octocat",
+            &opts,
+            &PathBuf::from(JSON_DIR),
+            &storage,
+        )
+        .await
+        .expect("not fatal");
+        let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(whats, ["starred repositories"]);
+        assert!(storage
+            .get(&PathBuf::from(format!("{JSON_DIR}/followers.json")))
+            .is_some());
     }
 }

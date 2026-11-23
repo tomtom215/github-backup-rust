@@ -74,13 +74,16 @@ pub struct RestoreStats {
     pub issues_skipped: usize,
     /// Issues that failed with an unexpected error.
     pub issues_errored: usize,
+    /// Backup files (`labels.json`, ...) that could not be read or parsed:
+    /// everything in them is missing from the restore.
+    pub files_errored: usize,
 }
 
 impl RestoreStats {
     /// Total number of resources that could not be restored.
     #[must_use]
     pub fn errored(&self) -> usize {
-        self.labels_errored + self.milestones_errored + self.issues_errored
+        self.labels_errored + self.milestones_errored + self.issues_errored + self.files_errored
     }
 }
 
@@ -90,7 +93,8 @@ impl std::fmt::Display for RestoreStats {
             f,
             "labels: {} created, {} skipped, {} errored | \
              milestones: {} created, {} skipped, {} errored | \
-             issues: {} created, {} skipped (PRs or already restored), {} errored",
+             issues: {} created, {} skipped (PRs or already restored), {} errored | \
+             unreadable backup files: {}",
             self.labels_created,
             self.labels_skipped,
             self.labels_errored,
@@ -100,6 +104,7 @@ impl std::fmt::Display for RestoreStats {
             self.issues_created,
             self.issues_skipped,
             self.issues_errored,
+            self.files_errored,
         )
     }
 }
@@ -219,6 +224,7 @@ pub async fn run_restore(
         total.issues_created += stats.issues_created;
         total.issues_skipped += stats.issues_skipped;
         total.issues_errored += stats.issues_errored;
+        total.files_errored += stats.files_errored;
     }
 
     info!(%total, "restore complete");
@@ -288,7 +294,8 @@ async fn restore_repo(
                 }
             }
             Err(e) => {
-                warn!(repo = %repo_name, error = %e, "failed to read labels.json");
+                warn!(repo = %repo_name, error = %e, "failed to read labels.json; nothing in it is restored");
+                stats.files_errored += 1;
             }
         }
     }
@@ -342,7 +349,8 @@ async fn restore_repo(
                 }
             }
             Err(e) => {
-                warn!(repo = %repo_name, error = %e, "failed to read milestones.json");
+                warn!(repo = %repo_name, error = %e, "failed to read milestones.json; nothing in it is restored");
+                stats.files_errored += 1;
             }
         }
     }
@@ -433,7 +441,8 @@ async fn restore_repo(
                 }
             }
             Err(e) => {
-                warn!(repo = %repo_name, error = %e, "failed to read issues.json");
+                warn!(repo = %repo_name, error = %e, "failed to read issues.json; nothing in it is restored");
+                stats.files_errored += 1;
             }
         }
     }
@@ -448,6 +457,38 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+/// Decides where `--restore` writes.
+///
+/// The target must be named (`--restore-target-org`) and differ from the
+/// source, unless `into_source` (`--restore-into-source`) says otherwise:
+/// restoring into a source whose issues still exist would open a second copy
+/// of every issue there (the copies carry a marker the originals do not, so
+/// the originals are not recognised as already restored).
+///
+/// # Errors
+///
+/// A message saying which flag is needed.
+pub(crate) fn choose_target(
+    source_owner: &str,
+    target: Option<&str>,
+    into_source: bool,
+) -> Result<String, String> {
+    match target {
+        None if into_source => Ok(source_owner.to_string()),
+        None => Err(format!(
+            "--restore needs --restore-target-org <ORG>, the account to restore into; \
+             to restore into '{source_owner}' itself (the account the backup is of) add \
+             --restore-into-source"
+        )),
+        Some(t) if t.eq_ignore_ascii_case(source_owner) && !into_source => Err(format!(
+            "--restore-target-org is '{t}', the account the backup is of: every issue that \
+             still exists there would be created a second time.  Add --restore-into-source \
+             if that is really what you want"
+        )),
+        Some(t) => Ok(t.to_string()),
+    }
+}
+
 /// Prints a restore warning banner and, when interactive, asks for explicit
 /// confirmation.
 ///
@@ -460,7 +501,12 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
 /// Returns `false` if the user declined, stdin is not a TTY, or any of the
 /// above failed.  The non-TTY error message explicitly tells the user *both*
 /// escape hatches so they don't have to dig through `--help`.
-pub(crate) fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
+pub(crate) fn confirm_restore(source_owner: &str, target_org: &str, restore_yes: bool) -> bool {
+    info!(
+        source = source_owner,
+        target = target_org,
+        "restore: the backup of {source_owner} will be written into {target_org}"
+    );
     if restore_yes {
         return true;
     }
@@ -473,9 +519,14 @@ pub(crate) fn confirm_restore(target_org: &str, restore_yes: bool) -> bool {
     eprintln!("╔══════════════════════════════════════════════════════════════╗");
     eprintln!("║         WARNING: RESTORE WILL MODIFY GITHUB DATA            ║");
     eprintln!("╚══════════════════════════════════════════════════════════════╝");
-    eprintln!("  Target : {target_org}");
-    eprintln!("  This will CREATE labels, milestones, and issues in the target");
-    eprintln!("  organisation.  This action cannot be automatically undone.");
+    eprintln!("  From backup of : {source_owner}");
+    eprintln!("  INTO account   : {target_org}");
+    if source_owner.eq_ignore_ascii_case(target_org) {
+        eprintln!("  The target is the SOURCE itself: issues that still exist there");
+        eprintln!("  will be created a second time.");
+    }
+    eprintln!("  This will CREATE labels, milestones, and issues in the target.");
+    eprintln!("  This action cannot be automatically undone.");
     eprintln!();
 
     use std::io::IsTerminal as _;
@@ -512,6 +563,7 @@ mod tests {
             issues_created: 10,
             issues_skipped: 4,
             issues_errored: 1,
+            files_errored: 0,
         };
         let s = stats.to_string();
         assert!(s.contains("5 created"));
@@ -687,8 +739,42 @@ mod tests {
             labels_errored: 1,
             milestones_errored: 2,
             issues_errored: 3,
+            files_errored: 4,
             ..Default::default()
         };
-        assert_eq!(stats.errored(), 6);
+        assert_eq!(stats.errored(), 10);
+    }
+
+    /// A corrupt backup file used to be only a warning: the summary said 0
+    /// errored and the restore exited 0 with that file's content missing.
+    #[tokio::test]
+    async fn unreadable_backup_files_count_as_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for f in ["labels.json", "milestones.json", "issues.json"] {
+            std::fs::write(dir.path().join(f), "{ not json").unwrap();
+        }
+        let client =
+            GitHubClient::new(github_backup_types::config::Credential::Anonymous).expect("client");
+        let stats = restore_repo(&client, dir.path(), "src", "dst", "repo", true).await;
+        assert_eq!(stats.files_errored, 3);
+        assert_eq!(stats.errored(), 3);
+    }
+
+    /// Restoring into the source used to be the default and opened a second
+    /// copy of every issue in live repositories.
+    #[test]
+    fn the_restore_target_must_be_named_and_differ_from_the_source() {
+        assert!(choose_target("octocat", None, false).is_err());
+        let same = choose_target("octocat", Some("OctoCat"), false).unwrap_err();
+        assert!(same.contains("--restore-into-source"), "{same}");
+        assert_eq!(
+            choose_target("octocat", Some("new-org"), false).unwrap(),
+            "new-org"
+        );
+        assert_eq!(choose_target("octocat", None, true).unwrap(), "octocat");
+        assert_eq!(
+            choose_target("octocat", Some("octocat"), true).unwrap(),
+            "octocat"
+        );
     }
 }

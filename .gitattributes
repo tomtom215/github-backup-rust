@@ -1,0 +1,7 @@
+# Check every text file out with LF line endings, whatever core.autocrlf says.
+# The JSON fixtures are compared byte for byte with what the tool writes, and
+# shell scripts copied into the container image break with CRLF.
+* text=auto eol=lf
+
+# Binary files.
+*.png binary

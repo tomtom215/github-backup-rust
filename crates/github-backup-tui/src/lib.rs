@@ -594,12 +594,12 @@ enum RunEnd {
 async fn run_backup_task(
     cfg: state::ConfigState,
     tx: progress::ProgressTx,
-    cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let (owner, output_path, opts, token_opt) = cfg.to_backup_config();
     let dry_run = opts.dry_run;
     let write_manifest = cfg.manifest;
-    let started_at = chrono::Utc::now();
+    let started_at = jiff::Timestamp::now();
 
     let credential = match token_opt {
         Some(t) => Credential::Token(t),
@@ -625,6 +625,25 @@ async fn run_backup_task(
             });
             return;
         }
+    };
+
+    // No Owner: the account the token belongs to, as on the command line.
+    let owner = if owner.is_empty() {
+        tokio::select! {
+            resolved = resolve_owner(&client, &tx) => match resolved {
+                Ok(login) => login,
+                Err(error) => {
+                    let _ = tx.send(event::BackupEvent::BackupFailed { error });
+                    return;
+                }
+            },
+            _ = &mut cancel_rx => {
+                let _ = tx.send(event::BackupEvent::BackupCancelled);
+                return;
+            }
+        }
+    } else {
+        owner
     };
 
     // The engine reports per-repository progress and outcome on its own
@@ -673,7 +692,7 @@ async fn run_backup_task(
         let mut run = Box::pin(engine.run(&owner));
         // A dropped sender (the UI went away) is not a cancel request.
         let cancel_requested = async {
-            if cancel_rx.await.is_err() {
+            if (&mut cancel_rx).await.is_err() {
                 std::future::pending::<()>().await;
             }
         };
@@ -722,6 +741,24 @@ async fn run_backup_task(
     }
 }
 
+/// The login of the account the token belongs to, announced to the UI with
+/// [`event::BackupEvent::OwnerResolved`]; the error says what to do instead.
+async fn resolve_owner(client: &GitHubClient, tx: &progress::ProgressTx) -> Result<String, String> {
+    match client.account_login().await {
+        Ok(login) => {
+            tracing::info!(owner = %login, "no Owner given: backing up {login}, the account the token belongs to");
+            let _ = tx.send(event::BackupEvent::OwnerResolved {
+                owner: login.clone(),
+            });
+            Ok(login)
+        }
+        Err(e) => Err(format!(
+            "No Owner given, and the account the token belongs to could not be looked up \
+             ({e}); enter Owner (Configure > Target tab)"
+        )),
+    }
+}
+
 /// Post-run work the engine does not do: the optional SHA-256 manifest and the
 /// run-history entry the Dashboard reads.  Anything that fails here is recorded
 /// as a failure of the run, so the Results screen cannot call it complete.
@@ -731,14 +768,14 @@ async fn finish_run(
     stats: &github_backup_core::BackupStats,
     output: &OutputConfig,
     owner: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
+    started_at: jiff::Timestamp,
     write_manifest: bool,
 ) {
     const SCOPE: &str = "post-processing";
     let stats = stats.handle();
     let output = output.clone();
     let owner = owner.to_string();
-    let started = started_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let started = github_backup_core::time::format_utc(started_at);
 
     let work = {
         let stats = stats.handle();

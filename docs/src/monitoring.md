@@ -126,8 +126,19 @@ jq -r '.failures[] | "\(.scope): \(.step)"' /var/log/github-backup/report.json
 
 ## Webhook
 
-`--notify-webhook URL` (or `BACKUP_NOTIFY_WEBHOOK`) sends one JSON `POST` after
-the run, also when the run failed:
+`--notify-webhook URL` (or `BACKUP_NOTIFY_WEBHOOK`) sends one `POST` after
+each run, also when the run failed or was interrupted.  `--notify-format` (or
+`BACKUP_NOTIFY_FORMAT`) chooses the body:
+
+| Format | Request |
+|--------|---------|
+| `json` (default) | the object below |
+| `slack` | `{"text": "<summary>"}`, what a Slack incoming webhook needs |
+| `discord` | `{"content": "<summary>"}` (at most 2000 characters), what a Discord webhook needs |
+| `healthchecks` | the summary as plain text, `POST`ed to the URL on success and to `<URL>/fail` otherwise (healthchecks.io and compatible services: give the ping URL) |
+
+The summary is one line with the owner and outcome, followed by the failed
+items (`scope: step`, at most 20, no messages).  The `json` body:
 
 ```json
 {
@@ -146,6 +157,7 @@ the run, also when the run failed:
 | `success` | nothing failed | `0` |
 | `partial` | finished with failures | `3` |
 | `failure` | the run could not be completed; `error` holds the reason (and `failed` the failure) | `1` |
+| `interrupted` | stopped by `SIGINT` / `SIGTERM` (the notification gets at most 3 seconds) | `130` / `143` |
 
 `failed` lists at most the first 20 failures and never includes messages (they
 can be long and the receiver is an external service); `failure_count` is the
@@ -284,15 +296,33 @@ Run `github-backup` as often as you like: the second run is faster, and it
 
 What happens each run:
 
-* The repository list, **`issues.json` and `pulls.json` are always fetched in
-  full** and merged into the stored files (an item that GitHub no longer lists
-  stays in the backup).  The files can only grow or change; a run never shrinks
-  them.
-* The expensive part, the per-item requests (`issue_comments`, `issue_events`,
-  `pull_comments`, `pull_commits`, `pull_reviews`), is skipped for an issue or
-  pull request that has not been updated since the repository's **watermark**
-  and whose files are already on disk.  A missing file is always fetched.
-* Git clones are updated with `git fetch`, never cloned again.
+* The repository list is fetched in full every run.
+* **`issues.json` and `pulls.json`** are merged with the stored files (an item
+  that GitHub no longer lists stays in the backup).  The files can only grow
+  or change; a run never shrinks them.  On a later run only the issues and
+  pull requests updated since the repository's **watermark** are asked for:
+  issues with the issues API's `since` filter, pull requests most recently
+  updated first until the first page that reaches older ones (the pull
+  request API has no `since`).  Usually that is one request each, however
+  many issues the repository has.  The complete list is asked for instead
+  when the stored file is missing or damaged, or the watermark was recorded
+  by a run that did not back that list up.
+* The per-item requests (`issue_comments`, `issue_events`, `pull_comments`,
+  `pull_commits`, `pull_reviews`) are skipped for an issue or pull request
+  that has not been updated since the watermark and whose files are already
+  on disk.  A missing file is always fetched.
+* Git clones are updated with `git fetch`, never cloned again.  The fetch is
+  **skipped** when the repository's `pushed_at` (the time of the last push to
+  it, from the repository listing) is older than the
+  watermark, the clone is on disk, it was made with the same clone type, LFS
+  and `--prune` settings, and the last fetch was less than 7 days ago.  A
+  mirror, shallow or LFS clone also holds GitHub's `refs/pull/*`, which a push
+  to a fork's pull request branch moves without changing `pushed_at`; for
+  those, one request for the pull requests updated since the watermark is
+  made first, and any such pull request means a fetch.  GitHub does not
+  document every ref update that moves `pushed_at` (tag pushes, branch
+  deletions), hence the weekly fetch whatever it says.  Wikis are always
+  fetched: a wiki edit does not change `pushed_at`.
 
 The watermarks live in `<output>/<owner>/json/backup_state.json`:
 
@@ -300,10 +330,14 @@ The watermarks live in `<output>/<owner>/json/backup_state.json`:
   margin for clock differences and replication lag).
 * A repository's watermark only advances when **every** step for it succeeded.
   A repository that failed keeps its old watermark, so the next run fetches
-  what the failed run missed.
-* A watermark covers the categories that were enabled when it was recorded.
-  Turning on another per-item category later makes the first run fetch
-  everything for it.
+  what the failed run missed; a run that fetched a repository and then failed
+  for it makes the next run fetch it again.
+* A watermark covers the categories that were enabled when it was recorded
+  (the per-item categories, the issue and pull request lists, the git update
+  mode).  Turning on another one later makes the first run fetch everything
+  for it.
+* `fetched_at` is the watermark of the last clean run that ran `git fetch`
+  for the repository (the 7-day limit counts from it).
 * `last_successful_run` is informational; it only moves after a run without
   failures.
 * A missing or unreadable file means "fetch everything once".
@@ -312,8 +346,8 @@ Controls:
 
 | | |
 |--|--|
-| `--full` | Ignore every watermark and fetch all per-item files again.  Use it for a periodic complete refresh. |
-| `--since DATE` | Expert override: treat everything updated before DATE as already backed up (for every repository).  `DATE` is `2026-01-01` or an RFC 3339 timestamp.  Never written to the state file, so a mistyped date cannot affect later runs.  Cannot be combined with `--full`. |
+| `--full` | Ignore every watermark: list every issue and pull request, fetch all per-item files and `git fetch` every clone.  Use it for a periodic complete refresh. |
+| `--since DATE` | Expert override: treat everything updated before DATE as already backed up (for every repository): the lists are asked only for what changed since DATE (when the stored file is intact) and per-item files of older items are kept.  It never skips a `git fetch`.  `DATE` is `2026-01-01` or an RFC 3339 timestamp.  Never written to the state file, so a mistyped date cannot affect later runs.  Cannot be combined with `--full`. |
 | delete `backup_state.json` | Same effect as `--full` for the next run. |
 | `--dry-run` | Does not read or write the state. |
 
@@ -322,6 +356,32 @@ Controls:
 > comment, review or event bumps that timestamp, so an in-place edit of an old
 > comment can be missed by an incremental run.  Run with `--full` now and then
 > (for example weekly) if exact copies matter.
+
+### Requests per repository on a repeat run
+
+For a repository with *I* issues and pull requests (of which *P* are pull
+requests) and every repository category enabled (as with `--all`), when
+little has changed since the last clean run:
+
+| | First run, `--full` | Repeat run |
+|--|--|--|
+| Repository details, releases, labels, milestones, hooks, security advisories, branches, rulesets, deploy keys, collaborators, workflows, environments, commit comments | 13 | 13 |
+| Issue list | ⌈*I*/100⌉ | 1 per 100 changed |
+| Pull request list | ⌈*P*/100⌉ | 1 per 100 changed (or 1) |
+| Comments edited since the watermark (`--issue-comments`, `--pull-comments`) | 0 | 1 + 1 |
+| Per-item comments, events, commits, reviews | 1 per item and category | only for changed items |
+| Pull requests changed? (mirror, shallow and LFS clones, nothing pushed) | 0 | 1 |
+| `git fetch` of the repository | 1 | only when pushed to (or 7 days old) |
+| `git fetch` of the wiki | 1 | 1 |
+
+A repository with 3 000 issues and pull requests (1 000 of them pull
+requests) costs 13 + 30 + 10 + 2 = 55 requests and a fetch per repeat run
+without the delta listings, and 13 + 1 + 1 + 2 + 1 = 18 requests and no fetch
+with them.  A small repository (under 100 issues) costs one request more
+than before (the pull request check) in place of its fetch with a mirror
+clone, and the same with a bare or full clone.  Every run also makes one
+request per protected branch and per ruleset, one per workflow with
+`--action-runs`, and downloads the release assets not yet on disk.
 
 ---
 

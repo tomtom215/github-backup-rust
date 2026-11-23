@@ -11,7 +11,18 @@ newline pasted with a token, is trimmed.
 | Variable | Flag equivalent | Description |
 |---------|----------------|-------------|
 | `GITHUB_TOKEN` | `--token` | GitHub personal access token |
+| `GH_TOKEN` | `--token` | The GitHub CLI's variable; used when neither `--token` nor `GITHUB_TOKEN` is set |
 | `GITHUB_OAUTH_CLIENT_ID` | `--oauth-client-id` | OAuth App client ID; ignored unless `--device-auth` is given |
+| `GITHUB_APP_ID` | `--app-id` | GitHub App client ID or App ID: authenticate as the App instead of with a token |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `--app-key` | Path of the GitHub App's private key (`.pem`) |
+| `GITHUB_APP_PRIVATE_KEY` | none | The GitHub App's private key itself (PEM text; a one-line value with literal `\n` sequences works too), for containers; ignored without `--app-id`, an error together with `--app-key` |
+| `GITHUB_APP_INSTALLATION_ID` | `--app-installation-id` | GitHub App installation to act as (default: the App's installation on OWNER) |
+
+With none of these (and no `token` in the config file), the token of the GitHub
+CLI is used when `gh` is installed and logged in (`gh auth token --hostname
+github.com`, or the host of `--api-url`).  A GitHub App is used instead of all
+tokens: an App together with a token is an error, and the GitHub CLI is not
+asked (see [GitHub App](../getting-started/authentication.md#github-app)).
 
 ## GitHub Enterprise
 
@@ -43,7 +54,8 @@ credentials exported for other tools never affect a run that does not use S3.
 
 | Variable | Flag equivalent | Description |
 |---------|----------------|-------------|
-| `BACKUP_NOTIFY_WEBHOOK` | `--notify-webhook` | URL that receives the JSON status after a run |
+| `BACKUP_NOTIFY_WEBHOOK` | `--notify-webhook` | URL that receives the outcome after each run (`--help` never prints its value) |
+| `BACKUP_NOTIFY_FORMAT` | `--notify-format` | `json` (default), `slack`, `discord` or `healthchecks` |
 | `GITHUB_BACKUP_RESTORE_YES` | `--restore-yes` | The value `1` confirms `--restore` without the interactive prompt |
 
 ## Proxy
@@ -53,12 +65,13 @@ credentials exported for other tools never affect a run that does not use S3.
 | `HTTPS_PROXY` / `https_proxy` | Proxy for `https://` targets |
 | `HTTP_PROXY` / `http_proxy` | Proxy for `http://` targets |
 | `ALL_PROXY` / `all_proxy` | Fallback for both when the specific variable is unset |
-| `NO_PROXY` / `no_proxy` | Comma-separated exceptions: `*`, host names (also match subdomains), IP addresses, CIDR blocks such as `10.0.0.0/8`, each with an optional `:port` |
+| `NO_PROXY` / `no_proxy` | Comma-separated exceptions: `*`, host names (also match subdomains), IP addresses, CIDR blocks such as `10.0.0.0/8`, each with an optional `:port`.  Loopback hosts (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) are always reached directly. |
 
 The lower-case spelling wins when both are set.  The proxy must be an
 **HTTP proxy** (`http://[user:pass@]host[:port]`, port 3128 if omitted;
-credentials are sent as `Proxy-Authorization: Basic`).  `https://` targets are
-reached through an HTTP `CONNECT` tunnel.  A value that is not a usable HTTP
+credentials are sent as `Proxy-Authorization: Basic`, and never logged).
+`https://` targets are reached through an HTTP `CONNECT` tunnel (any `2xx`
+answer opens it; IPv6 targets are written `[addr]:port`).  A value that is not a usable HTTP
 proxy URL (`socks5://...` for example) is ignored with a warning.  **SOCKS
 proxies are not supported.**
 
@@ -67,11 +80,12 @@ What the variables apply to:
 | Traffic | Uses the proxy settings? |
 |---------|--------------------------|
 | GitHub API calls, including release-asset downloads | yes |
+| OAuth device flow (`--device-auth`) | yes |
 | `--notify-webhook` | yes |
 | `--doctor` / `--check` | yes (the same client as the backup) |
 | `git clone`, `git fetch`, `git push` (the `git` binary) | by git's own rules: git reads the same variables (`https_proxy`, `no_proxy`, ...) or its `http.proxy` setting |
-| S3 requests | **no**, they connect to the endpoint directly |
-| Gitea / GitLab API calls of `--mirror-to` | **no**, they connect directly (the `git push` itself follows git's rules) |
+| S3 requests (`--s3-bucket`), including an `http://` endpoint | yes |
+| Gitea / GitLab API calls of `--mirror-to` | yes (the `git push` itself follows git's rules) |
 
 ```bash
 export HTTPS_PROXY=http://proxy.corp.example.com:3128
@@ -94,8 +108,10 @@ github-backup octocat --output /backup --all
 | `NO_COLOR` | Set and non-empty: no ANSI colour. |
 | `CLICOLOR_FORCE` | `1`: colour even when stderr is not a terminal. |
 
-Logs go to **stderr**; the banners, `--doctor`, `--list-scopes` and
-`--print-config-template` print to **stdout**.
+Logs and the plan and summary banners go to **stderr**; `--doctor`,
+`--check`, `--list-scopes`, `--print-config-template` and `--completions`
+print to **stdout**.  A closed pipe (`github-backup --list-scopes | head -1`)
+ends the output quietly.
 
 ```bash
 # Warnings and errors only
@@ -104,6 +120,12 @@ RUST_LOG=warn github-backup ...
 # Debug output of the API client only
 RUST_LOG=github_backup_client=debug github-backup ...
 ```
+
+## Configuration File Location
+
+`XDG_CONFIG_HOME` (else `HOME`; `APPDATA` on Windows) locates the config file
+loaded when `--config` is not given; see
+[Config File](config-file.md#loading-a-config-file).
 
 ## Container Variables
 

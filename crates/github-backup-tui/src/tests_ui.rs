@@ -995,7 +995,7 @@ async fn finish_run_records_a_manifest_failure_as_a_run_failure() {
     std::fs::write(dir.join("octocat").join("json"), b"not a dir").unwrap();
 
     let stats = BackupStats::new();
-    crate::finish_run(&stats, &out, "octocat", chrono::Utc::now(), true).await;
+    crate::finish_run(&stats, &out, "octocat", jiff::Timestamp::now(), true).await;
     assert!(
         stats.has_failures(),
         "a manifest that was asked for but not written is a failure"
@@ -1235,4 +1235,137 @@ fn results_show_discussions() {
     let app = app_with_results(done_event(vec![], 0, false));
     let t = text(&app, 120, 40);
     assert!(t.contains("Discussions fetched"), "{t}");
+}
+
+// ── Select all, commit comments, owner from the token ─────────────────────────
+
+/// `A` selects what `--all` selects, and then a refusal is a warning, as
+/// with `--all`: commit comments and attachments included, the opt-in
+/// categories left alone.
+#[test]
+fn select_all_matches_the_all_flag() {
+    use github_backup_types::config::BackupOptions;
+    let mut app = ready_app();
+    app.screen = Screen::Configure;
+    app.config.active_tab = crate::state::ConfigState::TAB_CATEGORIES;
+    press(&mut app, KeyCode::Char('A'));
+    let (_, _, got, _) = app.config.to_backup_config();
+    let expected = BackupOptions {
+        target: got.target.clone(),
+        forks: got.forks,
+        private: got.private,
+        prefer_ssh: got.prefer_ssh,
+        clone_type: got.clone_type.clone(),
+        lfs: got.lfs,
+        prune: got.prune,
+        include_repos: got.include_repos.clone(),
+        exclude_repos: got.exclude_repos.clone(),
+        since: got.since.clone(),
+        full: got.full,
+        clone_host: got.clone_host.clone(),
+        dry_run: got.dry_run,
+        concurrency: got.concurrency,
+        ..BackupOptions::all()
+    };
+    assert_eq!(format!("{got:?}"), format!("{expected:?}"));
+    assert!(got.commit_comments && got.attachments && got.tolerate_forbidden);
+}
+
+/// Categories picked one by one make a refusal a failure, as on the
+/// command line.
+#[test]
+fn a_category_picked_by_hand_makes_refusals_failures() {
+    let mut app = ready_app();
+    app.config.set_all_categories(true);
+    assert!(app.config.to_backup_config().2.tolerate_forbidden);
+    app.config.issues = false;
+    assert!(!app.config.to_backup_config().2.tolerate_forbidden);
+}
+
+#[test]
+fn commit_comments_and_attachments_have_toggles_that_reach_the_backup() {
+    let mut app = ready_app();
+    app.screen = Screen::Configure;
+    app.config.active_tab = crate::state::ConfigState::TAB_CATEGORIES;
+    app.config.active_field = 34;
+    assert!(!app.config.to_backup_config().2.commit_comments);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.config.to_backup_config().2.commit_comments);
+    app.config.active_field = 35;
+    assert!(!app.config.to_backup_config().2.attachments);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.config.to_backup_config().2.attachments);
+    let t = text(&app, 120, 40);
+    assert!(t.contains("[x] Commit Comments"), "{t}");
+    assert!(t.contains("[x] Attachments"), "{t}");
+}
+
+#[test]
+fn an_empty_owner_is_shown_as_the_token_account() {
+    let mut app = ready_app();
+    app.config.owner.clear();
+    let t = text(&app, 120, 40);
+    assert!(t.contains("(the token's account)"), "{t}");
+    assert!(!t.contains("(not configured)"), "{t}");
+    press(&mut app, KeyCode::Char('r'));
+    assert!(app.modal_error.is_none(), "{:?}", app.modal_error);
+    assert_eq!(app.screen, Screen::Running);
+}
+
+#[test]
+fn the_resolved_owner_is_shown_and_kept() {
+    let mut app = ready_app();
+    app.config.owner.clear();
+    press(&mut app, KeyCode::Char('r'));
+    handle_backup_event(
+        &mut app,
+        BackupEvent::OwnerResolved {
+            owner: "alice".into(),
+        },
+    );
+    assert_eq!(app.config.owner, "alice");
+    assert!(app.run.phase.contains("alice"), "{}", app.run.phase);
+    let t = text(&app, 120, 40);
+    assert!(t.contains("alice"), "{t}");
+}
+
+/// Answers `GET /user` with `status` and `body`.
+async fn user_api(status: u16, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(reply.as_bytes()).await;
+            let _ = s.shutdown().await;
+        }
+    });
+    base
+}
+
+#[tokio::test]
+async fn the_owner_is_looked_up_from_the_token_and_announced() {
+    use github_backup_client::GitHubClient;
+    use github_backup_types::config::Credential;
+    let base = user_api(200, r#"{"login":"alice"}"#).await;
+    let client = GitHubClient::for_tests_at(Credential::Token("t".into()), &base);
+    let (tx, mut rx) = crate::progress::channel();
+    assert_eq!(crate::resolve_owner(&client, &tx).await.unwrap(), "alice");
+    let mut announced = false;
+    while let Ok(ev) = rx.try_recv() {
+        announced |= matches!(ev, BackupEvent::OwnerResolved { ref owner } if owner == "alice");
+    }
+    assert!(announced);
+
+    let base = user_api(401, r#"{"message":"Bad credentials"}"#).await;
+    let client = GitHubClient::for_tests_at(Credential::Token("t".into()), &base);
+    let err = crate::resolve_owner(&client, &tx).await.unwrap_err();
+    assert!(err.contains("enter Owner") && err.contains("401"), "{err}");
 }

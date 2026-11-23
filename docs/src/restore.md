@@ -3,7 +3,8 @@
 This guide covers getting data back: the automated `--restore` mode (labels,
 milestones, issues), the manual procedures for everything else, and decrypting
 S3 objects.  Read [What Is Not Backed Up](#what-is-not-restored-or-not-backed-up)
-before you rely on any of it.
+before you rely on any of it.  To read a backup rather than restore it, render it
+as a website with `--render-html` (see [Browsing a Backup](viewer.md)).
 
 ---
 
@@ -34,8 +35,9 @@ github-backup octocat \
 ```
 
 `OWNER` (`octocat` here) names the backup to read; `--restore-target-org`
-names where to write (default: the same name as `OWNER`; do not restore into the
-repositories you backed up).  The tool prints a warning banner and asks you to
+names where to write and is required.  Restoring into `OWNER` itself is refused
+unless you add `--restore-into-source`: issues that still exist there would be
+created a second time.  The tool prints a warning banner and asks you to
 type `yes`.  When stdin is not a terminal, confirm with the flag or the
 environment variable:
 
@@ -113,12 +115,13 @@ exercised against a live account by the project.
 
 Be clear about what a restore cannot give back:
 
-- **Pull requests**, issue and PR **comments**, **reviews**, **reactions** and
-  timeline events: saved in the JSON files, but there is no importer.
-- **Discussions** and **Projects**: not backed up at all (GitHub's REST API has
-  no endpoints for them; `--discussions` / `--projects` do nothing).
-- **Issue attachments and images**: the JSON holds the links; the files are
-  not downloaded.
+- **Pull requests**, issue and PR **comments**, **reviews**, **reactions**,
+  timeline events, **Discussions** and **Projects**: saved in the JSON files,
+  but there is no importer.
+- **Issue attachments and images**: the JSON holds the links; with
+  `--attachments` the files are downloaded to `attachments/` (see
+  [Attachments](backup-categories.md#attachments)), but nothing re-uploads
+  them.
 - **Actions secrets and variables, code-scanning and Dependabot alerts,
   rulesets, team permissions, commit comments and statuses, wiki attachments,
   stargazers of your repositories**: not collected.
@@ -236,10 +239,11 @@ github-backup --decrypt \
   --decrypt-input issues.json.enc --decrypt-output issues.json
 ```
 
-`--decrypt` needs no `OWNER` and no network.  The wire format is
-`[12-byte random nonce][ciphertext + 16-byte GCM tag]`.  `openssl enc` cannot
-decrypt it (it does not support AES-GCM); use the tool, or any AES-GCM library,
-as shown in [At-Rest Encryption](storage/encryption.md#decrypting).
+`--decrypt` needs no `OWNER` and no network, and reads objects written by this
+version and by earlier ones.  The wire format is described in
+[At-Rest Encryption](storage/encryption.md#wire-format).  `openssl enc` cannot
+decrypt it (it does not support AES-GCM); use the tool, or an AES-GCM and HKDF
+library, as shown in [At-Rest Encryption](storage/encryption.md#decrypting).
 
 ---
 

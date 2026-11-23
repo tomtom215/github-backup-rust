@@ -18,21 +18,31 @@
 //!   healthy multi-hour clone of a very large repository keeps emitting
 //!   progress and is never interrupted, while a hung connection is.
 //! * **Cancellation stops the child promptly.**  When
-//!   [`CloneOptions::cancel`] is triggered the child is killed within one poll
-//!   interval.
-//! * **The child leads its own process group** (Unix), so killing it also
+//!   [`CloneOptions::cancel`] is triggered the child is stopped within one poll
+//!   interval plus a short grace period.
+//! * **The child leads its own process group** (Unix), so stopping it also
 //!   reaches git's transport helpers (`git-remote-https`, `ssh`, …) instead of
-//!   leaving them blocked on a dead socket.
-//! * **git can never prompt.**  stdin is closed and `GIT_TERMINAL_PROMPT=0`,
-//!   so a missing or rejected credential fails fast instead of waiting on a
-//!   terminal that does not exist (cron, Docker, systemd).
+//!   leaving them blocked on a dead socket.  The group first gets `SIGTERM`,
+//!   on which git removes the `.lock` files it holds, and `SIGKILL` only after
+//!   [`TERM_GRACE`].
+//! * **git does not prompt.**  stdin is closed and `GIT_TERMINAL_PROMPT=0`, so
+//!   a missing or rejected HTTPS credential fails fast instead of waiting on a
+//!   terminal.  `ssh` reads its questions (an unknown host key, a key
+//!   passphrase) from the controlling terminal, not from stdin; for SSH URLs
+//!   `GIT_SSH_COMMAND` is therefore set to `ssh -o BatchMode=yes` unless the
+//!   user chose an SSH command (`GIT_SSH_COMMAND`, `GIT_SSH` or
+//!   `core.sshCommand`), in which case answering without a prompt is up to
+//!   that command.
+//! * **git-lfs reports progress** (`GIT_LFS_FORCE_PROGRESS=1`) although its
+//!   output is not a terminal, so a long LFS transfer is not mistaken for a
+//!   stall.
 //!
 //! [`ProcessGitRunner`]: super::ProcessGitRunner
 //! [`CloneOptions::stall_timeout_secs`]: super::CloneOptions::stall_timeout_secs
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{Child, ChildStderr, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -41,7 +51,7 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 
 use super::credential;
-use super::CloneOptions;
+use super::{CloneOptions, GitCommand};
 use crate::error::CoreError;
 
 /// How much of a child's stderr is retained for error messages.
@@ -57,6 +67,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How many lines of the stderr tail are kept in an error message.
 const ERROR_LINES: usize = 12;
+
+/// How long a stopped child's process group has between `SIGTERM` and
+/// `SIGKILL` to clean up (git removes its `.lock` files on `SIGTERM`).
+#[cfg(unix)]
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// The SSH command used when the user configured none: it fails instead of
+/// asking a question nobody can answer.
+const BATCH_SSH_COMMAND: &str = "ssh -o BatchMode=yes";
 
 /// Retains the tail of a child's stderr and the time of its last output.
 struct StderrCapture {
@@ -146,7 +165,6 @@ fn is_progress_line(line: &str) -> bool {
     line.contains("% (") && line.ends_with([')', ',']) || line.ends_with("), done.")
 }
 
-/// Kills `child` and, on Unix, its whole process group, then reaps it.
 /// Appends an actionable hint to git errors whose cause is not obvious.
 fn with_hints(mut stderr: String) -> String {
     if stderr.contains("dubious ownership") {
@@ -156,26 +174,105 @@ fn with_hints(mut stderr: String) -> String {
              fix ownership (chown -R) of the backup directory.",
         );
     }
+    if stderr.contains(".lock': File exists") {
+        stderr.push_str(
+            "\nhint: a git process holds (or a killed one left) this lock file. \
+             github-backup removes lock files older than the stall limit before it \
+             updates a repository, so the next run clears a stale one; delete it by \
+             hand only if no git process is running in that repository.",
+        );
+    }
     stderr
 }
 
+/// Stops `child` and, on Unix, its whole process group, then reaps it.
+///
+/// The group gets `SIGTERM` first so git can remove its `.lock` files (a
+/// `SIGKILL`ed git leaves them behind and every later update of that
+/// repository fails), then `SIGKILL` after [`TERM_GRACE`] for anything still
+/// running, such as a helper that ignores `SIGTERM`.
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
+        use nix::sys::signal::{killpg, Signal};
         // The child was started as the leader of a new process group (see
         // `run_git`), so its pid is the group id.
         if let Ok(pid) = i32::try_from(child.id()) {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            let group = nix::unistd::Pid::from_raw(pid);
+            let _ = killpg(group, Signal::SIGTERM);
+            let deadline = Instant::now() + TERM_GRACE;
+            while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                thread::sleep(POLL_INTERVAL);
+            }
+            let _ = killpg(group, Signal::SIGKILL);
         }
     }
     let _ = child.kill();
     let _ = child.wait();
 }
 
-/// Runs `program` with `args` in `cwd` and waits for it, applying the
+/// The `safe.directory` value that names the canonical path `real` the way
+/// git compares it.
+///
+/// On Windows `canonicalize` returns a verbatim path (`\\?\C:\backup\r.git`,
+/// `\\?\UNC\server\share\r.git`), which git never matches; the prefix is
+/// dropped and the separators become `/`, the form git uses internally.
+fn safe_directory_value(real: &Path) -> String {
+    let text = strip_verbatim_prefix(&real.display().to_string());
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
+}
+
+/// `\\?\C:\x` becomes `C:\x` and `\\?\UNC\server\share` becomes
+/// `\\server\share`; any other text is returned unchanged.
+fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
+/// `true` for the URL forms git hands to `ssh`: `ssh://`, `git+ssh://`,
+/// `ssh+git://` and the scp-like `[user@]host:path`.
+fn is_ssh_url(url: &str) -> bool {
+    if let Some((scheme, _)) = url.split_once("://") {
+        return matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "ssh" | "git+ssh" | "ssh+git"
+        );
+    }
+    // scp-like syntax: a colon before any slash.  A single letter before the
+    // colon is a Windows drive (`C:\repo`), which git treats as a path.
+    match url.split_once(':') {
+        Some((host, _)) => !host.contains('/') && host.len() > 1,
+        None => false,
+    }
+}
+
+/// `true` if the user chose how git runs `ssh`: the `GIT_SSH_COMMAND` or
+/// `GIT_SSH` environment variable, or `core.sshCommand` in the configuration
+/// that applies in `cwd`.
+fn ssh_command_configured(git: &GitCommand, cwd: &Path) -> bool {
+    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+        return true;
+    }
+    git.command()
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Runs `git` with `args` in `cwd` and waits for it, applying the
 /// supervision rules described in the [module documentation](self).
 ///
 /// If `token` is `Some` and `url` is an HTTP(S) URL, the token is supplied to
@@ -183,7 +280,7 @@ fn kill_tree(child: &mut Child) {
 /// that URL's origin (see [`credential`]): no file is created and the token is
 /// never part of an argument list.  `url` is the remote the command talks to.
 pub(super) fn run_git(
-    program: &Path,
+    git: &GitCommand,
     args: &[&str],
     cwd: &Path,
     url: &str,
@@ -203,14 +300,14 @@ pub(super) fn run_git(
     if cwd != Path::new(".") {
         if let Ok(real) = cwd.canonicalize() {
             global.push("-c".into());
-            global.push(format!("safe.directory={}", real.display()));
+            global.push(format!("safe.directory={}", safe_directory_value(&real)));
         }
     }
     if token.is_some() {
         global.extend(credential::config_args(url));
     }
 
-    let mut cmd = Command::new(program);
+    let mut cmd = git.command();
     cmd.args(&global)
         .args(args)
         .current_dir(cwd)
@@ -221,7 +318,13 @@ pub(super) fn run_git(
         .env("GIT_TERMINAL_PROMPT", "0")
         // Stable, English messages: error classification matches on them.
         .env("LC_ALL", "C")
-        .env("LANGUAGE", "C");
+        .env("LANGUAGE", "C")
+        // Without a terminal git-lfs is silent, and silence is a stall.
+        .env("GIT_LFS_FORCE_PROGRESS", "1");
+    // ssh asks its questions on the terminal, where nobody may be watching.
+    if is_ssh_url(url) && !ssh_command_configured(git, cwd) {
+        cmd.env("GIT_SSH_COMMAND", BATCH_SSH_COMMAND);
+    }
     if let Some(tok) = token {
         if credential::origin(url).is_some() {
             cmd.env(credential::TOKEN_ENV, tok);
@@ -302,6 +405,63 @@ mod tests {
     fn summarise_tolerates_invalid_utf8() {
         let out = summarise_stderr(b"fatal: bad \xff\xfe bytes\n");
         assert!(out.starts_with("fatal: bad"));
+    }
+
+    /// Regression (Windows): `canonicalize` returns `\\?\` paths, which git's
+    /// `safe.directory` never matches, so the trust it was meant to give was
+    /// not given.
+    #[test]
+    fn verbatim_windows_prefixes_are_dropped() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\backup\o\git\r.git"),
+            r"C:\backup\o\git\r.git"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\nas\share\r.git"),
+            r"\\nas\share\r.git"
+        );
+        // A verbatim path that is not a disk or UNC path has no other form.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\Volume{x}\r.git"),
+            r"\\?\Volume{x}\r.git"
+        );
+        assert_eq!(strip_verbatim_prefix("/backup/r.git"), "/backup/r.git");
+        assert_eq!(
+            safe_directory_value(Path::new("/backup/o/r.git")),
+            "/backup/o/r.git"
+        );
+    }
+
+    #[test]
+    fn ssh_urls_are_recognised() {
+        for url in [
+            "git@github.com:o/r.git",
+            "github.com:o/r.git",
+            "ssh://git@github.com/o/r.git",
+            "SSH://github.com:22/o/r.git",
+            "git+ssh://github.com/o/r.git",
+        ] {
+            assert!(is_ssh_url(url), "{url}");
+        }
+        for url in [
+            "https://github.com/o/r.git",
+            "http://127.0.0.1:9/o/r.git",
+            "file:///srv/r.git",
+            "/srv/repos/r.git",
+            "./relative:odd/r.git",
+            "C:\\repos\\r.git",
+        ] {
+            assert!(!is_ssh_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_lock_file_error_gets_a_hint() {
+        let text = with_hints(
+            "error: cannot lock ref 'refs/heads/main': Unable to create '/b/r.git/refs/heads/main.lock': File exists.".into(),
+        );
+        assert!(text.contains("hint: a git process holds"), "{text}");
+        assert_eq!(with_hints("fatal: other".into()), "fatal: other");
     }
 
     #[test]

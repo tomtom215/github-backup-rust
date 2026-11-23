@@ -14,6 +14,12 @@ Or with the short form:
 github-backup -c /etc/github-backup/config.toml
 ```
 
+Without `--config`, `$XDG_CONFIG_HOME/github-backup/config.toml` is loaded when
+it exists: `~/.config/github-backup/config.toml` on Linux and macOS (when
+`XDG_CONFIG_HOME` is unset), `%APPDATA%\github-backup\config.toml` on Windows.
+The log names the file it loaded.  To ignore it for one run, pass
+`--config /dev/null` (an empty file is a valid configuration).
+
 ## Precedence
 
 The file supplies defaults; the command line and the environment are applied
@@ -22,10 +28,18 @@ for every kind of setting:
 
 | Kind of setting | Rule |
 |-----------------|------|
-| Single values (`owner`, `token`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
+| Single values (`owner`, `token`, `app_id`, `app_key_path`, `app_installation_id`, `output`, `concurrency`, `api_url`, `clone_host`, `report`, `mirror_*` values including `mirror_type`, `s3_*` values, `since`) | A value given on the command line (or in its environment variable) wins; the file is used only when the command line gave none. |
 | `clone_type` | A `--clone-type` given on the command line wins, including `--clone-type mirror`.  The file applies only when the flag was not given. |
-| Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `prune`, `prefer_ssh`, `mirror_private`, `mirror_public`, `s3_include_assets`) | **Either one turns it on.**  A switch that is `true` in the file cannot be turned off from the command line; set it to `false` (or remove it) in the file instead. |
-| Lists (`include_repos`, `exclude_repos`) | The patterns of the file and of the command line are **combined**. |
+| Switches (`org`, `all`, `repositories`, `issues`, ..., `lfs`, `prune`, `prefer_ssh`, `mirror_private`, `mirror_public`, `s3_include_assets`) | **Either one turns it on.**  A category that is `true` in the file is turned off for one run with `--skip <name>`; the other switches only by editing the file. |
+| Lists (`include_repos`, `exclude_repos`, `skip`) | The entries of the file and of the command line are **combined**. |
+
+Categories have one more rule: when neither the command line nor the file
+selects any category, everything is backed up, as with `all = true`.
+
+Settings that belong to a mirror or S3 destination (`mirror_type`,
+`mirror_owner`, `mirror_public`, `s3_region`, `s3_prefix`, ...) may come from
+either place, but need the destination (`mirror_to`, `s3_bucket`) from one of
+them; without it they are a usage error.
 
 ```bash
 # Config: owner = "octocat", concurrency = 4
@@ -47,6 +61,9 @@ owner = "octocat"
 
 # Authentication (prefer GITHUB_TOKEN environment variable instead)
 # token = "ghp_xxx"
+# ... or a GitHub App instead of a token:
+# app_id       = "Iv23li0123456789abcd"
+# app_key_path = "/etc/github-backup/app.pem"
 
 # Output directory
 output = "/var/backup/github"
@@ -64,9 +81,11 @@ concurrency = 8
 # prune       = false   # true: delete refs that were deleted on GitHub
 
 # ── Backup categories ──────────────────────────────────────────────────────
+# With no category key at all, everything is backed up (as with all = true).
 
 # Enable the categories of `--all` (clone_starred and action_runs stay opt-in)
 # all = true
+# skip = ["hooks"]   # leave categories out of the default / all
 
 # Or enable individually:
 repositories     = true
@@ -105,10 +124,10 @@ actions          = true
 # ── Deployment environments ─────────────────────────────────────────────────
 environments     = true
 
-# ── Packages ───────────────────────────────────────────────────────────────
-# (`discussions` and `projects` are accepted but back up nothing: GitHub's
-#  REST API has no endpoint for them.)
+# ── Discussions, packages and projects ─────────────────────────────────────
+discussions      = true   # comments, replies and categories (GraphQL)
 packages         = false  # requires the read:packages OAuth scope
+projects         = false  # Projects (v2); requires the read:project scope
 
 # ── Organisation-specific ───────────────────────────────────────────────────
 org_members      = false
@@ -118,7 +137,8 @@ org_teams        = false
 # report = "/var/log/github-backup/report.json"
 
 # ── Mirror to Gitea/Codeberg ───────────────────────────────────────────────
-# mirror_to      = "https://codeberg.org"   # Gitea-type only: mirror_type cannot be set in the file
+# mirror_to      = "https://codeberg.org"
+# mirror_type    = "gitea"            # or "gitlab"
 # mirror_token   = "cb_token"         # or use MIRROR_TOKEN env var
 # mirror_owner   = "alice"
 # mirror_public  = false   # true: mirrors of public repositories are public
@@ -135,6 +155,14 @@ org_teams        = false
 ```
 
 ## Minimal Config File
+
+```toml
+owner = "octocat"
+output = "/var/backup/github"
+```
+
+This backs up everything (no category is selected).  To back up only some
+categories, name them:
 
 ```toml
 owner = "octocat"
@@ -197,8 +225,11 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `owner` | string | — | GitHub username or org |
+| `owner` | string | the token's account | GitHub username or org |
 | `token` | string | — | Personal access token (prefer env var) |
+| `app_id` | string | — | GitHub App client ID or App ID: authenticate as the App instead of with a token (see [GitHub App](../getting-started/authentication.md#github-app)) |
+| `app_key_path` | path | — | Path of the GitHub App's private key (`.pem`); the key itself may instead be in `GITHUB_APP_PRIVATE_KEY`, never in this file |
+| `app_installation_id` | integer | the App's installation on `owner` | GitHub App installation to act as |
 | `api_url` | string | `https://api.github.com` | GitHub API base URL (for GitHub Enterprise Server) |
 | `clone_host` | string | *(from API)* | Override git clone hostname (GHES split-hostname) |
 | `output` | path | `.` | Output root directory |
@@ -214,13 +245,16 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `prefer_ssh` | bool | `false` | Use SSH clone URLs instead of HTTPS |
 | `lfs` | bool | `false` | Also fetch Git LFS objects (needs `git-lfs`) |
 | `prune` | bool | `false` | Delete branches and tags from the clone when they were deleted on GitHub |
+| `verify_git` | bool | `false` | Check every repository with `git fsck` after each clone and update (`--verify-git`) |
+| `git_timeout` | integer | `600` | Seconds a git command may stay silent before it is stopped (`--git-timeout`) |
 | `no_prune` | bool | — | Deprecated and ignored (not pruning is the default); still accepted so old files load |
 
 ### Backup Categories
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `all` | bool | `false` | Enable the categories of `--all` (not `clone_starred`, `action_runs`) |
+| `all` | bool | `false` | Enable the categories of `--all` (not `clone_starred`, `action_runs`).  Also what happens when no category key is set |
+| `skip` | string array | `[]` | Categories to leave out, named as for `--skip` (`["hooks", "release-assets"]`) |
 | `repositories` | bool | `false` | Clone repositories |
 | `forks` | bool | `false` | Include forks |
 | `private` | bool | `false` | Include private repos |
@@ -246,26 +280,29 @@ GITHUB_TOKEN=ghp_xxx MIRROR_TOKEN=cb_xxx \
 | `gists` | bool | `false` | Back up gists |
 | `starred_gists` | bool | `false` | Back up starred gists |
 | `topics` | bool | `false` | Back up repository topics |
-| `branches` | bool | `false` | Back up branch list |
+| `branches` | bool | `false` | Back up branch list, branch protection rules (admin access) and rulesets |
 | `deploy_keys` | bool | `false` | Back up deploy keys (admin access required) |
-| `collaborators` | bool | `false` | Back up collaborator list (admin access required) |
+| `collaborators` | bool | `false` | Back up collaborator list (write access required) |
 | `org_members` | bool | `false` | Back up org member list (organisation targets only) |
 | `org_teams` | bool | `false` | Back up org team list (organisation targets only) |
 | `actions` | bool | `false` | Back up GitHub Actions workflow metadata |
 | `action_runs` | bool | `false` | Back up workflow run history (opt-in; can be large) |
 | `environments` | bool | `false` | Back up deployment environment configurations |
-| `discussions` | bool | `false` | Accepted, but backs up nothing: GitHub's REST API has no Discussions endpoint |
-| `projects` | bool | `false` | Accepted, but backs up nothing: Classic Projects are no longer in GitHub's REST API |
-| `packages` | bool | `false` | Back up GitHub Packages metadata for the target user |
-| `include_repos` | string array | `[]` | Only back up repos matching these glob patterns |
-| `exclude_repos` | string array | `[]` | Exclude repos matching these glob patterns |
+| `discussions` | bool | `false` | Back up GitHub Discussions with their comments, replies and categories (GraphQL API) |
+| `projects` | bool | `false` | Back up the owner's Projects (v2): projects, fields, items with field values |
+| `packages` | bool | `false` | Back up GitHub Packages metadata for the target user or organisation |
+| `commit_comments` | bool | `false` | Back up the comments made on commits of each repository |
+| `attachments` | bool | `false` | Download the files attached to issues, pull requests, comments and release notes |
+| `include_repos` | string array | `[]` | Only back up repos whose **name** (not `owner/name`) matches one of these glob patterns; a TOML array (`["a-*", "b"]`), not a comma-separated string |
+| `exclude_repos` | string array | `[]` | Exclude repos whose name matches one of these glob patterns (a TOML array) |
 | `since` | string | — | Expert override, same as `--since`: a date (`2026-01-01`) or timestamp.  Applied to every run and never stored; leave it unset and the tool tracks its own per-repository watermarks |
 
 ### Mirror Destination
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mirror_to` | string | — | Push mirrors to this base URL.  The destination type is always Gitea/Codeberg/Forgejo from a config file (`--mirror-type gitlab` has no key) |
+| `mirror_to` | string | — | Push mirrors to this base URL |
+| `mirror_type` | string | `gitea` | `"gitea"` (Gitea, Codeberg, Forgejo) or `"gitlab"` |
 | `mirror_token` | string | — | API token for the mirror host (prefer `MIRROR_TOKEN` env var) |
 | `mirror_owner` | string | — | Owner name at the mirror destination |
 | `mirror_private` | bool | `false` | Create every mirror private (the default).  Wins if `mirror_public` is also set |
@@ -323,19 +360,17 @@ exclude_repos = ["*-archive"]
 These flags have no config key and must come from the command line (or, where
 one exists, the environment): `--config`, `--print-config-template`,
 `--doctor`, `--check`, `--list-scopes`, `--device-auth`, `--oauth-client-id`,
-`--oauth-scopes`, `--full`, `--mirror-type`, `--s3-session-token`,
-`--s3-delete-stale`, `--dry-run`, `--manifest`, `--verify`, `--keep-last`,
-`--max-age-days` (deprecated), `--prometheus-metrics`, `--diff-with`,
-`--notify-webhook`, `--history-size`, `--restore`, `--restore-target-org`,
-`--restore-yes`, `--encrypt-key`, `--decrypt`, `--decrypt-input`,
-`--decrypt-output`, `--quiet`, `--verbose` and `--tui`.  A file that tries to
+`--oauth-scopes`, `--full`, `--s3-session-token`, `--s3-delete-stale`,
+`--dry-run`, `--every`, `--manifest`, `--verify`, `--prometheus-metrics`,
+`--diff-with`, `--notify-webhook`, `--notify-format`, `--history-size`,
+`--restore`, `--restore-target-org`, `--restore-into-source`, `--restore-yes`,
+`--encrypt-key`, `--decrypt`, `--decrypt-input`, `--decrypt-output`,
+`--completions`, `--quiet`, `--verbose` and `--tui`, and the deprecated
+`--keep-last` and `--max-age-days`.  A file that tries to
 set one of them is rejected as an unknown key.
 
 ## The Template
 
-`github-backup --print-config-template` prints an annotated file that lists all
-63 keys, commented out.  Some of its comments are outdated: it marks `output`
-as required (it defaults to `.`), says that command-line flags always override
-the file (see [Precedence](#precedence)), suggests `discussions = true` and
-`projects = true` (they have no effect) and says that an unset `since` inherits
-the previous run's timestamp (each repository has its own watermark).
+`github-backup --print-config-template` prints an annotated file with every
+key commented out, so the unedited template is a valid, empty configuration.
+Every key is optional; the comments give each default.

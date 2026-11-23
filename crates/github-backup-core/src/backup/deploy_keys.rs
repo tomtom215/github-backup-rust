@@ -14,16 +14,17 @@ use crate::{error::CoreError, storage::Storage};
 
 /// Backs up the deploy keys configured on a single repository.
 ///
-/// Writes `meta_dir/deploy_keys.json` when `opts.deploy_keys` is enabled.
+/// Writes `meta_dir/deploy_keys.json` when `opts.deploy_keys` is enabled: a
+/// snapshot of the keys configured now, replaced on every run (a key that was
+/// removed must not look as if it were still installed).
 ///
-/// Admin access to the repository is required by the GitHub API.  When the
-/// API returns 403 or 404, the function logs an informational message and
-/// returns `Ok(())` without treating it as an error — this is the same
-/// graceful-degradation pattern used for hooks and security advisories.
+/// Admin access to the repository is required by the GitHub API; how a
+/// refusal is reported is decided by the engine.
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from storage writes or non-403/404 API errors.
+/// Propagates [`CoreError`] from the API call (including a 403 refusal) or
+/// the storage write.
 pub async fn backup_deploy_keys(
     client: &impl BackupClient,
     owner: &str,
@@ -36,28 +37,14 @@ pub async fn backup_deploy_keys(
         return Ok(());
     }
 
-    match client.list_deploy_keys(owner, repo_name).await {
-        Ok(keys) => {
-            info!(
-                owner,
-                repo = repo_name,
-                count = keys.len(),
-                "fetched deploy keys"
-            );
-            storage.write_json(&meta_dir.join("deploy_keys.json"), &keys)?;
-        }
-        Err(github_backup_client::ClientError::ApiError {
-            status: 403 | 404, ..
-        }) => {
-            info!(
-                repo = format!("{owner}/{repo_name}"),
-                "skipping deploy keys (insufficient permissions)"
-            );
-        }
-        Err(e) => return Err(e.into()),
-    }
-
-    Ok(())
+    let keys = client.list_deploy_keys(owner, repo_name).await?;
+    info!(
+        owner,
+        repo = repo_name,
+        count = keys.len(),
+        "fetched deploy keys"
+    );
+    storage.write_json(&meta_dir.join("deploy_keys.json"), &keys)
 }
 
 #[cfg(test)]

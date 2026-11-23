@@ -12,23 +12,18 @@ use std::path::PathBuf;
 
 use github_backup_types::{
     config::{BackupOptions, BackupTarget},
-    discussion::DiscussionCategory,
     package::PackageRepository,
-    project::ProjectCard,
     pull_request::PullRequestRef,
-    ClassicProject, Collaborator, DeployKey, Discussion, DiscussionComment, Hook, Issue,
-    IssueComment, Label, Milestone, Package, PackageVersion, ProjectColumn, PullRequest, Release,
-    SecurityAdvisory, Team, User,
+    Collaborator, DeployKey, Hook, Issue, IssueComment, Label, Milestone, Package, PackageVersion,
+    PullRequest, Release, SecurityAdvisory, Team, User,
 };
 
 use crate::backup::mock_client::MockBackupClient;
 use crate::backup::{
-    collaborators::backup_collaborators, deploy_keys::backup_deploy_keys,
-    discussion::backup_discussions, hooks::backup_hooks, issue::backup_issues,
-    labels::backup_labels, milestones::backup_milestones, package::backup_packages,
-    project::backup_projects, pull_request::backup_pull_requests, release::backup_releases,
-    security_advisories::backup_security_advisories, topics::backup_topics,
-    user_data::backup_user_data,
+    collaborators::backup_collaborators, deploy_keys::backup_deploy_keys, hooks::backup_hooks,
+    issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
+    package::backup_packages, pull_request::backup_pull_requests, release::backup_releases,
+    security_advisories::backup_security_advisories, user_data::backup_user_data,
 };
 use crate::storage::test_support::MemStorage;
 
@@ -104,9 +99,19 @@ async fn backup_issues_writes_issues_json_and_comments() {
         ..Default::default()
     };
 
-    let count = backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("backup_issues");
+    let count = backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("backup_issues")
+    .count;
 
     assert_eq!(count, 1, "one issue fetched");
     let issues_path = meta_dir().join("issues.json");
@@ -126,9 +131,18 @@ async fn backup_issues_disabled_writes_nothing() {
         ..Default::default()
     };
 
-    backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("noop");
+    backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("noop");
 
     assert_eq!(storage.len(), 0, "nothing written when issues disabled");
 }
@@ -163,9 +177,19 @@ async fn backup_pull_requests_writes_prs_json() {
         ..Default::default()
     };
 
-    let count = backup_pull_requests(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("backup_pull_requests");
+    let count = backup_pull_requests(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("backup_pull_requests")
+    .count;
 
     assert_eq!(count, 1);
     let prs_path = meta_dir().join("pulls.json");
@@ -414,31 +438,6 @@ async fn backup_collaborators_writes_json() {
     assert!(storage.get(&path).is_some(), "collaborators.json written");
 }
 
-// ── Topics ─────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn backup_topics_writes_json() {
-    let client =
-        MockBackupClient::new().with_topics(vec!["rust".to_string(), "backup".to_string()]);
-    let storage = MemStorage::default();
-    let opts = BackupOptions {
-        topics: true,
-        ..Default::default()
-    };
-
-    backup_topics(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
-        .await
-        .expect("backup_topics");
-
-    let path = meta_dir().join("topics.json");
-    assert!(storage.get(&path).is_some(), "topics.json written");
-
-    let bytes = storage.get(&path).unwrap();
-    let content = String::from_utf8(bytes).unwrap();
-    assert!(content.contains("rust"));
-    assert!(content.contains("backup"));
-}
-
 // ── User data ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -528,117 +527,6 @@ async fn backup_user_data_org_mode_writes_members_and_teams() {
     );
 }
 
-// ── Discussions ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn backup_discussions_writes_json_and_comments() {
-    let discussion = Discussion {
-        number: 1,
-        title: "How to use?".to_string(),
-        body: "Question body".to_string(),
-        locked: false,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        updated_at: "2024-01-01T00:00:00Z".to_string(),
-        html_url: format!("https://github.com/{OWNER}/{REPO}/discussions/1"),
-        user: make_user(),
-        comments: 1,
-        category: Some(DiscussionCategory {
-            id: 1,
-            name: "Q&A".to_string(),
-            description: String::new(),
-            is_answerable: true,
-        }),
-        answered: false,
-    };
-    let comment = DiscussionComment {
-        id: 100,
-        body: "Here's how!".to_string(),
-        created_at: "2024-01-02T00:00:00Z".to_string(),
-        updated_at: "2024-01-02T00:00:00Z".to_string(),
-        html_url: format!("https://github.com/{OWNER}/{REPO}/discussions/1#discussioncomment-100"),
-        user: make_user(),
-    };
-
-    let client = MockBackupClient::new()
-        .with_discussions(vec![discussion])
-        .with_discussion_comments(vec![comment]);
-    let storage = MemStorage::default();
-    let opts = BackupOptions {
-        discussions: true,
-        ..Default::default()
-    };
-
-    let count = backup_discussions(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
-        .await
-        .expect("backup_discussions");
-
-    assert_eq!(count, 1, "one discussion fetched");
-    assert!(
-        storage.get(&meta_dir().join("discussions.json")).is_some(),
-        "discussions.json written"
-    );
-    let comment_path = meta_dir().join("discussion_comments_1.json");
-    assert!(
-        storage.get(&comment_path).is_some(),
-        "discussion comment file written"
-    );
-}
-
-// ── Projects ───────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn backup_projects_writes_json_and_columns() {
-    let project = ClassicProject {
-        id: 1,
-        number: 1,
-        name: "Backlog".to_string(),
-        body: Some("Work in progress".to_string()),
-        state: "open".to_string(),
-        creator: make_user(),
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        updated_at: "2024-01-01T00:00:00Z".to_string(),
-        html_url: format!("https://github.com/{OWNER}/{REPO}/projects/1"),
-        open_issues_count: Some(5),
-    };
-    let column = ProjectColumn {
-        id: 10,
-        name: "To Do".to_string(),
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        updated_at: "2024-01-01T00:00:00Z".to_string(),
-        cards: vec![ProjectCard {
-            id: 100,
-            note: Some("First card".to_string()),
-            archived: false,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
-            content_url: None,
-        }],
-    };
-
-    let client = MockBackupClient::new()
-        .with_repo_projects(vec![project])
-        .with_project_columns(vec![column]);
-    let storage = MemStorage::default();
-    let opts = BackupOptions {
-        projects: true,
-        ..Default::default()
-    };
-
-    backup_projects(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
-        .await
-        .expect("backup_projects");
-
-    assert!(
-        storage.get(&meta_dir().join("projects.json")).is_some(),
-        "projects.json written"
-    );
-    let col_path = meta_dir().join("project_columns_1.json");
-    assert!(
-        storage.get(&col_path).is_some(),
-        "project columns file written"
-    );
-}
-
 // ── Packages ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -683,7 +571,7 @@ async fn backup_packages_writes_json_and_versions() {
         .await
         .expect("backup_packages");
 
-    assert!(count > 0, "at least one package file written");
+    assert!(count.count > 0, "at least one package file written");
 
     let pkg_path = owner_json_dir().join("packages_container.json");
     assert!(
@@ -701,7 +589,7 @@ async fn backup_packages_writes_json_and_versions() {
 // ── Multi-module pipeline scenario ─────────────────────────────────────────
 
 /// Smoke-tests the complete per-repo metadata pipeline in one shot:
-/// issues, PRs, labels, and discussions are all backed up together.
+/// issues, PRs and labels are all backed up together.
 #[tokio::test]
 async fn full_repo_metadata_pipeline_smoke_test() {
     let client = MockBackupClient::new()
@@ -746,19 +634,6 @@ async fn full_repo_metadata_pipeline_smoke_test() {
             color: "84b6eb".to_string(),
             description: None,
             default: false,
-        }])
-        .with_discussions(vec![Discussion {
-            number: 1,
-            title: "Discussion".to_string(),
-            body: String::new(),
-            locked: false,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
-            html_url: String::new(),
-            user: make_user(),
-            comments: 0,
-            category: None,
-            answered: false,
         }]);
 
     let storage = MemStorage::default();
@@ -766,29 +641,38 @@ async fn full_repo_metadata_pipeline_smoke_test() {
         issues: true,
         pulls: true,
         labels: true,
-        discussions: true,
         ..Default::default()
     };
 
-    backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("issues");
-    backup_pull_requests(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("prs");
+    backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("issues");
+    backup_pull_requests(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("prs");
     backup_labels(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
         .await
         .expect("labels");
-    backup_discussions(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
-        .await
-        .expect("discussions");
 
-    for file in &[
-        "issues.json",
-        "pulls.json",
-        "labels.json",
-        "discussions.json",
-    ] {
+    for file in &["issues.json", "pulls.json", "labels.json"] {
         let path = meta_dir().join(file);
         assert!(storage.get(&path).is_some(), "{file} should be written");
     }

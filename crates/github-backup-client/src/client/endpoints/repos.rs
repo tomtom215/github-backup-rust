@@ -5,7 +5,7 @@
 
 use tracing::info;
 
-use github_backup_types::{Page, Repository};
+use github_backup_types::{Page, Raw, Repository};
 
 use crate::error::ClientError;
 
@@ -22,12 +22,16 @@ impl GitHubClient {
     /// is used instead: it returns the repositories the account owns,
     /// private ones included.  For any other user, for an anonymous client,
     /// and for tokens that cannot call `GET /user` (GitHub App tokens, with a
-    /// warning), the public listing is used.
+    /// warning), the public listing is used.  A GitHub App credential lists
+    /// the repositories its installation can access, private ones included.
     ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_user_repos(&self, username: &str) -> Result<Page<Repository>, ClientError> {
+        if self.is_app() {
+            return self.list_installation_repos(username).await;
+        }
         let api = self.api();
         let url = if self.is_authenticated_user(username).await? {
             info!(
@@ -41,14 +45,37 @@ impl GitHubClient {
         self.get_all_pages(&url).await
     }
 
-    /// Lists repositories belonging to an organisation.
+    /// Lists repositories belonging to an organisation.  A GitHub App
+    /// credential lists the repositories its installation can access.
     ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_org_repos(&self, org: &str) -> Result<Page<Repository>, ClientError> {
+        if self.is_app() {
+            return self.list_installation_repos(org).await;
+        }
         let api = self.api();
         let url = format!("{api}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
+    }
+
+    /// Returns one repository in full (`GET /repos/{owner}/{repo}`): unlike
+    /// the listings it has `parent`, `source`, `template_repository`, the
+    /// merge settings and `security_and_analysis`.  (`temp_clone_token`, a
+    /// short-lived credential, is removed from every response.)
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn get_repository(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Raw<Repository>, ClientError> {
+        let api = self.api();
+        let url = format!("{api}/repos/{owner}/{repo}");
+        let (value, _) = self.get_json_with_link::<serde_json::Value>(&url).await?;
+        Ok(Raw::from_value(value)?)
     }
 }

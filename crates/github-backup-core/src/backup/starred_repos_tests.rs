@@ -438,3 +438,66 @@ async fn a_repository_that_vanished_upstream_is_kept_and_not_reported_as_a_failu
         q.items.iter().map(|i| &i.state).collect::<Vec<_>>()
     );
 }
+
+/// Regression: `full_name` from the API became two directory names
+/// unchecked, so a hostile or broken server could make a clone land outside
+/// the starred directory.  Such an item is recorded as failed and never cloned.
+#[tokio::test]
+async fn a_starred_repository_named_like_a_path_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let queue_path = dir.path().join("queue.json");
+    let starred_dir = dir.path().join("starred");
+    let mut evil = starred_repo(1, "a/b");
+    evil.full_name = "../../outside".to_string();
+    let mut no_owner = starred_repo(2, "a/b");
+    no_owner.full_name = "lonely".to_string();
+    let client =
+        MockBackupClient::new().with_starred(vec![evil, no_owner, starred_repo(3, "ok/fine")]);
+    let git = SpyGitRunner::default();
+
+    let outcome = backup_starred_repos(
+        &client,
+        &git,
+        "octocat",
+        &starred_opts(),
+        &starred_dir,
+        &queue_path,
+        &clone_opts(),
+    )
+    .await
+    .expect("run");
+
+    let calls = git.recorded_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].dest, starred_dir.join("ok").join("fine.git"));
+    let failed: Vec<&str> = outcome.failed.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(failed, ["../../outside", "lonely"]);
+}
+
+/// Regression: `--clone-host` was applied to owned repositories, wikis and
+/// gists but not to starred clones.
+#[tokio::test]
+async fn starred_clones_use_the_clone_host() {
+    let dir = TempDir::new().unwrap();
+    let client = MockBackupClient::new().with_starred(vec![starred_repo(1, "a/b")]);
+    let git = SpyGitRunner::default();
+    let opts = BackupOptions {
+        clone_host: Some("git.example.com".to_string()),
+        ..starred_opts()
+    };
+
+    backup_starred_repos(
+        &client,
+        &git,
+        "octocat",
+        &opts,
+        dir.path(),
+        &dir.path().join("queue.json"),
+        &clone_opts(),
+    )
+    .await
+    .expect("run");
+
+    let calls = git.recorded_calls();
+    assert_eq!(calls[0].url, "https://git.example.com/a/b.git");
+}

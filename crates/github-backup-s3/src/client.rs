@@ -33,9 +33,10 @@
 //!
 //! # Proxies
 //!
-//! The client connects to the endpoint directly.  `HTTPS_PROXY` / `NO_PROXY`
-//! are **not** honoured for S3 traffic (the GitHub client's proxy connector is
-//! private to that crate); see the storage documentation.
+//! Connections are made by the GitHub client's proxy-aware connector
+//! ([`github_backup_client::ProxyConnector`]), so `HTTPS_PROXY`,
+//! `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to S3 traffic as they do to
+//! the GitHub API.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,14 +46,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::OsRng;
 use bytes::Bytes;
+use github_backup_client::{ProxyClient, ProxyConnector, ProxySettings};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::header::HeaderValue;
 use hyper::{HeaderMap, Method, Request};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tracing::{debug, info, warn};
@@ -71,6 +70,13 @@ const USER_AGENT: &str = concat!("github-backup-rust/", env!("CARGO_PKG_VERSION"
 /// last, and allows 10 000 parts.
 pub const DEFAULT_PART_SIZE: usize = 16 * 1024 * 1024;
 
+/// Most parts one multipart upload may have (an S3 limit).
+pub const MAX_PARTS: usize = 10_000;
+
+/// Largest object S3 accepts (5 TiB); 10 000 parts of that size stay far
+/// below S3's 5 GiB part limit.
+const MAX_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+
 /// Largest response body that is read into memory (list pages are the
 /// biggest legitimate responses, about 1.5 MB).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -82,7 +88,7 @@ const BODY_FRAME_BYTES: usize = 64 * 1024;
 /// Longest `Retry-After` the client will honour.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
-type HyperClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, ProgressBody>;
+type HyperClient = ProxyClient<ProgressBody>;
 
 // ── Options ─────────────────────────────────────────────────────────────────
 
@@ -132,7 +138,9 @@ impl RetryPolicy {
         let jitter = if half_ms == 0 {
             Duration::ZERO
         } else {
-            Duration::from_millis(OsRng.next_u64() % (half_ms + 1))
+            // Jitter only needs to be unpredictable enough to de-synchronise
+            // retries; if the OS RNG is unavailable, fall back to no jitter.
+            Duration::from_millis(getrandom::u64().unwrap_or(0) % (half_ms + 1))
         };
         half + jitter
     }
@@ -188,6 +196,33 @@ pub enum HeadOutcome {
     /// cannot be told apart from "the key does not exist and the credentials
     /// lack `s3:ListBucket`" (AWS answers `403` instead of `404` then).
     Forbidden,
+}
+
+/// Where the parts of a streamed multipart upload come from (see
+/// [`S3Client::multipart_upload_from`]).
+pub trait PartSource: Send {
+    /// The next part, or `None` after the last one.  Only one part is held at
+    /// a time.  An error ends (and aborts) the upload, so a source that must
+    /// check its content before the upload is completed — a digest, say —
+    /// returns the error instead of `None`.
+    fn next_part(&mut self) -> impl Future<Output = Result<Option<Bytes>, S3Error>> + Send;
+}
+
+/// Parts of an in-memory buffer.
+struct SliceParts<'a> {
+    rest: &'a [u8],
+    part_size: usize,
+}
+
+impl PartSource for SliceParts<'_> {
+    async fn next_part(&mut self) -> Result<Option<Bytes>, S3Error> {
+        if self.rest.is_empty() {
+            return Ok(None);
+        }
+        let (part, rest) = self.rest.split_at(self.part_size.min(self.rest.len()));
+        self.rest = rest;
+        Ok(Some(Bytes::copy_from_slice(part)))
+    }
 }
 
 /// An in-progress multipart upload.
@@ -531,10 +566,20 @@ impl S3Client {
     /// # Errors
     ///
     /// See [`S3Client::new`].
-    pub fn with_options(mut config: S3Config, options: ClientOptions) -> Result<Self, S3Error> {
+    pub fn with_options(config: S3Config, options: ClientOptions) -> Result<Self, S3Error> {
+        Self::with_proxy(config, options, ProxySettings::from_env())
+    }
+
+    /// Like [`S3Client::with_options`] with explicit proxy settings instead
+    /// of the environment's.
+    fn with_proxy(
+        mut config: S3Config,
+        options: ClientOptions,
+        proxy: ProxySettings,
+    ) -> Result<Self, S3Error> {
         config.validate()?;
         let target = Target::new(&config)?;
-        let http = build_http_client(&options, target.https)?;
+        let http = build_http_client(&options, target.https, proxy)?;
         // The signer owns the only long-lived copy of the credentials; the
         // config kept for addressing carries none.
         let signer = Signer::new_s3(
@@ -690,13 +735,32 @@ impl S3Client {
         self.expect_success(&spec).await.map(drop)
     }
 
-    /// Uploads `data` using S3 Multipart Upload in [`ClientOptions::part_size`]
-    /// parts.
+    /// The part size for an object of `total_len` bytes:
+    /// [`ClientOptions::part_size`], raised when needed so that the object
+    /// fits in [`MAX_PARTS`] parts.
     ///
-    /// If any step fails — a part after its retries, or the final
-    /// `CompleteMultipartUpload`, including a `200 OK` that carries an
-    /// `<Error>` — the upload is aborted so no orphaned parts keep accruing
-    /// storage charges.
+    /// # Errors
+    ///
+    /// Returns [`S3Error::TooLarge`] when the object would exceed S3's 5 TiB
+    /// limit.
+    pub fn part_size_for(&self, total_len: u64) -> Result<usize, S3Error> {
+        if total_len > MAX_OBJECT_SIZE {
+            return Err(S3Error::TooLarge(format!(
+                "{total_len} bytes exceed the S3 maximum object size of 5 TiB"
+            )));
+        }
+        let size =
+            (self.inner.options.part_size.max(1) as u64).max(total_len.div_ceil(MAX_PARTS as u64));
+        usize::try_from(size).map_err(|_| {
+            S3Error::TooLarge(format!(
+                "a {size}-byte part does not fit in memory on this platform"
+            ))
+        })
+    }
+
+    /// Uploads `data` using S3 Multipart Upload in parts of
+    /// [`S3Client::part_size_for`] bytes; see
+    /// [`S3Client::multipart_upload_from`].
     ///
     /// # Errors
     ///
@@ -708,39 +772,105 @@ impl S3Client {
         content_type: &str,
         metadata: &[(&str, &str)],
     ) -> Result<(), S3Error> {
-        let part_size = self.inner.options.part_size.max(1);
+        let part_size = self.part_size_for(data.len() as u64)?;
+        let parts = SliceParts {
+            rest: data,
+            part_size,
+        };
+        self.multipart_upload_from(key, content_type, metadata, parts)
+            .await
+    }
+
+    /// Uploads the parts `source` yields with S3 Multipart Upload, holding one
+    /// part in memory at a time.
+    ///
+    /// If any step fails — the source, a part after its retries, more than
+    /// [`MAX_PARTS`] parts, or the final `CompleteMultipartUpload`, including
+    /// a `200 OK` that carries an `<Error>` — the upload is aborted so no
+    /// orphaned parts keep accruing storage charges.
+    ///
+    /// A `CompleteMultipartUpload` that is answered `NoSuchUpload` (typically
+    /// a retry after the first attempt succeeded but its response was lost)
+    /// counts as success only if `HeadObject` then shows an object of exactly
+    /// the uploaded size carrying exactly `metadata`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3Error`] on network, auth, or service errors, and whatever
+    /// error `source` returns.
+    pub async fn multipart_upload_from<P: PartSource>(
+        &self,
+        key: &str,
+        content_type: &str,
+        metadata: &[(&str, &str)],
+        mut source: P,
+    ) -> Result<(), S3Error> {
         let upload = self
             .create_multipart_upload(key, content_type, metadata)
             .await?;
-        info!(
-            key,
-            upload_id = %upload.upload_id,
-            parts = data.len().div_ceil(part_size).max(1),
-            "starting multipart upload"
-        );
+        info!(key, upload_id = %upload.upload_id, "starting multipart upload");
+        let mut uploaded: u64 = 0;
         let result = async {
             let mut parts: Vec<(u32, String)> = Vec::new();
-            // An empty object still needs one (empty) part.
-            let mut chunks: Vec<&[u8]> = data.chunks(part_size).collect();
-            if chunks.is_empty() {
-                chunks.push(&[]);
+            while let Some(data) = source.next_part().await? {
+                if parts.len() == MAX_PARTS {
+                    return Err(S3Error::TooLarge(format!(
+                        "the object needs more than {MAX_PARTS} parts (did the file grow while it \
+                         was being uploaded?)"
+                    )));
+                }
+                let number = u32::try_from(parts.len() + 1).expect("at most MAX_PARTS parts");
+                uploaded += data.len() as u64;
+                parts.push((number, self.upload_part(&upload, number, data).await?));
             }
-            for (index, chunk) in chunks.into_iter().enumerate() {
-                let number = u32::try_from(index + 1)
-                    .map_err(|_| S3Error::InvalidKey("too many multipart parts".to_string()))?;
-                let etag = self
-                    .upload_part(&upload, number, Bytes::copy_from_slice(chunk))
-                    .await?;
-                parts.push((number, etag));
+            // An empty object still needs one (empty) part.
+            if parts.is_empty() {
+                parts.push((1, self.upload_part(&upload, 1, Bytes::new()).await?));
             }
             self.complete_multipart_upload(&upload, &parts).await
         }
         .await;
-        if let Err(error) = &result {
-            warn!(key, upload_id = %upload.upload_id, error = %error, "multipart upload failed; aborting it");
-            self.abort_multipart_upload_best_effort(&upload).await;
+        match result {
+            Err(error) if error.api_code() == Some("NoSuchUpload") => {
+                self.confirm_completed(key, uploaded, metadata, error).await
+            }
+            Err(error) => {
+                warn!(key, upload_id = %upload.upload_id, error = %error, "multipart upload failed; aborting it");
+                self.abort_multipart_upload_best_effort(&upload).await;
+                Err(error)
+            }
+            Ok(()) => Ok(()),
         }
-        result
+    }
+
+    /// After `NoSuchUpload`: `Ok` if the object at `key` is exactly what was
+    /// uploaded (`size` bytes, carrying `metadata`), else the original error.
+    async fn confirm_completed(
+        &self,
+        key: &str,
+        size: u64,
+        metadata: &[(&str, &str)],
+        error: S3Error,
+    ) -> Result<(), S3Error> {
+        let matches = |info: &ObjectInfo| {
+            info.size == Some(size)
+                && metadata.iter().all(|(name, value)| {
+                    info.metadata
+                        .get(*name)
+                        .is_some_and(|stored| crate::digest::digests_equal(stored, value))
+                })
+        };
+        match self.head_object(key).await {
+            Ok(HeadOutcome::Found(info)) if matches(&info) => {
+                info!(
+                    key,
+                    "CompleteMultipartUpload answered NoSuchUpload, but the object holds this \
+                     upload (an earlier attempt completed it)"
+                );
+                Ok(())
+            }
+            _ => Err(error),
+        }
     }
 
     /// Starts a multipart upload (`POST ?uploads`).
@@ -1090,41 +1220,34 @@ fn validate_key(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// Builds an HTTPS client using the system native CA bundle.
-fn build_http_client(options: &ClientOptions, needs_tls: bool) -> Result<HyperClient, S3Error> {
-    let mut root_store = rustls::RootCertStore::empty();
-    let cert_result = rustls_native_certs::load_native_certs();
-    if cert_result.certs.is_empty() && needs_tls {
-        let msg = cert_result
-            .errors
-            .first()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "no CA certificates found".to_string());
-        return Err(S3Error::Tls(msg));
-    }
-    root_store.add_parsable_certificates(cert_result.certs);
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let mut http = HttpConnector::new();
-    // The TLS layer above decides between http and https.
-    http.enforce_http(false);
-    http.set_connect_timeout(Some(options.connect_timeout));
-    http.set_nodelay(true);
-    http.set_keepalive(Some(Duration::from_secs(30)));
-
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .wrap_connector(http);
-
-    Ok(Client::builder(TokioExecutor::new())
-        // Servers drop idle connections after a short while; do not reuse
-        // ones that have been idle for long.
-        .pool_idle_timeout(Duration::from_secs(15))
-        .build(https))
+/// Builds the HTTP(S) client: the system CA bundle (not needed for a
+/// plain-`http://` endpoint) and the shared proxy-aware connector.
+fn build_http_client(
+    options: &ClientOptions,
+    needs_tls: bool,
+    proxy: ProxySettings,
+) -> Result<HyperClient, S3Error> {
+    let tls = match github_backup_client::native_tls_config() {
+        Ok(tls) => tls,
+        Err(github_backup_client::ClientError::Tls(why)) if needs_tls => {
+            return Err(S3Error::Tls(why))
+        }
+        Err(e) if needs_tls => return Err(S3Error::Tls(e.to_string())),
+        Err(_) => rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+    };
+    // The endpoint's scheme decides between http and https.
+    let mut connector = ProxyConnector::new(proxy, tls, true);
+    connector.set_connect_timeout(Some(options.connect_timeout));
+    connector.set_keepalive(Some(Duration::from_secs(30)));
+    Ok(ProxyClient::with_connector(
+        Client::builder(TokioExecutor::new())
+            // Servers drop idle connections after a short while; do not reuse
+            // ones that have been idle for long.
+            .pool_idle_timeout(Duration::from_secs(15)),
+        connector,
+    ))
 }
 
 #[cfg(test)]
@@ -1583,5 +1706,174 @@ mod tests {
             b"<CompleteMultipartUploadResult><Key>k</Key></CompleteMultipartUploadResult>"
         ));
         assert!(!body_is_error_document(b""));
+    }
+
+    // ── Proxy ─────────────────────────────────────────────────────────────
+
+    mod proxy {
+        use super::*;
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        /// One request as a fake peer received it: the head and the body
+        /// length.
+        type Seen = Arc<Mutex<Vec<(String, usize)>>>;
+
+        fn settings(vars: &[(&str, String)]) -> ProxySettings {
+            let vars: HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect();
+            ProxySettings::from_lookup(|n| vars.get(n).cloned())
+        }
+
+        /// A peer (proxy or origin) that reads one request per connection,
+        /// body included, records it and answers with `reply`.
+        async fn peer(reply: &'static str) -> (u16, Seen) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen: Seen = Arc::default();
+            let log = Arc::clone(&seen);
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = listener.accept().await {
+                    let log = Arc::clone(&log);
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut chunk = vec![0u8; 64 * 1024];
+                        let head_end = loop {
+                            let n = s.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break i + 4;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        while buf.len() - head_end < length {
+                            let n = s.read(&mut chunk).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        log.lock().unwrap().push((head, buf.len() - head_end));
+                        let _ = s.write_all(reply.as_bytes()).await;
+                        let _ = s.shutdown().await;
+                    });
+                }
+            });
+            (port, seen)
+        }
+
+        const OK: &str =
+            "HTTP/1.1 200 OK\r\nETag: \"e\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+        fn client(endpoint: String, proxy: ProxySettings) -> S3Client {
+            S3Client::with_proxy(
+                S3Config {
+                    endpoint: Some(endpoint),
+                    ..sample_config()
+                },
+                ClientOptions {
+                    retry: RetryPolicy::none(),
+                    idle_timeout: Duration::from_secs(5),
+                    connect_timeout: Duration::from_secs(5),
+                    part_size: DEFAULT_PART_SIZE,
+                },
+                proxy,
+            )
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn https_endpoints_are_reached_through_a_connect_tunnel_without_leaking_credentials()
+        {
+            let (port, seen) = peer("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await;
+            let s3 = client(
+                "https://s3.example.invalid".into(),
+                settings(&[(
+                    "HTTPS_PROXY",
+                    format!("http://alice:pr0xy-s3cret@127.0.0.1:{port}"),
+                )]),
+            );
+            let err = s3.head_object("k").await.unwrap_err();
+            let (head, _) = seen.lock().unwrap()[0].clone();
+            let head = head.to_ascii_lowercase();
+            assert!(
+                head.starts_with("connect s3.example.invalid:443 http/1.1"),
+                "{head}"
+            );
+            // base64("alice:pr0xy-s3cret")
+            assert!(
+                head.contains("proxy-authorization: basic ywxpy2u6chiwehktcznjcmv0"),
+                "{head}"
+            );
+            assert!(
+                !head.contains("x-amz") && !head.contains("authorization: aws4"),
+                "the signed request stays inside the tunnel: {head}"
+            );
+            for text in [err.to_string(), format!("{err:?}"), format!("{s3:?}")] {
+                assert!(!text.contains("pr0xy-s3cret"), "{text}");
+                assert!(!text.contains("YWxpY2U6cHIweHktczNjcmV0"), "{text}");
+            }
+        }
+
+        /// A streamed body of several frames reaches the proxy whole, with the
+        /// proxy credentials, in absolute form.
+        #[tokio::test]
+        async fn plain_http_uploads_stream_through_the_proxy() {
+            let (port, seen) = peer(OK).await;
+            let s3 = client(
+                "http://minio.example.invalid:9000".into(),
+                settings(&[("HTTP_PROXY", format!("http://u:p@127.0.0.1:{port}"))]),
+            );
+            let body = vec![7u8; 3 * BODY_FRAME_BYTES + 11];
+            s3.put_object("owner/a.json", body.clone(), "application/json", &[])
+                .await
+                .unwrap();
+            let (head, length) = seen.lock().unwrap()[0].clone();
+            let lower = head.to_ascii_lowercase();
+            assert!(
+                lower.starts_with(
+                    "put http://minio.example.invalid:9000/my-bucket/owner/a.json http/1.1"
+                ),
+                "{head}"
+            );
+            assert!(lower.contains("proxy-authorization: basic dtpw"), "{head}");
+            assert!(lower.contains("authorization: aws4-hmac-sha256"), "{head}");
+            assert_eq!(length, body.len());
+        }
+
+        #[tokio::test]
+        async fn no_proxy_endpoints_are_reached_directly() {
+            let (proxy_port, proxy_seen) = peer(OK).await;
+            let (origin_port, origin_seen) = peer(OK).await;
+            let s3 = client(
+                format!("http://127.0.0.1:{origin_port}"),
+                settings(&[
+                    ("HTTP_PROXY", format!("http://127.0.0.1:{proxy_port}")),
+                    ("NO_PROXY", "localhost,127.0.0.1".into()),
+                ]),
+            );
+            s3.put_object("k", &b"{}"[..], "application/json", &[])
+                .await
+                .unwrap();
+            assert!(
+                proxy_seen.lock().unwrap().is_empty(),
+                "the proxy was bypassed"
+            );
+            let (head, _) = origin_seen.lock().unwrap()[0].clone();
+            assert!(head.starts_with("PUT /my-bucket/k HTTP/1.1"), "{head}");
+        }
     }
 }

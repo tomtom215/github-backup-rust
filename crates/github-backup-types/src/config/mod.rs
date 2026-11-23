@@ -5,7 +5,7 @@
 //!
 //! The main types exported from this module are:
 //!
-//! - [`Credential`] — authentication credential (token or anonymous)
+//! - [`Credential`] — authentication credential (token, GitHub App or anonymous)
 //! - [`OutputConfig`] — root output path and per-owner directory layout
 //! - [`CloneType`] — repository clone strategy (mirror, bare, full, shallow)
 //! - [`BackupTarget`] — user account vs. organisation
@@ -19,8 +19,8 @@ mod options;
 mod output;
 
 pub use clone_type::CloneType;
-pub use credential::Credential;
-pub use file::ConfigFile;
+pub use credential::{AppCredential, Credential};
+pub use file::{ConfigFile, MirrorType};
 pub use options::{BackupOptions, BackupTarget};
 pub use output::OutputConfig;
 

@@ -582,3 +582,322 @@ fn an_explicit_clone_type_mirror_beats_the_config_file() {
         "the config applies when the CLI is silent"
     );
 }
+
+// ── Default categories, --skip ───────────────────────────────────────────────
+
+/// U1: with no category flag a run backed up nothing (only `repos.json`) and
+/// still reported success.  No selection now means everything, like `--all`.
+#[test]
+fn no_category_selected_backs_up_everything() {
+    let args = parse(&["github-backup", "octocat"]);
+    assert!(args.uses_default_categories());
+    let (_, _, opts) = args.into_backup_options();
+    let all = parse(&["github-backup", "octocat", "--all"])
+        .into_backup_options()
+        .2;
+    assert_eq!(
+        crate::cli::categories::enabled(&opts),
+        crate::cli::categories::enabled(&all)
+    );
+    assert!(opts.repositories && opts.issues && opts.wikis);
+}
+
+#[test]
+fn any_category_flag_selects_a_subset_but_extras_do_not() {
+    let args = parse(&["github-backup", "octocat", "--issues"]);
+    assert!(!args.uses_default_categories());
+    let (_, _, opts) = args.into_backup_options();
+    assert!(opts.issues && !opts.repositories);
+
+    // `--private` and `--action-runs` modify the default instead.
+    let args = parse(&["github-backup", "octocat", "--private", "--action-runs"]);
+    assert!(args.uses_default_categories());
+    let (_, _, opts) = args.into_backup_options();
+    assert!(opts.repositories && opts.private && opts.action_runs);
+}
+
+#[test]
+fn a_category_in_the_config_file_is_a_selection_too() {
+    let mut args = parse(&["github-backup", "octocat"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        gists: Some(true),
+        ..Default::default()
+    });
+    assert!(!args.uses_default_categories());
+    let (_, _, opts) = args.into_backup_options();
+    assert!(opts.gists && !opts.repositories);
+}
+
+/// `--skip` is the way to turn off what the default, `--all` or the config
+/// file turned on (switches are otherwise OR-ed and cannot be switched off).
+#[test]
+fn skip_removes_categories_from_the_default_all_and_the_config_file() {
+    let args = parse(&["github-backup", "octocat", "--skip", "hooks,packages"]);
+    let (_, _, opts) = args.into_backup_options();
+    assert!(!opts.hooks && !opts.packages && opts.issues);
+
+    let mut args = parse(&["github-backup", "octocat", "--skip", "wikis"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        wikis: Some(true),
+        issues: Some(true),
+        gists: Some(true),
+        skip: Some(vec!["issues".into()]),
+        ..Default::default()
+    });
+    let (_, _, opts) = args.into_backup_options();
+    assert!(!opts.wikis && !opts.issues && opts.gists);
+}
+
+#[test]
+fn an_unknown_skip_name_is_rejected_from_the_command_line_and_the_config_file() {
+    let e = try_parse(&["github-backup", "octocat", "--skip", "hookz"]).unwrap_err();
+    assert!(e.to_string().contains("hookz"), "{e}");
+
+    let (mut args, matches) = try_parse_with_matches(&["github-backup", "octocat"]).unwrap();
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        skip: Some(vec!["hookz".into()]),
+        ..Default::default()
+    });
+    let e = args.check_dependencies(&matches).unwrap_err().to_string();
+    assert!(e.contains("hookz") && e.contains("hooks"), "{e}");
+}
+
+#[test]
+fn concurrency_zero_is_clamped_to_one() {
+    let (_, _, opts) =
+        parse(&["github-backup", "octocat", "--concurrency", "0"]).into_backup_options();
+    assert_eq!(opts.concurrency, 1);
+}
+
+// ── Mirror / S3 settings and the config file (U4, U7) ────────────────────────
+
+/// U4: `mirror_to` in the config file plus `--mirror-type` on the command
+/// line exited 2 ("requires --mirror-to"), because clap checked before the
+/// merge.
+#[test]
+fn mirror_settings_on_the_command_line_accept_a_destination_from_the_config_file() {
+    use github_backup_types::config::{ConfigFile, MirrorType};
+    let (mut args, matches) = try_parse_with_matches(&[
+        "github-backup",
+        "octocat",
+        "--mirror-type",
+        "gitlab",
+        "--mirror-owner",
+        "me",
+        "--mirror-public",
+        "--s3-region",
+        "eu-west-1",
+        "--s3-include-assets",
+    ])
+    .expect("must parse without the destinations");
+    args.merge_config(&ConfigFile {
+        mirror_to: Some("https://gitlab.com".into()),
+        s3_bucket: Some("b".into()),
+        ..Default::default()
+    });
+    assert!(args.check_dependencies(&matches).is_ok());
+    assert_eq!(args.mirror_type, Some(MirrorType::Gitlab));
+}
+
+#[test]
+fn mirror_and_s3_settings_without_their_destination_are_rejected_after_the_merge() {
+    for argv in [
+        &["github-backup", "o", "--mirror-type", "gitlab"][..],
+        &["github-backup", "o", "--mirror-owner", "me"][..],
+        &["github-backup", "o", "--s3-prefix", "p"][..],
+        &["github-backup", "o", "--s3-delete-stale"][..],
+    ] {
+        assert!(dependency_error(argv).is_some(), "{argv:?}");
+    }
+    // A config-file value without its destination is just as wrong.
+    let (mut args, matches) = try_parse_with_matches(&["github-backup", "o"]).unwrap();
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        mirror_type: Some(github_backup_types::config::MirrorType::Gitlab),
+        ..Default::default()
+    });
+    let e = args.check_dependencies(&matches).unwrap_err().to_string();
+    assert!(e.contains("mirror_type") && e.contains("mirror_to"), "{e}");
+}
+
+/// U7: `--mirror-type` was free text and a typo silently meant Gitea.
+#[test]
+fn a_mistyped_mirror_type_is_a_usage_error() {
+    let e = try_parse(&["github-backup", "o", "--mirror-type", "gitlb"]).unwrap_err();
+    let text = e.to_string();
+    assert!(text.contains("gitlb") && text.contains("gitlab"), "{text}");
+}
+
+#[test]
+fn the_command_line_mirror_type_beats_the_config_file() {
+    use github_backup_types::config::{ConfigFile, MirrorType};
+    let mut args = parse(&["github-backup", "o", "--mirror-type", "gitea"]);
+    args.merge_config(&ConfigFile {
+        mirror_type: Some(MirrorType::Gitlab),
+        ..Default::default()
+    });
+    assert_eq!(args.mirror_type, Some(MirrorType::Gitea));
+    let mut args = parse(&["github-backup", "o"]);
+    args.merge_config(&ConfigFile {
+        mirror_type: Some(MirrorType::Gitlab),
+        ..Default::default()
+    });
+    assert_eq!(args.mirror_type, Some(MirrorType::Gitlab));
+}
+
+#[test]
+fn mirror_type_in_a_config_file_is_validated_when_it_is_read() {
+    use github_backup_types::config::{ConfigFile, MirrorType};
+    let cfg = ConfigFile::from_toml_str("mirror_type = \"gitlab\"").unwrap();
+    assert_eq!(cfg.mirror_type, Some(MirrorType::Gitlab));
+    assert!(ConfigFile::from_toml_str("mirror_type = \"gitlb\"").is_err());
+}
+
+// ── Tokens and secrets (U8) ──────────────────────────────────────────────────
+
+#[test]
+fn gh_token_is_used_only_when_no_other_token_was_given() {
+    let mut args = parse(&["github-backup", "o"]);
+    args.token_from_gh_token(Some(" gho_x\n".into()));
+    assert_eq!(args.token.as_deref(), Some("gho_x"));
+
+    let mut args = parse(&["github-backup", "o", "--token", "ghp_cli"]);
+    args.token_from_gh_token(Some("gho_x".into()));
+    assert_eq!(args.token.as_deref(), Some("ghp_cli"));
+
+    let mut args = parse(&["github-backup", "o"]);
+    args.token_from_gh_token(Some(String::new()));
+    assert_eq!(args.token, None);
+}
+
+#[test]
+fn secrets_typed_on_the_command_line_are_named() {
+    let (_, matches) = try_parse_with_matches(&[
+        "github-backup",
+        "o",
+        "--token",
+        "t",
+        "--mirror-to",
+        "https://x.example",
+        "--mirror-token",
+        "m",
+        "--encrypt-key",
+        "k",
+        "--notify-webhook",
+        "https://hooks.example/secret",
+    ])
+    .unwrap();
+    assert_eq!(
+        crate::cli::Args::secrets_on_command_line(&matches),
+        [
+            "--token",
+            "--mirror-token",
+            "--encrypt-key",
+            "--notify-webhook"
+        ]
+    );
+    let (_, matches) = try_parse_with_matches(&["github-backup", "o"]).unwrap();
+    assert!(crate::cli::Args::secrets_on_command_line(&matches).is_empty());
+}
+
+// ── Modes (U15) ──────────────────────────────────────────────────────────────
+
+#[test]
+fn two_modes_at_once_are_a_usage_error() {
+    for argv in [
+        &["github-backup", "o", "--verify", "--restore"][..],
+        &["github-backup", "o", "--doctor", "--tui"][..],
+        &["github-backup", "o", "--every", "1h", "--list-scopes"][..],
+    ] {
+        assert!(try_parse(argv).is_err(), "{argv:?}");
+    }
+    // `--verify` no longer conflicts with category flags.
+    assert!(try_parse(&["github-backup", "o", "--verify", "--all"]).is_ok());
+}
+
+/// `--render-html` takes its directory only with `=`, so a following OWNER
+/// is never swallowed as the site directory.
+#[test]
+fn render_html_takes_an_optional_directory_with_equals() {
+    let args = parse(&["github-backup", "--render-html", "octocat"]);
+    assert_eq!(args.render_html, Some(None));
+    assert_eq!(args.owner.as_deref(), Some("octocat"));
+    let args = parse(&["github-backup", "octocat", "--render-html=/srv/www"]);
+    assert_eq!(
+        args.render_html,
+        Some(Some(std::path::PathBuf::from("/srv/www")))
+    );
+    assert_eq!(parse(&["github-backup", "octocat"]).render_html, None);
+    assert!(try_parse(&["github-backup", "o", "--render-html", "--verify"]).is_err());
+}
+
+/// `--print-config-template` used to be detected anywhere in argv, even as
+/// the value of another option.
+#[test]
+fn mode_flags_given_as_option_values_are_values() {
+    let args = parse(&["github-backup", "o", "--report=--print-config-template"]);
+    assert!(!args.print_config_template);
+    assert_eq!(
+        args.report.as_deref(),
+        Some(std::path::Path::new("--print-config-template"))
+    );
+}
+
+#[test]
+fn an_unknown_completion_shell_is_rejected_with_the_valid_ones() {
+    let e = try_parse(&["github-backup", "--completions", "bogus"])
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("bogus") && e.contains("bash"), "{e}");
+}
+
+#[test]
+fn every_parses_an_interval() {
+    let args = parse(&["github-backup", "--every", "6h"]);
+    assert_eq!(args.every, Some(std::time::Duration::from_secs(6 * 3600)));
+    assert!(try_parse(&["github-backup", "--every", "6"]).is_err());
+}
+
+#[test]
+fn verify_git_and_git_timeout_come_from_the_flag_or_the_config_file() {
+    let args = parse(&[
+        "github-backup",
+        "o",
+        "--verify-git",
+        "--git-timeout",
+        "1200",
+    ]);
+    assert!(args.verify_git);
+    assert_eq!(args.git_timeout, Some(1200));
+
+    let mut args = parse(&["github-backup", "o"]);
+    assert!(!args.verify_git);
+    assert_eq!(args.git_timeout, None);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        verify_git: Some(true),
+        git_timeout: Some(900),
+        ..Default::default()
+    });
+    assert!(args.verify_git);
+    assert_eq!(args.git_timeout, Some(900));
+
+    // The command line wins over the file; a 0 in the file means "default".
+    let mut args = parse(&["github-backup", "o", "--git-timeout", "60"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        git_timeout: Some(900),
+        ..Default::default()
+    });
+    assert_eq!(args.git_timeout, Some(60));
+    let mut args = parse(&["github-backup", "o"]);
+    args.merge_config(&github_backup_types::config::ConfigFile {
+        git_timeout: Some(0),
+        ..Default::default()
+    });
+    assert_eq!(args.git_timeout, None);
+}
+
+#[test]
+fn a_zero_git_timeout_on_the_command_line_is_a_usage_error() {
+    let err =
+        try_parse(&["github-backup", "o", "--git-timeout", "0"]).expect_err("0 must be rejected");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+}

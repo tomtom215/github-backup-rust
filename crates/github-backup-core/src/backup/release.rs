@@ -6,14 +6,17 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use github_backup_client::{AssetSink, BackupClient, ClientError};
 use github_backup_types::config::BackupOptions;
-use github_backup_types::ReleaseAsset;
+use github_backup_types::{Page, ReleaseAsset};
 
+use crate::manifest::lower_hex;
 use crate::{
+    backup::{all_json, describe_unparsed, json_str, merge::merge_and_write, Outcome},
     error::CoreError,
     storage::{PendingFile, Storage},
 };
@@ -21,9 +24,16 @@ use crate::{
 /// Backs up all releases for a repository, optionally downloading binary assets.
 ///
 /// Writes:
-/// - `meta_dir/releases.json` – all release metadata, as the API returned it
+/// - `meta_dir/releases.json` – every release, as the API returned it, merged
+///   by `id` with what earlier runs stored (a deleted release stays)
 /// - `meta_dir/release_assets/<tag>/<filename>` – binary assets (if enabled)
-/// - `meta_dir/release_assets/<tag>/<filename>.sha256` – checksum sidecar
+/// - `meta_dir/release_checksums/<tag>/<filename>.sha256` – checksum sidecar
+///
+/// The sidecars live in their own directory so that they can never collide
+/// with an asset: a release may well publish `app.tar.gz` *and*
+/// `app.tar.gz.sha256`.  Earlier versions wrote the sidecar next to the asset;
+/// such a file is read, moved to the new place and removed, unless the
+/// release has a real asset of that name.
 ///
 /// Assets are streamed to a temporary file next to their destination and
 /// renamed into place once complete, so an interrupted run never leaves a
@@ -32,15 +42,19 @@ use crate::{
 ///
 /// An asset that is already on disk is skipped only when it is complete: its
 /// size equals the API's `size`, and its content matches the API digest (or,
-/// without one, the checksum in its `.sha256` sidecar).  Anything else is
-/// downloaded again.
+/// without one, the checksum in its sidecar).  Anything else is downloaded
+/// again.
 ///
 /// One asset that cannot be fetched does not stop the others: every asset is
-/// attempted and the first failure is returned at the end.
+/// attempted and each failure is returned in [`Outcome::failed`].  The same
+/// goes for a release or an asset the typed model cannot read: the release's
+/// assets are still read one by one from its JSON, and only what cannot be
+/// read at all is reported.
 ///
 /// # Errors
 ///
-/// Propagates [`CoreError`] from API calls or storage writes.
+/// Propagates [`CoreError`] from the release listing or storage writes, and
+/// any fatal error.
 pub async fn backup_releases(
     client: &impl BackupClient,
     owner: &str,
@@ -48,22 +62,47 @@ pub async fn backup_releases(
     opts: &BackupOptions,
     meta_dir: &Path,
     storage: &impl Storage,
-) -> Result<(), CoreError> {
+) -> Result<Outcome, CoreError> {
+    let mut outcome = Outcome::default();
     if !opts.releases {
-        return Ok(());
+        return Ok(outcome);
     }
 
     info!(owner, repo = repo_name, "fetching releases");
     let releases = client.list_releases(owner, repo_name).await?;
-    storage.write_json(&meta_dir.join("releases.json"), &releases)?;
+    outcome.count = (releases.len() + releases.unparsed_count()) as u64;
+    merge_and_write(storage, &meta_dir.join("releases.json"), &releases, "id")?;
 
     if !opts.release_assets {
-        return Ok(());
+        return Ok(outcome);
     }
 
-    let mut first_error: Option<CoreError> = None;
-    for release in &releases {
-        for asset in &release.assets {
+    for (index, release) in all_json(&releases).enumerate() {
+        let Some(tag) = json_str(release, "tag_name") else {
+            outcome.fail(
+                format!(
+                    "release at position {index} ({})",
+                    describe_unparsed(release)
+                ),
+                "the API object has no `tag_name`, so its assets cannot be stored",
+            );
+            continue;
+        };
+        let assets: Page<ReleaseAsset> = Page::from_values(
+            release
+                .get("assets")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        for asset in assets.unparsed() {
+            outcome.fail(
+                format!("release {tag} asset ({})", describe_unparsed(asset)),
+                "the asset does not fit the typed model, so it cannot be downloaded",
+            );
+        }
+        let names: Vec<&str> = assets.iter().map(|a| a.name.as_str()).collect();
+        for asset in &assets {
             if asset.state != "uploaded" {
                 warn!(
                     asset = %asset.name,
@@ -73,42 +112,74 @@ pub async fn backup_releases(
                 continue;
             }
 
-            // Both come from the API: neither may leave the assets directory.
-            let asset_path = meta_dir
-                .join("release_assets")
-                .join(crate::paths::nested(&release.tag_name))
-                .join(crate::paths::file_name(&asset.name));
-
-            if let Err(e) = backup_asset(client, asset, &asset_path, storage).await {
+            let paths = AssetPaths::new(meta_dir, tag, &asset.name, &names);
+            if let Err(e) = backup_asset(client, asset, &paths, storage).await {
                 warn!(
                     asset = %asset.name,
-                    tag = %release.tag_name,
+                    tag,
                     error = %e,
                     "release asset could not be backed up"
                 );
-                first_error.get_or_insert(e);
+                outcome.item_error(format!("release {tag} asset {}", asset.name), e)?;
             }
         }
     }
 
-    first_error.map_or(Ok(()), Err)
+    Ok(outcome)
+}
+
+/// Where one asset and its checksum sidecar are stored.
+struct AssetPaths {
+    asset: PathBuf,
+    sidecar: PathBuf,
+    /// The sidecar location of earlier versions, next to the asset, if it can
+    /// be one: not when the release has a real asset of that name.
+    legacy_sidecar: Option<PathBuf>,
+}
+
+impl AssetPaths {
+    fn new(meta_dir: &Path, tag: &str, name: &str, release_assets: &[&str]) -> Self {
+        // Both come from the API: neither may leave its directory.
+        let tag_dir = crate::paths::nested(tag);
+        let file = crate::paths::file_name(name);
+        let asset = meta_dir.join("release_assets").join(&tag_dir).join(&file);
+        let sidecar_name = format!("{file}.sha256");
+        let sidecar = meta_dir
+            .join("release_checksums")
+            .join(&tag_dir)
+            .join(&sidecar_name);
+        let legacy_sidecar = (!release_assets
+            .iter()
+            .any(|n| crate::paths::file_name(n) == sidecar_name))
+        .then(|| asset.with_file_name(&sidecar_name));
+        Self {
+            asset,
+            sidecar,
+            legacy_sidecar,
+        }
+    }
 }
 
 /// Downloads one asset unless a complete, verified copy is already on disk.
 async fn backup_asset(
     client: &impl BackupClient,
     asset: &ReleaseAsset,
-    asset_path: &Path,
+    paths: &AssetPaths,
     storage: &impl Storage,
 ) -> Result<(), CoreError> {
     let api_digest = asset.digest.as_deref().and_then(parse_sha256_digest);
-    let sidecar_path = sidecar_path(asset_path);
+    let asset_path = paths.asset.as_path();
 
     if let Some(existing) = storage.file_size(asset_path) {
         if existing == asset.size {
             let expected = match &api_digest {
                 Some(digest) => Some(digest.clone()),
-                None => read_sidecar_digest(storage, &sidecar_path),
+                None => read_sidecar_digest(storage, &paths.sidecar).or_else(|| {
+                    paths
+                        .legacy_sidecar
+                        .as_ref()
+                        .and_then(|legacy| read_sidecar_digest(storage, legacy))
+                }),
             };
             match expected {
                 // Size matches and there is nothing to compare the content to.
@@ -119,7 +190,7 @@ async fn backup_asset(
                 Some(expected) => match sha256_of_stored(storage, asset_path)? {
                     Some(actual) if actual == expected => {
                         info!(asset = %asset.name, "asset already downloaded and verified, skipping");
-                        return Ok(());
+                        return record_checksum(storage, asset, paths, &actual);
                     }
                     _ => warn!(
                         asset = %asset.name,
@@ -143,7 +214,7 @@ async fn backup_asset(
         hasher: Sha256::new(),
     };
     let received = client.download_release_asset(&asset.url, &mut sink).await?;
-    let digest = format!("{:x}", sink.hasher.clone().finalize());
+    let digest = lower_hex(&sink.hasher.clone().finalize());
 
     if received != asset.size {
         return Err(integrity_error(
@@ -167,16 +238,40 @@ async fn backup_asset(
     // temporary file is discarded when `sink` is dropped.
     sink.file.finish()?;
 
-    // The sidecar lets the download be verified later without GitHub.
-    storage.write_bytes(
-        &sidecar_path,
-        format!("{digest}  {}\n", asset.name).as_bytes(),
-    )?;
+    record_checksum(storage, asset, paths, &digest)?;
     info!(
         asset = %asset.name,
         sha256 = %&digest[..16],
         "asset downloaded and checksum recorded"
     );
+    Ok(())
+}
+
+/// Writes the sidecar (which lets the download be verified later without
+/// GitHub) unless it already says `digest`, and retires a sidecar an earlier
+/// version left next to the asset.
+///
+/// The old file is removed only when its bytes are exactly the sidecar line
+/// for this asset and digest: then it holds nothing the new sidecar does not.
+/// Anything else at that path (an asset of that name that GitHub no longer
+/// lists, kept from an earlier run) is left alone.
+fn record_checksum(
+    storage: &impl Storage,
+    asset: &ReleaseAsset,
+    paths: &AssetPaths,
+    digest: &str,
+) -> Result<(), CoreError> {
+    let line = format!("{digest}  {}\n", asset.name);
+    if storage.read(&paths.sidecar)?.as_deref() != Some(line.as_bytes()) {
+        storage.write_bytes(&paths.sidecar, line.as_bytes())?;
+    }
+    if let Some(legacy) = &paths.legacy_sidecar {
+        if storage.file_size(legacy) == Some(line.len() as u64)
+            && storage.read(legacy)?.as_deref() == Some(line.as_bytes())
+        {
+            storage.remove_file(legacy)?;
+        }
+    }
     Ok(())
 }
 
@@ -204,13 +299,6 @@ fn integrity_error(path: &Path, what: String) -> CoreError {
             path.display()
         ),
     })
-}
-
-/// `<asset>.sha256`: the checksum sidecar of `asset_path`.
-fn sidecar_path(asset_path: &Path) -> PathBuf {
-    let mut name = asset_path.file_name().unwrap_or_default().to_os_string();
-    name.push(".sha256");
-    asset_path.with_file_name(name)
 }
 
 /// Extracts the hex digest from a GitHub `sha256:<hex>` digest string
@@ -251,7 +339,7 @@ fn sha256_of_stored(storage: &impl Storage, path: &Path) -> Result<Option<String
         }
         hasher.update(&buf[..n]);
     }
-    Ok(Some(format!("{:x}", hasher.finalize())))
+    Ok(Some(lower_hex(&hasher.finalize())))
 }
 
 #[cfg(test)]
@@ -309,7 +397,7 @@ mod tests {
     }
 
     fn sha256_hex(data: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(data))
+        crate::manifest::sha256_hex(data)
     }
 
     fn opts() -> BackupOptions {
@@ -322,7 +410,7 @@ mod tests {
 
     const META: &str = "/meta";
     const ASSET: &str = "/meta/release_assets/v1.0.0/binary.tar.gz";
-    const SIDECAR: &str = "/meta/release_assets/v1.0.0/binary.tar.gz.sha256";
+    const SIDECAR: &str = "/meta/release_checksums/v1.0.0/binary.tar.gz.sha256";
 
     async fn run(client: &MockBackupClient, storage: &MemStorage) -> Result<(), CoreError> {
         backup_releases(
@@ -334,6 +422,10 @@ mod tests {
             storage,
         )
         .await
+        .and_then(|outcome| match outcome.failed.into_iter().next() {
+            Some((what, message)) => Err(CoreError::TaskFailed(format!("{what}: {message}"))),
+            None => Ok(()),
+        })
     }
 
     /// A release with one 10-byte asset, served by a mock holding `bytes`.
@@ -423,7 +515,7 @@ mod tests {
             .get(&PathBuf::from("/meta/release_assets/v1/tool"))
             .is_some());
         assert!(storage
-            .get(&PathBuf::from("/meta/release_assets/v1/tool.sha256"))
+            .get(&PathBuf::from("/meta/release_checksums/v1/tool.sha256"))
             .is_some());
     }
 
@@ -618,6 +710,7 @@ mod tests {
         run(&client, &storage).await.expect("backup_releases");
 
         let root = PathBuf::from("/meta/release_assets");
+        let sums = PathBuf::from("/meta/release_checksums");
         let written: Vec<PathBuf> = storage
             .written_paths()
             .into_iter()
@@ -628,7 +721,10 @@ mod tests {
             "the asset is still backed up, safely named"
         );
         for path in written {
-            assert!(path.starts_with(&root), "{path:?} escaped {root:?}");
+            assert!(
+                path.starts_with(&root) || path.starts_with(&sums),
+                "{path:?} escaped {root:?}"
+            );
             assert!(
                 !path
                     .components()
@@ -636,5 +732,113 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    fn sized(name: &str) -> ReleaseAsset {
+        let mut asset = make_asset(name, "uploaded");
+        asset.size = 10;
+        asset
+    }
+
+    /// A release that publishes `app.tar.gz.sha256` itself: the sidecar used
+    /// to be written over that asset (and the asset downloaded again on every
+    /// run).  The sidecars now live in a directory of their own.
+    #[tokio::test]
+    async fn a_real_sha256_asset_is_never_overwritten_by_a_sidecar() {
+        let client = MockBackupClient::new()
+            .with_releases(vec![make_release(
+                "v1",
+                vec![sized("app.tar.gz.sha256"), sized("app.tar.gz")],
+            )])
+            .with_asset_bytes(b"asset-data".to_vec());
+        let storage = MemStorage::default();
+
+        run(&client, &storage).await.expect("backup_releases");
+
+        assert_eq!(
+            storage
+                .get(&PathBuf::from("/meta/release_assets/v1/app.tar.gz.sha256"))
+                .expect("real asset"),
+            b"asset-data"
+        );
+        assert!(storage
+            .get(&PathBuf::from(
+                "/meta/release_checksums/v1/app.tar.gz.sha256"
+            ))
+            .is_some());
+    }
+
+    /// A sidecar an earlier version wrote next to the asset is moved to the
+    /// new place and removed; a file there that is not exactly that sidecar
+    /// (an asset GitHub no longer lists) is kept.
+    #[tokio::test]
+    async fn sidecars_next_to_assets_are_migrated_and_nothing_else_is_removed() {
+        let line = format!("{}  binary.tar.gz\n", sha256_hex(b"asset-data"));
+        let storage = MemStorage::default();
+        storage
+            .write_bytes(&PathBuf::from(ASSET), b"asset-data")
+            .expect("seed asset");
+        let legacy = PathBuf::from(format!("{ASSET}.sha256"));
+        storage
+            .write_bytes(&legacy, line.as_bytes())
+            .expect("seed legacy sidecar");
+
+        run(&one_asset(10, None, b"asset-data"), &storage)
+            .await
+            .expect("backup_releases");
+
+        assert!(storage.get(&legacy).is_none(), "old sidecar retired");
+        assert_eq!(
+            storage.get(&PathBuf::from(SIDECAR)).expect("new sidecar"),
+            line.as_bytes()
+        );
+
+        let other = MemStorage::default();
+        other
+            .write_bytes(&PathBuf::from(ASSET), b"asset-data")
+            .expect("seed asset");
+        other
+            .write_bytes(&legacy, b"something else entirely")
+            .expect("seed unrelated file");
+        run(&one_asset(10, None, b"asset-data"), &other)
+            .await
+            .expect("backup_releases");
+        assert_eq!(
+            other.get(&legacy).expect("kept"),
+            b"something else entirely"
+        );
+    }
+
+    /// An asset or a release the typed model cannot read is reported; the
+    /// readable assets of a release are still downloaded.
+    #[tokio::test]
+    async fn unreadable_releases_and_assets_are_reported_not_dropped() {
+        let good = serde_json::to_value(sized("good.bin")).expect("asset");
+        let client = MockBackupClient::new()
+            .with_raw(
+                "releases",
+                vec![
+                    serde_json::json!({"id": 1, "tag_name": "v1", "author": null,
+                                       "assets": [good, {"name": 3}]}),
+                    serde_json::json!({"id": 2}),
+                ],
+            )
+            .with_asset_bytes(b"asset-data".to_vec());
+        let storage = MemStorage::default();
+        let outcome = backup_releases(&client, "o", "r", &opts(), &PathBuf::from(META), &storage)
+            .await
+            .expect("not fatal");
+
+        assert!(storage
+            .get(&PathBuf::from("/meta/release_assets/v1/good.bin"))
+            .is_some());
+        let whats: Vec<&str> = outcome.failed.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(
+            whats,
+            [
+                "release v1 asset (without id or number)",
+                "release at position 1 (id 2)"
+            ]
+        );
     }
 }

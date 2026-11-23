@@ -31,7 +31,7 @@ impl<S: Subscriber> Layer<S> for TuiTracingLayer {
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
 
-        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let timestamp = jiff::ZonedDateTime::now().strftime("%H:%M:%S").to_string();
 
         let level_str = match level {
             tracing::Level::ERROR => "ERROR",

@@ -1,6 +1,6 @@
 # Architecture
 
-`github-backup` is a Rust workspace of seven crates.  This page describes how
+`github-backup` is a Rust workspace of eight crates.  This page describes how
 they fit together.  (It is also the book page *Development / Architecture*.)
 
 ## Workspace Layout
@@ -14,6 +14,7 @@ github-backup-rust/
 │   ├── github-backup-mirror/   # Push mirrors to Gitea / Forgejo / Codeberg / GitLab
 │   ├── github-backup-s3/       # S3-compatible client, sync, AES-256-GCM encryption
 │   ├── github-backup-tui/      # Ratatui front-end (--tui)
+│   ├── github-backup-viewer/   # Static HTML site from a backup (--render-html)
 │   └── github-backup/          # CLI binary (clap), run modes, reporting
 ├── docker/entrypoint.sh        # container entrypoint wrapper
 ├── Dockerfile, docker-compose.yml
@@ -26,7 +27,10 @@ github-backup-rust/
 
 ### `github-backup-types`
 
-Pure data, no I/O.
+Data types, with no network access.  Its only file I/O: reading the
+configuration file (`ConfigFile::from_path`) and loading and saving the
+persisted state (`backup_state`: watermarks, checkpoint, run history) through
+an atomic file write (`atomic_file`).
 
 - GitHub models (`Repository`, `Issue`, `PullRequest`, ...).  Fields GitHub can
   send as `null` are `Option`s.
@@ -46,22 +50,53 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
 
 - `GitHubClient` (standard GitHub and, with `with_api_url`, GHES) behind the
   object-safe `BackupClient` trait, which tests replace with `MockClient`.
+- **Requests** send `Accept: application/vnd.github+json` and pin
+  `X-GitHub-Api-Version: 2022-11-28` (an endpoint may ask for another version
+  per request); `Deprecation` / `Sunset` response headers are logged once per
+  endpoint.
 - **Pagination** with `Link` headers; wrapped responses (`{"workflows": [...]}`)
-  are merged into plain lists.
-- **Retry policy** (`execute_with_retry`): rate limits (429, or 403 with
-  `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message) are waited
-  out and retried (up to 6 times, about an hour in total per request); GET
-  requests retry 5xx and transport failures 3 times with jittered back-off;
-  other statuses fail at once.  Every response body is capped at 16 MiB and
-  every request has a 120 s timeout.
+  are merged into plain lists.  A next-page link to another origin, or back
+  to a page already fetched, fails the list instead of being followed.
+- **Redirects** (`send`): up to 3 within the origin are followed with the
+  credential (`301` for a renamed or transferred repository); methods other
+  than GET follow only `307`/`308`.  An API redirect to another origin fails.
+- **Retry policy** (`send` / `execute`): rate limits (429, or 403 with
+  `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message; for
+  GraphQL also a 200 whose `errors` say so) are waited out and retried (up to
+  6 times; one wait at most about an hour, all waits of a request about two
+  hours), and the wait pauses every clone of the client; idempotent requests
+  retry 5xx and transport failures 3 times with jittered back-off; other
+  statuses fail at once.  Every response body is capped at 16 MiB; the
+  response headers, and each chunk of a body, must arrive within 120 s (a
+  slow but steady transfer is not cut off).
+- **GraphQL**: `graphql(query, variables)` posts a query to `/graphql` (GHES:
+  `/api/graphql`) with the same handling and fails on a non-empty `errors`
+  array.  Discussions are read this way (`client/endpoints/discussions.rs`),
+  every connection followed with its cursor and nested ones completed with
+  `node(id:)` queries.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
-  `/gists`, which include private repositories and secret gists.
-- **Release assets** are streamed to disk through an `AssetSink`; the
+  `/gists`, which include private repositories and secret gists.  A GitHub App
+  never asks `GET /user`; it lists `/installation/repositories`.
+- **Release assets** are streamed to disk through an `AssetSink`, with the
+  same rate-limit and retry handling until the body starts; the
   `Authorization` header is dropped on any redirect that leaves the origin.
+  **Attachments** are streamed the same way; the credential (HTTP Basic) goes
+  only to `https://github.com`, and only from a client for github.com's API.
 - `proxy`: HTTP `CONNECT` proxy support from `HTTPS_PROXY`, `HTTP_PROXY`,
-  `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook and `--doctor`.
-- `oauth`: the device flow.
+  `ALL_PROXY`, `NO_PROXY` (no SOCKS): `ProxyConnector` (a hyper-util
+  connector) and `ProxyClient<B>` (for any request body), shared with the
+  webhook, `--doctor`, the device flow, the mirror destinations' APIs and the
+  S3 client.  HTTP/1.1 only.
+- `oauth`: the device flow, at the login host of `--api-url` (github.com by
+  default), retrying lost connections until the code expires.
+- **GitHub App** (`app_auth`, `client/app.rs`): an RS256 JWT signed with
+  `aws-lc-rs` (rustls's provider) finds the installation and mints installation
+  tokens; the current token is renewed five minutes before it expires, under a
+  lock so that concurrent requests share one renewal.  An App lists
+  `/installation/repositories` instead of calling `GET /user`.  `git_token()`
+  gives the engine a `GitToken` that the git runner asks for the token at
+  every `git` start.
 
 ### `github-backup-core`
 
@@ -78,36 +113,65 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   step is recorded in `BackupStats` (scope, step, message) and the run carries on,
   so one bad repository or category never costs the rest.  `run` returns `Err`
   only for things that make continuing pointless (`CoreError::is_fatal`:
-  rejected credentials, exhausted rate-limit budget, full disk, cancellation) or
+  rejected credentials, exhausted rate-limit budget, full disk or exhausted quota
+  (also when `git` reports it), cancellation) or
   when the repository list cannot be fetched.  Callers read
   `BackupStats::failures()` and decide the exit status.
-- **Run order**: owner-level data, packages, starred clones, gists, then the
+- **Run order**: owner-level data, packages, projects (v2), starred clones, gists, then the
   repository list (written to `repos.json`), then repositories concurrently
-  (bounded by `--concurrency`); per repository the steps are repository clone,
-  wiki, issues, pull requests, releases, labels, milestones, hooks, security
-  advisories, topics, branches, deploy keys, collaborators, actions,
-  environments (plus the inert discussions and projects steps).
+  (bounded by `--concurrency`); per repository the steps are repository details
+  (`GET /repos/{o}/{r}`), repository clone,
+  wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
+  advisories, branches and rulesets, deploy keys, collaborators, actions,
+  environments, commit comments, discussions, attachments (read from the
+  bodies stored by the steps before).  Inside a category an item that fails (one
+  issue's comments) is recorded and the category carries on; a category that
+  answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
+  warning per category per run).
 - **Incremental state** (`engine/incremental.rs`): a watermark per repository in
   `backup_state.json`, advanced only for repositories whose every step
-  succeeded, trusted only for the categories it was recorded with, set 15
-  minutes before the run started.  Lists are always fetched in full and merged
-  (`backup/merge.rs`); the watermark only decides which per-item requests
-  (comments, events, commits, reviews) can be skipped.  `--full` ignores it; an
-  explicit `--since` replaces it and is never stored.
+  succeeded, trusted only for the categories it was recorded with (per-item
+  categories, the issue and pull request lists, the git update mode), set 15
+  minutes before the run started.  With it, a run lists only the issues
+  (`since=`) and pull requests (`sort=updated`, newest first, until older
+  ones) changed since and merges them into the stored list, if that list is
+  intact (`backup/merge.rs`); skips the per-item requests (comments, events,
+  commits, reviews) of unchanged items; and skips the `git fetch` of a
+  repository whose `pushed_at` is older than the watermark when the clone is
+  on disk, the last fetch (`fetched_at`, cleared when a run that fetched
+  fails for the repository) is under 7 days old and, for clones that hold
+  `refs/pull/*`, no pull request changed since (`engine/repo.rs`).  Wikis are
+  always fetched.  Discussions: their GraphQL listing is ordered by
+  `updatedAt` and stops at the watermark, and the stored list is merged with
+  what it returned.  `--full` ignores the watermark; an explicit `--since`
+  replaces it for the lists and per-item requests (never for git) and is
+  never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
-  current run; a later run resumes from it only if it is less than 6 hours old.
-- **Locking** (`lock.rs`): an operating-system exclusive lock (`fslock`: `flock` /
+  current run and a fingerprint of the owner and options; a later run resumes
+  from it only if it is less than 6 hours old and the fingerprints match.
+- **Locking** (`lock.rs`): an operating-system exclusive lock (the standard library's `File::try_lock`: `flock` /
   `LockFileEx`) on `<owner>/json/.backup.lock`; the CLI takes another on
   `<output>/.github-backup.lock`.  The kernel releases them when the process dies,
   so there are no stale locks and no PID heuristics.
-- **Storage** (`storage.rs`): every JSON file is written to a temporary name and
-  renamed; release assets are streamed to `.<file>.part` and renamed after the
-  size and digest checks.
+- **Storage** (`storage.rs`, `github_backup_types::atomic_file`): every file is
+  written to a unique temporary name (`.<file>.tmp-<pid>-<n>`), synced to disk
+  and renamed, so neither a kill nor a power cut leaves a truncated or empty
+  file; release assets are streamed to `.<file>.part-<pid>-<n>` and renamed
+  after the size and digest checks.  A run sweeps temporary files left by a
+  killed run once it holds the lock.
+- **Repository list**: `repos.json` keeps repository objects the typed model
+  cannot read, verbatim; the run records a failure naming how many, since they
+  are not cloned.
 - **Git** (`git/`): clones are made into a hidden staging directory and renamed
-  into place; updates use `fetch` (mirror: `--all --prune`; bare: explicit
-  refspecs; shallow: `--depth`; `--lfs`: mirror update plus `git lfs fetch --all`).
+  into place; updates use `fetch` with an explicit pruning choice (`--prune`
+  only with `--prune`, otherwise `--no-prune --no-prune-tags`) (mirror: `--all`;
+  bare: explicit refspecs; full: refspecs into local branches, `origin/*` and
+  tags, then `reset --hard`; shallow: `--depth`; `--lfs`: mirror update plus
+  `git lfs fetch --all`).
   Each `git` runs in its own process group with a **stall** timeout (600 s without
-  output), is killed with its helpers on cancellation, and receives the token only
+  output), is stopped with its helpers on cancellation (`SIGTERM`, `SIGKILL` 2 s
+  later), never waits for a prompt (`ssh -o BatchMode=yes` unless the user set an
+  SSH command), and receives the token only
   through an environment variable and a host-scoped credential helper (`credential.rs`).
   `-c safe.directory=<path>` trusts exactly the repository being worked on.
 - **Cancellation** (`cancel.rs`): a flag that kills running git processes and makes
@@ -120,10 +184,13 @@ Post-processing: push the cloned repositories to another host.
 - `GiteaClient` (REST v1) and `GitLabClient` (REST v4): check the destination,
   create it (private unless the source is known to be public), and verify that it
   is ours (description marker `GitHub mirror of <owner>/<repo>`) or empty.
-- `push.rs`: `git push --prune` of `refs/heads/*` and `refs/tags/*` only (never
-  `--mirror`), with the token in an environment variable and a credential helper
-  scoped to the destination origin.
-- `runner` / `gitlab_runner`: walk `git/repos/*.git` and report per-repository
+  HTTPS only, through the proxy the environment names, with retries of `5xx`
+  and transport failures (`http.rs`).
+- `push.rs`: `git push` of `refs/heads/*` and `refs/tags/*` only (never
+  `--mirror`; `--prune` only with `--prune`), with the token in an environment
+  variable and a credential helper scoped to the destination origin.
+- `runner`: walk `git/repos/*.git`, skip repositories whose backup failed in
+  this run, shallow clones and clones without refs, and report per-repository
   failures.
 
 ### `github-backup-s3`
@@ -132,17 +199,35 @@ Post-processing: upload the JSON metadata to an S3-compatible store.
 
 - `signing`: AWS Signature V4 built from `sha2` + `hmac` (no AWS SDK).
 - `S3Client`: PUT / HEAD / LIST / DELETE and multipart upload over hyper + rustls
-  with retries and an idle timeout.  It connects directly (no proxy support).
+  with retries and an idle timeout, through the client crate's proxy-aware
+  connector.
 - `sync_to_s3`: concurrent sync of `<output>/<owner>/json/`; an object is skipped
   only when its stored SHA-256 digest (keyed HMAC for encrypted uploads) and size
   match; guarded `--s3-delete-stale`.
-- `encrypt`: AES-256-GCM, wire format `[12-byte nonce | ciphertext | 16-byte tag]`.
+  Files larger than one part are streamed part by part (one part in memory per
+  upload).
+- `encrypt`: AES-256-GCM in the STREAM construction (`aead-stream` crate, 64 KiB
+  segments) under a per-object HKDF-SHA256 key; objects of the earlier
+  single-message format still decrypt.
 
 ### `github-backup-tui`
 
 The Ratatui terminal interface (`--tui`).  It drives the same `BackupEngine`
 through an event channel and does not embed its own backup logic.  See the
 [Interactive TUI guide](https://tomtom215.github.io/github-backup-rust/tui.html).
+
+### `github-backup-viewer`
+
+`--render-html`: renders one owner's backup directory as a static HTML site.
+It reads the JSON files as stored (`serde_json::Value`, so it shows every
+backup the tool has ever written, and a missing or unreadable file only
+leaves a page shorter) and writes plain HTML with one style sheet and no
+JavaScript.  Markdown goes through `pulldown-cmark` with raw HTML turned
+into text and a link-scheme allow-list; every page has a
+Content-Security-Policy that forbids scripts and remote loads.  Item pages
+are rendered on all CPUs; the output is deterministic.  The site is staged
+in a hidden sibling directory and renamed into place, and only an empty
+directory or an earlier render is ever replaced.
 
 ### `github-backup` (binary)
 
@@ -154,21 +239,29 @@ through an event channel and does not embed its own backup logic.  See the
 | `post_process.rs` | mirror push, S3 sync, diff |
 | `restore.rs` | `--restore` |
 | `report.rs`, `metrics.rs`, `notify.rs` | JSON report, Prometheus textfile, webhook |
-| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt` |
+| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt`/`--render-html` |
+| `account.rs` | the default OWNER (the token's account) and user/organisation detection |
+| `schedule.rs` | `--every`: repeat the run at an interval |
 | `shutdown.rs` | signal handling and the exit watchdog |
 | `ui.rs`, `errors.rs`, `setup.rs`, `lock.rs` | banners, error hints and redaction, tracing setup, the output-directory lock |
 
 Flow of a normal run:
 
-1. Parse the arguments and the optional config file (command line wins for
-   single values; switches are OR-ed, lists unioned).
-2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify` and
-   `--restore` are handled and return before a backup.
+1. Parse the arguments and the config file (`--config`, or the default
+   `~/.config/github-backup/config.toml` when it exists; command line wins for
+   single values; switches are OR-ed, lists unioned; no category selected means
+   all of them, minus `--skip`).  The token falls back to `GH_TOKEN`, then to
+   `gh auth token`; OWNER falls back to the token's account.
+2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify`,
+   `--render-html` and `--restore` are handled and return before a backup (`--doctor` after the same
+   validation a run makes).  Mirror and S3 settings are checked before the run.
 3. Take the output lock, build the client, run `BackupEngine::run`, racing it
    against `SIGINT` / `SIGTERM`.
 4. Post-processing, each step's failure being **recorded**, not fatal: manifest,
    diff, mirror push, S3 sync.
 5. Write history, report and metrics, send the webhook, exit with `0` or `3`.
+   A signal during steps 3 to 5 writes them too, marked interrupted, and exits
+   `130`/`143`.  With `--every` steps 3 to 5 repeat at the interval.
 
 A `--dry-run` stops after step 3's listing: it takes no lock and writes nothing.
 
@@ -221,5 +314,5 @@ The workspace's own source contains no `unsafe`.  `github-backup-core` has
 | S3 | an in-process fake S3 server that verifies SigV4 independently; AES-GCM round trips and tamper tests |
 | Mirror | real `git push` against local bare repositories with a refusing hook |
 | CLI | argument-parsing and config-merge tests; a binary-level test of the environment handling |
-| CI | `cargo fmt --check`, `clippy -D warnings`, tests on Linux and macOS, an MSRV (1.88) build, rustdoc, the mdBook build with link checking, `cargo audit` and `cargo deny`, and a Docker build with a smoke test |
+| CI | `cargo fmt --check`, `clippy -D warnings`, tests on Linux, macOS and Windows, an MSRV (1.89) check, rustdoc, the mdBook build with link checking, `cargo deny`, zizmor on the workflows, and a Docker build with a smoke test |
 | Mutation | `cargo mutants`, started manually (`workflow_dispatch`); not run on every push |

@@ -664,17 +664,28 @@ const AWKWARD: &[&str] = &[
     "a<b>.json",
 ];
 
+/// The [`AWKWARD`] names this platform can store as files.  Windows forbids
+/// `<>:"/\|?*` in file names, so a backup there can never contain them.
+fn awkward_names() -> Vec<&'static str> {
+    AWKWARD
+        .iter()
+        .copied()
+        .filter(|name| !cfg!(windows) || !name.contains(['<', '>', ':', '"', '|', '?', '*']))
+        .collect()
+}
+
 #[tokio::test]
 async fn s3c12_awkward_key_names_round_trip_exactly() {
     let fake = FakeS3::start().await;
     let (client, cfg) = client_for(&fake, "pfx");
     let dir = tempfile::tempdir().unwrap();
-    for name in AWKWARD {
+    let names = awkward_names();
+    for name in &names {
         write(dir.path(), name, name.as_bytes());
     }
     let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
     assert!(r.is_success(), "{r:?}");
-    for name in AWKWARD {
+    for name in &names {
         let key = format!("pfx/o/json/{name}");
         assert_eq!(
             fake.body_of(&key).as_deref(),
@@ -690,7 +701,7 @@ async fn s3c12_awkward_key_names_round_trip_exactly() {
     .await;
     assert_eq!(
         (r.stats.skipped, r.stats.deleted, r.stats.uploaded),
-        (AWKWARD.len(), 0, 0),
+        (names.len(), 0, 0),
         "{r:?}"
     );
 }
@@ -924,4 +935,155 @@ async fn s3c07_failed_uploads_block_deletion() {
     assert!(!r.is_success());
     assert!(r.deletion_skipped.is_some(), "{r:?}");
     assert!(fake.object("p/o/json/old.json").is_some());
+}
+
+// ── S3C-20: streamed (multipart) uploads ───────────────────────────────────
+
+/// A client whose parts are 10 bytes, against a fake that accepts them.
+async fn small_part_fake() -> (FakeS3, S3Client, S3Config) {
+    let fake = FakeS3::start_with(FakeConfig {
+        min_part_size: 4,
+        ..FakeConfig::default()
+    })
+    .await;
+    let cfg = config_for(&fake, "p");
+    let client = S3Client::with_options(
+        cfg.clone(),
+        ClientOptions {
+            part_size: 10,
+            ..fast_options()
+        },
+    )
+    .unwrap();
+    (fake, client, cfg)
+}
+
+#[tokio::test]
+async fn s3c20_large_files_are_streamed_in_parts_plain_and_encrypted() {
+    let (fake, client, cfg) = small_part_fake().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..95u8).collect();
+    write(dir.path(), "big.bin", &data);
+
+    let plain = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
+    assert!(plain.is_success(), "{plain:?}");
+    let obj = fake.object("p/o/json/big.bin").unwrap();
+    assert_eq!(obj.body, data);
+    assert_eq!(obj.metadata["sha256"], digest::digest_bytes(&data, None));
+    assert_eq!(fake.requests("PUT", "partNumber").len(), 10);
+    assert_eq!(fake.open_uploads(), 0);
+
+    let enc = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.encrypt_key(Some(&KEY))
+    })
+    .await;
+    assert!(enc.is_success(), "{enc:?}");
+    let obj = fake.object("p/o/json/big.bin.enc").unwrap();
+    assert_eq!(
+        obj.body.len() as u64,
+        github_backup_s3::encrypt::encrypted_len(data.len() as u64)
+    );
+    assert_eq!(
+        github_backup_s3::encrypt::decrypt(&KEY, &obj.body).unwrap(),
+        data
+    );
+    assert_eq!(
+        obj.metadata["sha256"],
+        digest::digest_bytes(&data, Some(&KEY))
+    );
+
+    // The stored size and digest match, so the next run skips it.
+    let again = run_sync(&client, &cfg, dir.path(), "o/json", |o| {
+        o.encrypt_key(Some(&KEY))
+    })
+    .await;
+    assert_eq!(again.stats.skipped, 1, "{again:?}");
+}
+
+/// The file is read part by part while it is uploaded (never as a whole), so
+/// a change to it mid-upload is noticed and the object is not completed.
+#[tokio::test]
+async fn s3c20_a_file_changed_during_a_streamed_upload_is_not_completed() {
+    let (fake, client, cfg) = small_part_fake().await;
+    // Hold part 2 at the server long enough to rewrite the file.
+    fake.add_rule(
+        Rule::new(Action::Delay(Duration::from_millis(600)))
+            .method("PUT")
+            .query_contains("partNumber=2"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "big.bin", &[1u8; 30]);
+    let path = dir.path().join("big.bin");
+    let rewrite = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(path, [2u8; 30]).unwrap();
+    });
+    let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
+    rewrite.await.unwrap();
+    assert!(!r.is_success(), "{r:?}");
+    assert!(r.failures[0].error.contains("changed"), "{r:?}");
+    assert!(fake.object("p/o/json/big.bin").is_none());
+    assert_eq!(fake.open_uploads(), 0, "the upload is aborted");
+}
+
+/// `CompleteMultipartUpload` succeeded but its response was lost; the retry
+/// is answered `NoSuchUpload`.  The object is there, so this is a success.
+#[tokio::test]
+async fn s3c20_lost_complete_response_is_confirmed_by_head() {
+    let (fake, client, _) = small_part_fake().await;
+    fake.add_rule(
+        Rule::new(Action::LoseResponse)
+            .method("POST")
+            .query_contains("uploadId")
+            .times(1),
+    );
+    let data = [3u8; 25];
+    client
+        .multipart_upload(
+            "p/big.bin",
+            &data,
+            "application/octet-stream",
+            &[("sha256", "ab")],
+        )
+        .await
+        .expect("the completed object is recognised");
+    assert_eq!(fake.body_of("p/big.bin").unwrap(), data);
+    assert!(fake.requests("POST", "uploadId").len() >= 2, "retried");
+}
+
+/// `NoSuchUpload` with no matching object stays an error.
+#[tokio::test]
+async fn s3c20_no_such_upload_without_the_object_is_an_error() {
+    let (fake, client, _) = small_part_fake().await;
+    fake.put_object("p/big.bin", b"some other content");
+    fake.add_rule(
+        Rule::new(Action::Error {
+            status: 404,
+            code: "NoSuchUpload",
+            message: "The specified upload does not exist.",
+        })
+        .method("POST")
+        .query_contains("uploadId"),
+    );
+    let err = client
+        .multipart_upload(
+            "p/big.bin",
+            &[3u8; 25],
+            "application/octet-stream",
+            &[("sha256", "ab")],
+        )
+        .await
+        .expect_err("the object is not this upload");
+    assert_eq!(err.api_code(), Some("NoSuchUpload"), "{err}");
+}
+
+#[tokio::test]
+async fn s3c20_part_size_grows_to_stay_within_ten_thousand_parts() {
+    let (_fake, client, _) = small_part_fake().await;
+    assert_eq!(client.part_size_for(95).unwrap(), 10);
+    assert_eq!(client.part_size_for(1_000_000).unwrap(), 100);
+    let err = client
+        .part_size_for(5 * 1024 * 1024 * 1024 * 1024 + 1)
+        .unwrap_err();
+    assert!(matches!(err, S3Error::TooLarge(_)), "{err}");
 }

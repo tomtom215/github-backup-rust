@@ -22,8 +22,9 @@
 use std::time::Duration;
 
 use github_backup_client::{ClientError, GitHubClient};
-use github_backup_types::config::Credential;
+use github_backup_types::config::{AppCredential, Credential};
 
+use crate::account::{AccountKind, Api};
 use crate::cli::Args;
 
 /// Outcome of a single check.
@@ -38,17 +39,6 @@ pub enum Status {
 }
 
 impl Status {
-    /// Returns `true` when this status indicates a problem the user
-    /// should act on (currently only `Fail`).
-    ///
-    /// Exposed publicly so other tools can reuse the [`Report`] type
-    /// without having to know about the variants directly.
-    #[must_use]
-    #[allow(dead_code)] // part of the public diagnostic surface
-    pub fn is_blocking(self) -> bool {
-        matches!(self, Status::Fail)
-    }
-
     fn glyph(self, ansi: bool) -> &'static str {
         if !ansi {
             return match self {
@@ -333,6 +323,104 @@ fn token_kind(token: &str) -> TokenKind {
     }
 }
 
+/// Checks the mirror and S3 settings (see `setup::check_destinations`).
+pub fn check_destinations(args: &Args) -> Option<Check> {
+    if args.mirror_to.is_none() && args.s3_bucket.is_none() {
+        return None;
+    }
+    Some(match crate::setup::check_destinations(args) {
+        Ok(()) => Check::pass(
+            "mirror / S3 settings",
+            [
+                args.mirror_to.as_deref().map(|u| format!("mirror to {u}")),
+                args.s3_bucket.as_deref().map(|b| format!("S3 bucket {b}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", "),
+        ),
+        Err(why) => Check::fail(
+            "mirror / S3 settings",
+            why,
+            "the backup would run and then fail at this step",
+        ),
+    })
+}
+
+/// Checks which categories a run would back up.
+pub fn check_categories(args: &Args) -> Check {
+    let mut resolved = args.clone();
+    resolved.owner.get_or_insert_with(String::new);
+    let defaulted = resolved.uses_default_categories();
+    let (_, _, opts) = resolved.into_backup_options();
+    let list = crate::ui::enabled_category_list(&opts);
+    if !crate::cli::categories::any_selected(&opts) {
+        return Check::fail(
+            "categories",
+            "nothing would be backed up",
+            "remove some names from --skip / skip",
+        );
+    }
+    if defaulted {
+        Check::pass("categories", format!("everything (default): {list}"))
+    } else {
+        Check::pass("categories", list)
+    }
+}
+
+/// Checks OWNER: that it exists and whether it is an organisation, or,
+/// without OWNER, which account the token belongs to.
+pub async fn check_owner(args: &Args, api: &Api) -> Check {
+    match args.owner.as_deref() {
+        None if args.token.is_none() => Check::fail(
+            "owner",
+            "no OWNER given and no token to find the account by",
+            "pass OWNER, or log in (`gh auth login`) / set GITHUB_TOKEN",
+        ),
+        None => match api.authenticated_login().await {
+            Ok(login) => Check::pass(
+                "owner",
+                format!("not given: the token's account, {login}, will be backed up"),
+            ),
+            Err(e) => Check::fail(
+                "owner",
+                format!("not given, and the token's account is unknown ({e})"),
+                "pass OWNER explicitly",
+            ),
+        },
+        Some(owner) => match api.account_kind(owner).await {
+            Ok(Some(AccountKind::Organization)) => Check::pass(
+                "owner",
+                format!(
+                    "{owner} is an organisation{}",
+                    if args.org {
+                        ""
+                    } else {
+                        " (backed up as one even without --org)"
+                    }
+                ),
+            ),
+            Ok(Some(AccountKind::User)) if args.org => Check::warn(
+                "owner",
+                format!("{owner} is a user, not an organisation"),
+                "drop --org / `org = true` (the run treats it as a user)",
+            ),
+            Ok(Some(AccountKind::User)) => Check::pass("owner", format!("{owner} is a user")),
+            Ok(None) => Check::fail(
+                "owner",
+                format!("no GitHub account named {owner}"),
+                "check the spelling of OWNER",
+            ),
+            Err(e) => Check::warn(
+                "owner",
+                format!("could not be checked: {e}"),
+                "see the API check above",
+            ),
+        },
+    }
+}
+
 /// How long `--doctor` waits for the API before calling it unreachable.
 const API_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -364,6 +452,11 @@ pub async fn check_api(args: &Args) -> Vec<Check> {
 
 fn client_setup_failure(url: &str, e: &ClientError) -> Check {
     match e {
+        ClientError::App(why) => Check::fail(
+            "GitHub App",
+            why.clone(),
+            "use the unencrypted .pem private key GitHub generated for the App",
+        ),
         ClientError::InvalidApiUrl(why) => Check::fail(
             "API url",
             format!("{url}: {why}"),
@@ -375,6 +468,168 @@ fn client_setup_failure(url: &str, e: &ClientError) -> Check {
             "install your distribution's `ca-certificates` package",
         ),
     }
+}
+
+/// Checks the GitHub App settings: an App ID, exactly one private key that can
+/// be read, and no token or device flow beside them.  Returns the credential
+/// for [`check_app_api`] when they are complete.
+pub fn check_app_credential(args: &Args) -> (Check, Option<AppCredential>) {
+    let key_env = std::env::var(crate::setup::APP_KEY_ENV).ok();
+    match crate::setup::app_credential(args, key_env) {
+        Ok(Some(app)) => {
+            let source = args.app_key.as_ref().map_or_else(
+                || crate::setup::APP_KEY_ENV.to_string(),
+                |path| path.display().to_string(),
+            );
+            (
+                Check::pass(
+                    "credential",
+                    format!("GitHub App {} (key from {source})", app.app_id),
+                ),
+                Some(app),
+            )
+        }
+        Ok(None) => (check_credential(args), None),
+        Err(why) => (
+            Check::fail(
+                "credential",
+                why,
+                "see the GitHub App section of the authentication guide",
+            ),
+            None,
+        ),
+    }
+}
+
+/// Checks a GitHub App against the API, in the order a run depends on them:
+/// the App's JWT is accepted (`GET /app`), its installation is found (the
+/// configured one, or the one on OWNER), and an installation token is minted
+/// and accepted.  The installation's permissions are listed.
+pub async fn check_app_api(args: &Args, app: AppCredential) -> Vec<Check> {
+    let url = args.api_url.as_deref().unwrap_or("https://api.github.com");
+    check_app_api_with(args, app, url, |credential| {
+        GitHubClient::with_api_url(credential, url)
+    })
+    .await
+}
+
+/// The checks behind [`check_app_api`]; `new_client` builds the API client for a
+/// credential (tests use a plain-HTTP one).
+pub(crate) async fn check_app_api_with(
+    args: &Args,
+    app: AppCredential,
+    url: &str,
+    new_client: impl Fn(Credential) -> Result<GitHubClient, ClientError>,
+) -> Vec<Check> {
+    let timed = |what: &'static str| ClientError::Timeout {
+        url: format!("{url} ({what})"),
+    };
+    let client = match new_client(Credential::App(app.clone())) {
+        Ok(c) => c,
+        Err(e) => return vec![client_setup_failure(url, &e)],
+    };
+    let mut checks = Vec::new();
+    match tokio::time::timeout(API_CHECK_TIMEOUT, client.app_name()).await {
+        Ok(Ok(name)) => {
+            checks.push(Check::pass("API connectivity", format!("{url} reachable")));
+            checks.push(Check::pass("GitHub App", format!("JWT accepted: {name}")));
+        }
+        Ok(Err(ClientError::ApiError { status, body })) if status == 401 || status == 403 => {
+            checks.push(Check::pass("API connectivity", format!("{url} reachable")));
+            checks.push(Check::fail(
+                "GitHub App",
+                format!("JWT refused (HTTP {status}{})", message_suffix(&body)),
+                "check --app-id (the App's client ID or App ID), that the key is one of the \
+                 App's current private keys, and that the system clock is correct",
+            ));
+            return checks;
+        }
+        Ok(Err(e)) => return interpret_api_result(url, false, Err(e)),
+        Err(_) => return interpret_api_result(url, false, Err(timed("GET /app"))),
+    }
+    let found = tokio::time::timeout(
+        API_CHECK_TIMEOUT,
+        client.app_installation(args.owner.as_deref()),
+    )
+    .await
+    .unwrap_or_else(|_| Err(timed("installation lookup")));
+    let installation = match found {
+        Ok(i) => i,
+        Err(e) => {
+            checks.push(Check::fail(
+                "installation",
+                e.to_string(),
+                "install the App on OWNER (the App's settings page, Install App), or pass \
+                 --app-installation-id",
+            ));
+            return checks;
+        }
+    };
+    let kind = if installation.organization {
+        "organisation"
+    } else {
+        "user"
+    };
+    let detail = format!(
+        "{} on {} ({kind}), {} repositories",
+        installation.id, installation.account, installation.repository_selection
+    );
+    match args.owner.as_deref() {
+        Some(owner) if !owner.eq_ignore_ascii_case(&installation.account) => {
+            checks.push(Check::fail(
+                "installation",
+                format!("{detail}, but OWNER is {owner}"),
+                "drop --app-installation-id, or set OWNER to the installation's account",
+            ));
+            return checks;
+        }
+        _ => checks.push(Check::pass("installation", detail)),
+    }
+    let permissions = installation
+        .permissions
+        .iter()
+        .map(|(name, level)| format!("{name}: {level}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    checks.push(if installation.permissions.contains_key("contents") {
+        Check::pass("permissions", permissions)
+    } else {
+        Check::warn(
+            "permissions",
+            permissions,
+            "grant the Contents (read) repository permission, or repositories cannot be cloned",
+        )
+    });
+
+    let app = AppCredential {
+        installation_id: Some(installation.id),
+        ..app
+    };
+    let client = match new_client(Credential::App(app)) {
+        Ok(c) => c,
+        Err(e) => {
+            checks.push(client_setup_failure(url, &e));
+            return checks;
+        }
+    };
+    let minted = tokio::time::timeout(API_CHECK_TIMEOUT, client.verify_token())
+        .await
+        .unwrap_or_else(|_| Err(timed("installation token")));
+    checks.push(match minted {
+        Ok(remaining) => Check::pass(
+            "installation token",
+            match remaining {
+                Some(n) => format!("minted and accepted ({n} API requests left this hour)"),
+                None => "minted and accepted".to_string(),
+            },
+        ),
+        Err(e) => Check::fail(
+            "installation token",
+            e.to_string(),
+            "check that the installation is not suspended and the App still has access",
+        ),
+    });
+    checks
 }
 
 /// The checks behind [`check_api`], for an already-built client.
@@ -446,11 +701,21 @@ fn interpret_api_result(
                 "wait a while, then run --doctor again",
             ),
         ],
-        Err(e) => vec![Check::fail(
+        // Something answered, but not the GitHub API: an HTML page from a
+        // captive portal or proxy, or a wrong --api-url.
+        Err(e @ (ClientError::Json(_) | ClientError::BodyTooLarge { .. })) => vec![Check::fail(
             "API connectivity",
-            format!("{url}: {e}"),
-            "check your network, firewall, or set HTTPS_PROXY (and NO_PROXY) for proxied environments",
+            format!("{url} answered, but not as the GitHub API does ({e})"),
+            "check --api-url (https://HOST/api/v3 for GitHub Enterprise Server) and that no \
+             proxy or captive portal answers in its place",
         )],
+        Err(e) => {
+            let hint = crate::errors::explain_error(&e.to_string()).unwrap_or(
+                "check your network, firewall, or set HTTPS_PROXY (and NO_PROXY) for proxied \
+                 environments",
+            );
+            vec![Check::fail("API connectivity", format!("{url}: {e}"), hint)]
+        }
     }
 }
 
@@ -500,13 +765,6 @@ mod tests {
     }
 
     #[test]
-    fn status_is_blocking_only_for_fail() {
-        assert!(!Status::Pass.is_blocking());
-        assert!(!Status::Warn.is_blocking());
-        assert!(Status::Fail.is_blocking());
-    }
-
-    #[test]
     fn check_render_includes_hint_when_present() {
         let c = Check::fail("git binary", "missing", "install git");
         let rendered = c.render(false);
@@ -534,6 +792,48 @@ mod tests {
         r.push(Check::fail("d", "bad", "fix"));
         assert_eq!(r.failures(), 2);
         assert_eq!(r.warnings(), 1);
+    }
+
+    /// An HTML page or an oversized answer means something other than the
+    /// API answered: the hint is about --api-url and proxies, not the network.
+    #[test]
+    fn an_answer_that_is_not_the_api_points_at_the_api_url() {
+        let not_json = serde_json::from_str::<serde_json::Value>("<html>").unwrap_err();
+        for e in [
+            ClientError::Json(not_json),
+            ClientError::BodyTooLarge {
+                limit_bytes: 16 << 20,
+            },
+        ] {
+            let checks = interpret_api_result("https://api.github.com", true, Err(e));
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].status, Status::Fail);
+            assert!(checks[0].detail.contains("not as the GitHub API does"));
+            assert!(checks[0].hint.as_deref().unwrap().contains("--api-url"));
+        }
+    }
+
+    /// Anything else is a connectivity failure, with the shared hint when
+    /// there is one and the network hint otherwise.
+    #[test]
+    fn the_catch_all_uses_the_shared_hints() {
+        let checks = interpret_api_result(
+            "https://ghe.example/api/v3",
+            true,
+            Err(ClientError::Pagination("a loop".into())),
+        );
+        assert_eq!(checks[0].label, "API connectivity");
+        assert!(checks[0]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("next-page link"));
+        let checks = interpret_api_result(
+            "https://api.github.com",
+            true,
+            Err(ClientError::Timeout { url: "x".into() }),
+        );
+        assert!(checks[0].hint.as_deref().unwrap().contains("HTTPS_PROXY"));
     }
 
     #[test]

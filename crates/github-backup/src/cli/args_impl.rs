@@ -8,7 +8,10 @@ use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
 
+use github_backup_types::config::{BackupOptions, BackupTarget};
+
 use super::args::Args;
+use super::categories;
 
 /// Treats a blank string option as unset and trims surrounding whitespace.
 fn normalize(value: &mut Option<String>) {
@@ -33,7 +36,36 @@ impl Args {
         let matches = Self::command().get_matches();
         let mut args = Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
         args.normalize_env_values();
+        args.token_from_gh_token(std::env::var("GH_TOKEN").ok());
         (args, matches)
+    }
+
+    /// Uses `GH_TOKEN` (the GitHub CLI's variable) when neither `--token` nor
+    /// `GITHUB_TOKEN` gave a token.  A blank value counts as unset.
+    pub(crate) fn token_from_gh_token(&mut self, gh_token: Option<String>) {
+        if self.token.is_none() {
+            self.token = gh_token;
+            normalize(&mut self.token);
+        }
+    }
+
+    /// The secrets that were typed on the command line, as flag names.
+    ///
+    /// Anything on the command line can be read by every user of the machine
+    /// (`ps`, `/proc/<pid>/cmdline`), so the caller warns about each one.
+    pub fn secrets_on_command_line(matches: &ArgMatches) -> Vec<&'static str> {
+        [
+            ("token", "--token"),
+            ("mirror_token", "--mirror-token"),
+            ("s3_secret_key", "--s3-secret-key"),
+            ("s3_session_token", "--s3-session-token"),
+            ("encrypt_key", "--encrypt-key"),
+            ("notify_webhook", "--notify-webhook"),
+        ]
+        .into_iter()
+        .filter(|(id, _)| matches.value_source(id) == Some(ValueSource::CommandLine))
+        .map(|(_, flag)| flag)
+        .collect()
     }
 
     /// Treats blank string options as unset and trims surrounding whitespace.
@@ -56,8 +88,16 @@ impl Args {
             &mut self.s3_secret_key,
             &mut self.encrypt_key,
             &mut self.notify_webhook,
+            &mut self.app_id,
         ] {
             normalize(value);
+        }
+        if self
+            .app_key
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            self.app_key = None;
         }
     }
 
@@ -70,6 +110,10 @@ impl Args {
     /// credential that merely arrives through the environment is now ignored
     /// when its feature is not in use; one the user *typed* without the
     /// matching flag is still an error.
+    ///
+    /// Settings that only mean something together with another one (the mirror
+    /// and S3 options) are checked whatever their source, so that a config
+    /// file may hold either half.
     ///
     /// Call after `merge_config_with` so a companion value supplied by the
     /// config file counts.
@@ -97,6 +141,43 @@ impl Args {
         }
         if typed("oauth_client_id") && self.oauth_client_id.is_some() && !self.device_auth {
             return missing("--oauth-client-id", "--device-auth");
+        }
+        if self.mirror_to.is_none() {
+            for (set, flag) in [
+                (self.mirror_type.is_some(), "--mirror-type / mirror_type"),
+                (self.mirror_owner.is_some(), "--mirror-owner / mirror_owner"),
+                (self.mirror_private, "--mirror-private / mirror_private"),
+                (self.mirror_public, "--mirror-public / mirror_public"),
+            ] {
+                if set {
+                    return missing(flag, "--mirror-to <URL> (or mirror_to)");
+                }
+            }
+        }
+        if self.s3_bucket.is_none() {
+            for (set, flag) in [
+                (self.s3_region.is_some(), "--s3-region / s3_region"),
+                (self.s3_prefix.is_some(), "--s3-prefix / s3_prefix"),
+                (self.s3_endpoint.is_some(), "--s3-endpoint / s3_endpoint"),
+                (
+                    self.s3_include_assets,
+                    "--s3-include-assets / s3_include_assets",
+                ),
+                (self.s3_delete_stale, "--s3-delete-stale"),
+            ] {
+                if set {
+                    return missing(flag, "--s3-bucket <BUCKET> (or s3_bucket)");
+                }
+            }
+        }
+        if let Some(unknown) = self.skip.iter().find(|name| !categories::is_known(name)) {
+            return Err(Self::command().error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown category '{unknown}' in `skip`; expected one of: {}",
+                    categories::names().collect::<Vec<_>>().join(", ")
+                ),
+            ));
         }
         Ok(())
     }
@@ -147,6 +228,16 @@ impl Args {
                 self.token = Some(t.clone());
             }
         }
+        // GitHub App: CLI / env takes precedence, key by key.
+        if self.app_id.is_none() {
+            self.app_id.clone_from(&cfg.app_id);
+        }
+        if self.app_key.is_none() {
+            self.app_key.clone_from(&cfg.app_key_path);
+        }
+        if self.app_installation_id.is_none() {
+            self.app_installation_id = cfg.app_installation_id;
+        }
         // Output dir.
         if self.output.is_none() {
             if let Some(ref p) = cfg.output {
@@ -177,6 +268,10 @@ impl Args {
         // Clone behaviour flags.
         self.prefer_ssh |= cfg.prefer_ssh.unwrap_or(false);
         self.lfs |= cfg.lfs.unwrap_or(false);
+        self.verify_git |= cfg.verify_git.unwrap_or(false);
+        if self.git_timeout.is_none() {
+            self.git_timeout = cfg.git_timeout.filter(|&s| s > 0);
+        }
         // `--no-prune` (deprecated) is the default now; an explicit one still
         // beats a `prune = true` in the file.
         if !self.no_prune {
@@ -215,6 +310,9 @@ impl Args {
             if let Some(ref o) = cfg.mirror_owner {
                 self.mirror_owner = Some(o.clone());
             }
+        }
+        if self.mirror_type.is_none() {
+            self.mirror_type = cfg.mirror_type;
         }
         // The command line decides when it says either; the file fills in only
         // when it is silent.  `mirror_private` wins over `mirror_public` if a
@@ -294,7 +392,13 @@ impl Args {
         self.environments |= cfg.environments.unwrap_or(false);
         self.discussions |= cfg.discussions.unwrap_or(false);
         self.projects |= cfg.projects.unwrap_or(false);
+        self.commit_comments |= cfg.commit_comments.unwrap_or(false);
+        self.attachments |= cfg.attachments.unwrap_or(false);
         self.packages |= cfg.packages.unwrap_or(false);
+        // Skipped categories: the union of both lists.
+        if let Some(ref names) = cfg.skip {
+            self.skip.extend(names.iter().cloned());
+        }
         // Repo filter lists: extend (union) rather than replace.
         if let Some(ref patterns) = cfg.include_repos {
             self.include_repos.extend(patterns.iter().cloned());
@@ -310,116 +414,119 @@ impl Args {
         }
     }
 
+    /// Whether no category is selected (by a flag, `--all` or the config
+    /// file), so that a run backs up everything, as `--all` would.
+    #[must_use]
+    pub fn uses_default_categories(&self) -> bool {
+        !self.all && !categories::any_selected(&self.selected_options())
+    }
+
+    /// The options exactly as the individual category flags set them.
+    fn selected_options(&self) -> BackupOptions {
+        BackupOptions {
+            target: if self.org {
+                BackupTarget::Org
+            } else {
+                BackupTarget::User
+            },
+            repositories: self.repositories,
+            forks: self.forks,
+            private: self.private,
+            prefer_ssh: self.prefer_ssh,
+            clone_type: self.clone_type.clone().into_clone_type(),
+            lfs: self.lfs,
+            prune: self.prune,
+            issues: self.issues,
+            issue_comments: self.issue_comments,
+            issue_events: self.issue_events,
+            pulls: self.pulls,
+            pull_comments: self.pull_comments,
+            pull_commits: self.pull_commits,
+            pull_reviews: self.pull_reviews,
+            labels: self.labels,
+            milestones: self.milestones,
+            releases: self.releases,
+            release_assets: self.release_assets,
+            hooks: self.hooks,
+            security_advisories: self.security_advisories,
+            wikis: self.wikis,
+            starred: self.starred,
+            clone_starred: self.clone_starred,
+            watched: self.watched,
+            followers: self.followers,
+            following: self.following,
+            gists: self.gists,
+            starred_gists: self.starred_gists,
+            topics: self.topics,
+            branches: self.branches,
+            deploy_keys: self.deploy_keys,
+            collaborators: self.collaborators,
+            org_members: self.org_members,
+            org_teams: self.org_teams,
+            actions: self.actions,
+            action_runs: self.action_runs,
+            environments: self.environments,
+            discussions: self.discussions,
+            projects: self.projects,
+            commit_comments: self.commit_comments,
+            attachments: self.attachments,
+            // An explicitly chosen category treats a refusal (403) as a
+            // failure; `--all` and the default selection tolerate it.
+            tolerate_forbidden: false,
+            packages: self.packages,
+            include_repos: self.include_repos.clone(),
+            exclude_repos: self.exclude_repos.clone(),
+            since: self.since.clone(),
+            full: self.full,
+            clone_host: self.clone_host.clone(),
+            dry_run: self.dry_run,
+            concurrency: self.concurrency.unwrap_or(4).max(1),
+        }
+    }
+
     /// Converts the parsed (and optionally merged) CLI arguments into an owner
     /// string, output path, and `BackupOptions`.
+    ///
+    /// With `--all`, or when no category is selected at all, every category
+    /// of [`BackupOptions::all`] is on (the opt-in `clone_starred` and
+    /// `action_runs` only when asked for).  `--skip` is applied last.
     ///
     /// # Panics
     ///
     /// Panics if no owner has been supplied (neither via positional arg nor
     /// config file). Callers should validate this before calling.
     #[must_use]
-    pub fn into_backup_options(
-        self,
-    ) -> (
-        String,
-        std::path::PathBuf,
-        github_backup_types::config::BackupOptions,
-    ) {
-        use github_backup_types::config::{BackupOptions, BackupTarget};
+    pub fn into_backup_options(self) -> (String, std::path::PathBuf, BackupOptions) {
+        let selected = self.selected_options();
+        let mut opts = if self.all || self.uses_default_categories() {
+            BackupOptions {
+                target: selected.target,
+                prefer_ssh: selected.prefer_ssh,
+                clone_type: selected.clone_type,
+                lfs: selected.lfs,
+                prune: selected.prune,
+                // `--all` leaves these opt-in categories off; an explicit
+                // flag must still turn them on.
+                clone_starred: selected.clone_starred,
+                action_runs: selected.action_runs,
+                include_repos: selected.include_repos,
+                exclude_repos: selected.exclude_repos,
+                since: selected.since,
+                full: selected.full,
+                clone_host: selected.clone_host,
+                dry_run: selected.dry_run,
+                concurrency: selected.concurrency,
+                ..BackupOptions::all()
+            }
+        } else {
+            selected
+        };
+        categories::apply_skip(&mut opts, &self.skip);
 
         let owner = self
             .owner
             .expect("owner must be set before calling into_backup_options");
         let output = self.output.unwrap_or_else(|| std::path::PathBuf::from("."));
-
-        let target = if self.org {
-            BackupTarget::Org
-        } else {
-            BackupTarget::User
-        };
-
-        let clone_type = self.clone_type.into_clone_type();
-        let concurrency = self.concurrency.unwrap_or(4);
-
-        if self.all {
-            return (
-                owner,
-                output,
-                BackupOptions {
-                    target,
-                    prefer_ssh: self.prefer_ssh,
-                    clone_type,
-                    lfs: self.lfs,
-                    prune: self.prune,
-                    dry_run: self.dry_run,
-                    concurrency,
-                    include_repos: self.include_repos,
-                    exclude_repos: self.exclude_repos,
-                    since: self.since,
-                    full: self.full,
-                    clone_host: self.clone_host,
-                    // `--all` leaves these opt-in categories off; an explicit
-                    // flag must still turn them on.
-                    clone_starred: self.clone_starred,
-                    action_runs: self.action_runs,
-                    ..BackupOptions::all()
-                },
-            );
-        }
-
-        (
-            owner,
-            output,
-            BackupOptions {
-                target,
-                repositories: self.repositories,
-                forks: self.forks,
-                private: self.private,
-                prefer_ssh: self.prefer_ssh,
-                clone_type,
-                lfs: self.lfs,
-                prune: self.prune,
-                issues: self.issues,
-                issue_comments: self.issue_comments,
-                issue_events: self.issue_events,
-                pulls: self.pulls,
-                pull_comments: self.pull_comments,
-                pull_commits: self.pull_commits,
-                pull_reviews: self.pull_reviews,
-                labels: self.labels,
-                milestones: self.milestones,
-                releases: self.releases,
-                release_assets: self.release_assets,
-                hooks: self.hooks,
-                security_advisories: self.security_advisories,
-                wikis: self.wikis,
-                starred: self.starred,
-                clone_starred: self.clone_starred,
-                watched: self.watched,
-                followers: self.followers,
-                following: self.following,
-                gists: self.gists,
-                starred_gists: self.starred_gists,
-                topics: self.topics,
-                branches: self.branches,
-                deploy_keys: self.deploy_keys,
-                collaborators: self.collaborators,
-                org_members: self.org_members,
-                org_teams: self.org_teams,
-                actions: self.actions,
-                action_runs: self.action_runs,
-                environments: self.environments,
-                discussions: self.discussions,
-                projects: self.projects,
-                packages: self.packages,
-                include_repos: self.include_repos,
-                exclude_repos: self.exclude_repos,
-                since: self.since,
-                full: self.full,
-                clone_host: self.clone_host,
-                dry_run: self.dry_run,
-                concurrency,
-            },
-        )
+        (owner, output, opts)
     }
 }

@@ -1,12 +1,28 @@
-# Keeps GitHub Actions refs, Cargo dependencies and the Docker base images
-# current.  Cargo updates are grouped so a week's worth of bumps is one PR;
-# security advisories still open their own PRs immediately.
+# Keeps GitHub Actions refs and Cargo dependencies current.
+#
+# * Weekly cadence; a 7-day cooldown (14 for major versions) lets a release
+#   that is yanked or compromised shortly after publication be caught before
+#   it lands here.  Security updates ignore the cooldown and still open their
+#   own pull requests immediately.
+# * Cargo updates arrive grouped, so a week is a handful of pull requests:
+#   the RustCrypto crates together (they must move in step), every other
+#   minor/patch bump in one PR, and the major bumps in one PR.
+# * The limit is high enough that a few unmerged PRs cannot stall all further
+#   updates (the default of 5 did).
+#
+# Not covered: the Dockerfile's base images and rust-toolchain.toml.  Their
+# versions are build arguments / a toolchain file, which Dependabot cannot
+# update; bump them by hand (see CONTRIBUTING.md, "Toolchain and base
+# images").
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
     groups:
       actions:
         patterns: ["*"]
@@ -15,11 +31,23 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    open-pull-requests-limit: 15
     groups:
+      # A dependency joins the first group it matches, so the RustCrypto
+      # group (every update type) comes first.
+      rustcrypto:
+        patterns:
+          - "aead"
+          - "aes"
+          - "aes-gcm"
+          - "cipher"
+          - "digest"
+          - "hmac"
+          - "sha2"
       cargo-minor-patch:
         update-types: ["minor", "patch"]
-
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
+      cargo-major:
+        update-types: ["major"]

@@ -4,54 +4,16 @@
 //! Release asset download.
 //!
 //! GitHub answers an asset request with a redirect to a pre-signed URL on its
-//! storage host.  That second request must not carry the API credential: it
-//! would disclose the token to a third party, and signed storage URLs reject a
-//! request that has both a signature and an `Authorization` header.
+//! storage host.  That second request must not carry the API credential (see
+//! [`super::super::redirect`]).
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::Method;
-use tracing::debug;
-use url::Url;
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 
 use crate::api_client::AssetSink;
 use crate::error::ClientError;
 
-use super::super::{collect_body, GitHubClient, DEFAULT_TIMEOUT_SECS};
-
-/// Maximum number of redirects followed for one asset.
-const MAX_REDIRECTS: u8 = 3;
-
-/// What to do with a redirect from `from` to `to`.
-#[derive(Debug, PartialEq, Eq)]
-enum Hop {
-    /// Follow it, still sending the credential (same origin).
-    SameOrigin,
-    /// Follow it without the credential (different host, port or scheme).
-    DropCredential,
-    /// Do not follow it (HTTPS to a non-HTTPS URL).
-    Refuse,
-}
-
-/// Decides how a redirect from `from` to `to` is followed.
-///
-/// The credential survives only a redirect within the same origin (scheme,
-/// host and effective port).  A redirect from `https` to anything else is
-/// refused outright.
-fn classify_redirect(from: &Url, to: &Url) -> Hop {
-    if from.scheme() == "https" && to.scheme() != "https" {
-        return Hop::Refuse;
-    }
-    let same_origin = from.scheme() == to.scheme()
-        && from.host_str().map(str::to_ascii_lowercase)
-            == to.host_str().map(str::to_ascii_lowercase)
-        && from.port_or_known_default() == to.port_or_known_default();
-    if same_origin {
-        Hop::SameOrigin
-    } else {
-        Hop::DropCredential
-    }
-}
+use super::super::{Attempts, Call, GitHubClient};
 
 impl GitHubClient {
     /// Streams a release asset into `sink` and returns the number of bytes
@@ -61,9 +23,11 @@ impl GitHubClient {
     /// and follows up to 3 redirects.  The `Authorization` header is sent to
     /// `asset_url` and to redirects within the same origin only; a redirect
     /// to another host, port or scheme is followed without it, and a redirect
-    /// from HTTPS to HTTP is refused.  The body is handed to the sink chunk by
-    /// chunk (each chunk must arrive within the request timeout), so memory
-    /// use does not depend on the asset size.
+    /// from HTTPS to HTTP is refused.  Rate limits, 5xx responses and
+    /// transport failures before the body starts are retried like any other
+    /// GET.  The body is handed to the sink chunk by chunk (each chunk must
+    /// arrive within the request timeout), so memory use does not depend on
+    /// the asset size.
     ///
     /// # Errors
     ///
@@ -74,93 +38,37 @@ impl GitHubClient {
         asset_url: &str,
         sink: &mut dyn AssetSink,
     ) -> Result<u64, ClientError> {
-        let mut url = asset_url.to_string();
-        let mut send_auth = true;
-        let mut remaining_redirects = MAX_REDIRECTS;
-
-        loop {
-            let req = self
-                .build_request_with_auth(Method::GET, &url, send_auth)?
-                .header("Accept", "application/octet-stream")
-                .body(Full::new(Bytes::new()))
-                .map_err(ClientError::Http)?;
-
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                self.http.request(req),
-            )
+        let call = Call {
+            leave_origin: true,
+            ..Call::get(asset_url, &[("accept", "application/octet-stream")])
+        };
+        let response = self.send(&call, &mut Attempts::default()).await?;
+        self.stream_body(response.into_body(), asset_url, sink)
             .await
-            .map_err(|_| ClientError::Timeout { url: url.clone() })??;
+    }
 
-            let status = response.status();
-
-            if status.is_redirection() {
-                if remaining_redirects == 0 {
-                    return Err(ClientError::ApiError {
-                        status: status.as_u16(),
-                        body: "too many redirects".to_string(),
-                    });
-                }
-                remaining_redirects -= 1;
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| ClientError::ApiError {
-                        status: status.as_u16(),
-                        body: "redirect with no Location header".to_string(),
-                    })?;
-                let current = Url::parse(&url)?;
-                let next = current.join(location)?;
-                match classify_redirect(&current, &next) {
-                    Hop::SameOrigin => {}
-                    Hop::DropCredential => {
-                        debug!(
-                            from = current.host_str().unwrap_or(""),
-                            to = next.host_str().unwrap_or(""),
-                            "asset redirect leaves the origin: not sending the credential"
-                        );
-                        send_auth = false;
-                    }
-                    Hop::Refuse => {
-                        return Err(ClientError::ApiError {
-                            status: status.as_u16(),
-                            body: format!(
-                                "refusing to follow a redirect from https://{} to a non-HTTPS URL",
-                                current.host_str().unwrap_or("")
-                            ),
-                        });
-                    }
-                }
-                url = next.into();
-                continue;
-            }
-
-            if !status.is_success() {
-                let body = collect_body(response.into_body()).await?;
-                return Err(ClientError::ApiError {
-                    status: status.as_u16(),
-                    body: String::from_utf8_lossy(&body).into_owned(),
-                });
-            }
-
-            let mut body = response.into_body();
-            let mut written = 0u64;
-            loop {
-                let frame = tokio::time::timeout(
-                    std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-                    body.frame(),
-                )
+    /// Hands `body` to `sink` chunk by chunk (each chunk must arrive within
+    /// the request timeout) and returns the number of bytes delivered.
+    pub(super) async fn stream_body(
+        &self,
+        mut body: Incoming,
+        url: &str,
+        sink: &mut dyn AssetSink,
+    ) -> Result<u64, ClientError> {
+        let mut written = 0u64;
+        loop {
+            let frame = tokio::time::timeout(self.timing.request_timeout, body.frame())
                 .await
-                .map_err(|_| ClientError::Timeout { url: url.clone() })?;
-                let Some(frame) = frame else { break };
-                if let Some(chunk) = frame?.data_ref() {
-                    sink.write_chunk(chunk)?;
-                    written += chunk.len() as u64;
-                }
+                .map_err(|_| ClientError::Timeout {
+                    url: url.to_string(),
+                })?;
+            let Some(frame) = frame else { break };
+            if let Some(chunk) = frame?.data_ref() {
+                sink.write_chunk(chunk)?;
+                written += chunk.len() as u64;
             }
-            return Ok(written);
         }
+        Ok(written)
     }
 }
 
@@ -171,58 +79,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    fn url(s: &str) -> Url {
-        Url::parse(s).expect("url")
-    }
-
-    #[test]
-    fn same_origin_keeps_the_credential() {
-        let from = url("https://api.github.com/repos/o/r/releases/assets/1");
-        assert_eq!(
-            classify_redirect(&from, &url("https://api.github.com/other")),
-            Hop::SameOrigin
-        );
-        // Default port spelled out, host case differs: still the same origin.
-        assert_eq!(
-            classify_redirect(&from, &url("https://API.GitHub.com:443/other")),
-            Hop::SameOrigin
-        );
-    }
-
-    #[test]
-    fn other_host_port_or_scheme_drops_the_credential() {
-        let from = url("https://api.github.com/a");
-        for to in [
-            "https://objects.githubusercontent.com/blob?sig=1",
-            "https://api.github.com:8443/a",
-            "https://api.github.com.evil.example/a",
-        ] {
-            assert_eq!(
-                classify_redirect(&from, &url(to)),
-                Hop::DropCredential,
-                "{to}"
-            );
-        }
-        // http -> https is an upgrade to another origin: followed, credential dropped.
-        assert_eq!(
-            classify_redirect(&url("http://ghe.test/a"), &url("https://ghe.test/a")),
-            Hop::DropCredential
-        );
-    }
-
-    #[test]
-    fn https_to_http_is_refused() {
-        let from = url("https://api.github.com/a");
-        assert_eq!(
-            classify_redirect(&from, &url("http://api.github.com/a")),
-            Hop::Refuse
-        );
-        assert_eq!(
-            classify_redirect(&from, &url("http://elsewhere.test/a")),
-            Hop::Refuse
-        );
-    }
 
     #[derive(Default)]
     struct VecSink(Vec<u8>);
@@ -440,5 +296,106 @@ mod tests {
             "must arrive in several chunks, not one buffer"
         );
         assert!(sink.largest < body.len());
+    }
+
+    #[tokio::test]
+    async fn an_error_body_that_stalls_times_out_instead_of_hanging() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 100\r\n\r\npartial")
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let mut client = GitHubClient::for_tests(Credential::Anonymous);
+        client.timing.request_timeout = std::time::Duration::from_millis(200);
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.download_release_asset(
+                &format!("http://127.0.0.1:{port}/a"),
+                &mut VecSink::default(),
+            ),
+        )
+        .await
+        .expect("a stalled error body must not hang the download");
+
+        assert!(
+            matches!(outcome, Err(ClientError::Timeout { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_asset_request_is_waited_out_and_retried() {
+        let (port, seen) = serve(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .to_string(),
+            ok("asset"),
+        ])
+        .await;
+        let client = GitHubClient::for_tests(Credential::Anonymous);
+        let mut sink = VecSink::default();
+
+        client
+            .download_release_asset(&format!("http://127.0.0.1:{port}/a"), &mut sink)
+            .await
+            .expect("retried after the rate limit");
+
+        assert_eq!(sink.0, b"asset");
+        assert_eq!(seen.lock().expect("seen").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_transient_server_error_on_an_asset_is_retried() {
+        let (port, seen) = serve(vec![
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            ok("asset"),
+        ])
+        .await;
+        let client = GitHubClient::for_tests(Credential::Anonymous);
+        let mut sink = VecSink::default();
+
+        client
+            .download_release_asset(&format!("http://127.0.0.1:{port}/a"), &mut sink)
+            .await
+            .expect("retried after the 503");
+
+        assert_eq!(sink.0, b"asset");
+        assert_eq!(seen.lock().expect("seen").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_storage_hop_gets_neither_the_token_nor_the_api_version() {
+        let (storage_port, storage_seen) = serve(vec![ok("x")]).await;
+        let (api_port, api_seen) = serve(vec![redirect(&format!(
+            "http://localhost:{storage_port}/blob"
+        ))])
+        .await;
+        let client = GitHubClient::for_tests(Credential::Token("ghp_SECRET".into()));
+
+        client
+            .download_release_asset(
+                &format!("http://127.0.0.1:{api_port}/a"),
+                &mut VecSink::default(),
+            )
+            .await
+            .expect("download");
+
+        let api = api_seen.lock().expect("api")[0].to_ascii_lowercase();
+        let storage = storage_seen.lock().expect("storage")[0].to_ascii_lowercase();
+        assert!(
+            api.contains("\r\naccept: application/octet-stream\r\n"),
+            "{api}"
+        );
+        assert!(api.contains("x-github-api-version"), "{api}");
+        assert!(!storage.contains("x-github-api-version"), "{storage}");
     }
 }

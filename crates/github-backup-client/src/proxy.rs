@@ -2,22 +2,25 @@
 // Copyright 2026 Tom F
 
 //! Proxy support shared by everything in the backup that talks HTTP(S): the
-//! GitHub API client, the webhook notifier and `--doctor`.
+//! GitHub API client, the OAuth device flow, the webhook notifier,
+//! `--doctor`, the mirror destinations' APIs and the S3 client.
 //!
 //! [`ProxySettings`] reads the conventional environment variables
 //! (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`, each in lower and
-//! upper case; the lower-case spelling wins, as in curl) and [`ProxyClient`]
-//! is an HTTP client that obeys them:
+//! upper case; the lower-case spelling wins, as in curl), [`ProxyConnector`]
+//! is a connector for hyper-util's legacy client that obeys them, and
+//! [`ProxyClient`] is that client, for any request body type:
 //!
 //! * an `https://` target goes through the proxy with an HTTP `CONNECT` tunnel
 //!   and a TLS handshake inside it;
-//! * an `http://` target is sent to the proxy in absolute form;
+//! * an `http://` target is sent to the proxy in absolute form, with the
+//!   proxy credentials in `Proxy-Authorization`;
 //! * a target matching `NO_PROXY` (or with no proxy configured for its scheme)
 //!   is contacted directly.
 //!
 //! Only HTTP proxies are supported (`http://[user:pass@]host[:port]`, or a bare
-//! `host:port`); SOCKS and TLS-to-the-proxy are not.  The S3 client does not use
-//! this module.
+//! `host:port`); SOCKS and TLS-to-the-proxy are not.  The proxy credentials
+//! never appear in `Debug` output, log lines or error messages.
 
 use std::future::Future;
 use std::io;
@@ -25,15 +28,16 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use base64::Engine as _;
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::body::Incoming;
+use hyper::body::{Body, Incoming};
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper::{Request, Response, Uri};
 use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
-use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::{Builder, Client};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,7 +52,9 @@ use crate::error::ClientError;
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 /// One proxy: where it listens and the optional `Proxy-Authorization` value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Its `Debug` output redacts the credentials.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Proxy host name or IP.
     pub host: String,
@@ -57,6 +63,19 @@ pub struct ProxyConfig {
     /// Ready-to-send `Proxy-Authorization: Basic <base64>` value, if the proxy
     /// URL carried credentials.
     pub auth_header: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "auth_header",
+                &self.auth_header.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 /// The proxy configuration of the process environment.
@@ -71,7 +90,11 @@ impl ProxySettings {
     /// Reads `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        let settings = Self::from_lookup(|name| std::env::var(name).ok());
+        if settings.is_configured() {
+            info!("HTTP proxy configured from the environment");
+        }
+        settings
     }
 
     /// Like [`from_env`](Self::from_env) with an explicit variable lookup
@@ -108,12 +131,16 @@ impl ProxySettings {
     }
 
     /// The proxy to use for `uri`, or `None` for a direct connection.
+    ///
+    /// Loopback hosts (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) are
+    /// always reached directly, as Go's HTTP client does: a service on this
+    /// machine (a local MinIO or Gitea) is never behind the network's proxy.
     #[must_use]
     pub fn proxy_for(&self, uri: &Uri) -> Option<&ProxyConfig> {
         let host = uri.host()?;
         let secure = uri.scheme_str() == Some("https");
         let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
-        if self.no_proxy.iter().any(|rule| rule.matches(host, port)) {
+        if is_loopback(host) || self.no_proxy.iter().any(|rule| rule.matches(host, port)) {
             return None;
         }
         if secure {
@@ -122,6 +149,17 @@ impl ProxySettings {
             self.http.as_ref()
         }
     }
+}
+
+/// `true` for a host name or address that always means this machine.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Parses `http://[user[:pass]@]host[:port]` (or `host[:port]`); the port
@@ -268,7 +306,7 @@ fn in_cidr(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
 
 // ── Connections ───────────────────────────────────────────────────────────────
 
-/// A connection made by `ProxyConnector`: plain TCP, or TLS (direct or
+/// A connection made by [`ProxyConnector`]: plain TCP, or TLS (direct or
 /// inside a `CONNECT` tunnel).
 pub struct ProxyStream {
     inner: Inner,
@@ -336,12 +374,65 @@ impl Connection for ProxyStream {
     }
 }
 
-/// A `tower_service::Service<Uri>` connector that applies [`ProxySettings`].
+/// A connector for hyper-util's legacy [`Client`] that applies
+/// [`ProxySettings`]: TCP (hyper-util's [`HttpConnector`]) to the proxy or to
+/// the target, a `CONNECT` tunnel for an `https://` target behind a proxy,
+/// then TLS (rustls) for `https://`.
+///
+/// Use it through [`ProxyClient`], which also adds the proxy credentials to
+/// plain-HTTP requests sent to a proxy.
 #[derive(Clone)]
-struct ProxyConnector {
+pub struct ProxyConnector {
     settings: Arc<ProxySettings>,
     tls: TlsConnector,
+    tcp: HttpConnector,
     allow_http: bool,
+}
+
+impl std::fmt::Debug for ProxyConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConnector")
+            .field("settings", &self.settings)
+            .field("allow_http", &self.allow_http)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProxyConnector {
+    /// A connector applying `settings` and trusting what `tls` trusts.
+    /// `allow_http` lets it reach `http://` URLs; without it only `https://`
+    /// is accepted.
+    #[must_use]
+    pub fn new(settings: ProxySettings, tls: rustls::ClientConfig, allow_http: bool) -> Self {
+        let mut tcp = HttpConnector::new();
+        // `call` checks the scheme; the TCP connector only connects.
+        tcp.enforce_http(false);
+        tcp.set_nodelay(true);
+        Self {
+            settings: Arc::new(settings),
+            tls: TlsConnector::from(Arc::new(tls)),
+            tcp,
+            allow_http,
+        }
+    }
+
+    /// Limits the time to establish a TCP connection (to the proxy or to the
+    /// target); `None`, the default, leaves it to the operating system.
+    pub fn set_connect_timeout(&mut self, timeout: Option<Duration>) {
+        self.tcp.set_connect_timeout(timeout);
+    }
+
+    /// Sends TCP keep-alive probes after `interval` of idleness (`None`, the
+    /// default, sends none).
+    pub fn set_keepalive(&mut self, interval: Option<Duration>) {
+        self.tcp.set_keepalive(interval);
+    }
+
+    /// The settings this connector applies.
+    #[must_use]
+    pub fn settings(&self) -> &ProxySettings {
+        &self.settings
+    }
 }
 
 impl Service<Uri> for ProxyConnector {
@@ -374,11 +465,15 @@ impl Service<Uri> for ProxyConnector {
             let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
             let proxy = this.settings.proxy_for(&uri).cloned();
 
-            let tcp = match &proxy {
-                Some(p) => TcpStream::connect((p.host.as_str(), p.port)).await?,
-                None => TcpStream::connect((host.as_str(), port)).await?,
+            let peer = match &proxy {
+                Some(p) => authority(&p.host, p.port),
+                None => authority(&host, port),
             };
-            let _ = tcp.set_nodelay(true);
+            let peer: Uri = format!("http://{peer}")
+                .parse()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let mut tcp = this.tcp.clone();
+            let tcp = tcp.call(peer).await.map_err(io::Error::other)?.into_inner();
             let tcp = match (&proxy, secure) {
                 (Some(p), true) => {
                     connect_tunnel(tcp, &host, port, p.auth_header.as_deref()).await?
@@ -400,7 +495,16 @@ impl Service<Uri> for ProxyConnector {
     }
 }
 
-/// Sends `CONNECT host:port` to the proxy and waits for a `200` response.
+/// `host:port`, with an IPv6 literal bracketed (RFC 3986, section 3.2.2).
+fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Sends `CONNECT host:port` to the proxy and waits for a `2xx` response.
 async fn connect_tunnel(
     mut stream: TcpStream,
     host: &str,
@@ -410,8 +514,8 @@ async fn connect_tunnel(
     let auth_line = auth
         .map(|a| format!("Proxy-Authorization: {a}\r\n"))
         .unwrap_or_default();
-    let request =
-        format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth_line}\r\n");
+    let authority = authority(host, port);
+    let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth_line}\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     // Read the response header (terminated by \r\n\r\n).
@@ -430,7 +534,15 @@ async fn connect_tunnel(
         }
     }
 
-    if !buf.starts_with(b"HTTP/1.1 200") && !buf.starts_with(b"HTTP/1.0 200") {
+    // Any 2xx status establishes the tunnel (RFC 9110, section 9.3.6).
+    let established = buf.starts_with(b"HTTP/1.")
+        && buf.get(8) == Some(&b' ')
+        && buf.get(9) == Some(&b'2')
+        && buf
+            .get(10..12)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+        && matches!(buf.get(12), Some(b' ' | b'\r'));
+    if !established {
         let line = String::from_utf8_lossy(&buf)
             .lines()
             .next()
@@ -441,23 +553,49 @@ async fn connect_tunnel(
     Ok(stream)
 }
 
+/// A [`rustls::ClientConfig`] trusting the operating system's certificate
+/// store (or `SSL_CERT_FILE` / `SSL_CERT_DIR`).
+///
+/// # Errors
+///
+/// [`ClientError::Tls`] if no CA certificate can be loaded.
+pub fn native_tls_config() -> Result<rustls::ClientConfig, ClientError> {
+    let mut root_store = rustls::RootCertStore::empty();
+    let cert_result = rustls_native_certs::load_native_certs();
+    if cert_result.certs.is_empty() {
+        let msg = cert_result
+            .errors
+            .first()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no CA certificates found".to_string());
+        return Err(ClientError::Tls(msg));
+    }
+    root_store.add_parsable_certificates(cert_result.certs);
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
-/// An HTTP client that honours the proxy environment (see the module docs).
-#[derive(Clone)]
-pub struct ProxyClient {
-    kind: Kind,
+/// An HTTP/1.1 client that honours the proxy environment (see the module
+/// docs), for requests whose body is a `B`: by default a whole
+/// [`Full<Bytes>`]; the S3 client streams its own body type.
+pub struct ProxyClient<B = Full<Bytes>> {
+    client: Client<ProxyConnector, B>,
     settings: Arc<ProxySettings>,
 }
 
-#[derive(Clone)]
-enum Kind {
-    /// No proxy configured: the plain hyper-rustls connector.
-    Direct(Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>),
-    Proxied(Client<ProxyConnector, Full<Bytes>>),
+impl<B> Clone for ProxyClient<B> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            settings: Arc::clone(&self.settings),
+        }
+    }
 }
 
-impl std::fmt::Debug for ProxyClient {
+impl<B> std::fmt::Debug for ProxyClient<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProxyClient")
             .field("settings", &self.settings)
@@ -465,7 +603,12 @@ impl std::fmt::Debug for ProxyClient {
     }
 }
 
-impl ProxyClient {
+impl<B> ProxyClient<B>
+where
+    B: Body + Send + Unpin + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     /// A client following the process environment, trusting the system CA
     /// bundle.  `allow_http` lets it reach `http://` URLs; without it only
     /// `https://` is accepted (what the GitHub API needs).
@@ -474,13 +617,9 @@ impl ProxyClient {
     ///
     /// [`ClientError::Tls`] if no CA certificates can be loaded.
     pub fn from_env(allow_http: bool) -> Result<Self, ClientError> {
-        let settings = ProxySettings::from_env();
-        if settings.is_configured() {
-            info!("HTTP proxy configured from the environment");
-        }
         Ok(Self::new(
-            settings,
-            crate::client::build_tls_config()?,
+            ProxySettings::from_env(),
+            native_tls_config()?,
             allow_http,
         ))
     }
@@ -488,23 +627,30 @@ impl ProxyClient {
     /// A client with explicit settings and TLS configuration.
     #[must_use]
     pub fn new(settings: ProxySettings, tls: rustls::ClientConfig, allow_http: bool) -> Self {
-        let settings = Arc::new(settings);
-        let kind = if settings.is_configured() {
-            Kind::Proxied(Client::builder(TokioExecutor::new()).build(ProxyConnector {
-                settings: Arc::clone(&settings),
-                tls: TlsConnector::from(Arc::new(tls)),
-                allow_http,
-            }))
-        } else {
-            let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
-            let https = if allow_http {
-                builder.https_or_http().enable_http1().build()
-            } else {
-                builder.https_only().enable_http1().build()
-            };
-            Kind::Direct(Client::builder(TokioExecutor::new()).build(https))
-        };
-        Self { kind, settings }
+        Self::with_connector(
+            &Client::builder(TokioExecutor::new()),
+            ProxyConnector::new(settings, tls, allow_http),
+        )
+    }
+
+    /// A client made by `builder` (connection-pool settings) on `connector`
+    /// (connection settings).
+    #[must_use]
+    pub fn with_connector(builder: &Builder, connector: ProxyConnector) -> Self {
+        Self {
+            settings: Arc::clone(&connector.settings),
+            client: builder.build(connector),
+        }
+    }
+
+    /// A client for tests against local plain-HTTP servers: no proxy, an
+    /// empty CA store, `http://` allowed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_tests() -> Self {
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        Self::new(ProxySettings::default(), tls, true)
     }
 
     /// The settings this client applies.
@@ -520,27 +666,22 @@ impl ProxyClient {
     /// The transport error of the underlying client.
     pub async fn request(
         &self,
-        mut req: Request<Full<Bytes>>,
+        mut req: Request<B>,
     ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
-        match &self.kind {
-            Kind::Direct(c) => c.request(req).await,
-            Kind::Proxied(c) => {
-                // A plain-HTTP request is handed to the proxy itself, so the
-                // proxy credentials travel in the request.
-                if req.uri().scheme_str() == Some("http") {
-                    if let Some(auth) = self
-                        .settings
-                        .proxy_for(req.uri())
-                        .and_then(|p| p.auth_header.as_deref())
-                        .and_then(|a| hyper::header::HeaderValue::from_str(a).ok())
-                    {
-                        req.headers_mut()
-                            .insert(hyper::header::PROXY_AUTHORIZATION, auth);
-                    }
-                }
-                c.request(req).await
+        // A plain-HTTP request is handed to the proxy itself, so the proxy
+        // credentials travel in the request.
+        if req.uri().scheme_str() == Some("http") {
+            if let Some(auth) = self
+                .settings
+                .proxy_for(req.uri())
+                .and_then(|p| p.auth_header.as_deref())
+                .and_then(|a| hyper::header::HeaderValue::from_str(a).ok())
+            {
+                req.headers_mut()
+                    .insert(hyper::header::PROXY_AUTHORIZATION, auth);
             }
         }
+        self.client.request(req).await
     }
 }
 
@@ -561,6 +702,28 @@ mod tests {
 
     fn proxy_for<'a>(s: &'a ProxySettings, url: &str) -> Option<&'a str> {
         s.proxy_for(&url.parse().unwrap()).map(|p| p.host.as_str())
+    }
+
+    #[test]
+    fn loopback_hosts_never_go_through_the_proxy() {
+        let s = settings(&[("HTTPS_PROXY", "http://p:1"), ("HTTP_PROXY", "http://p:1")]);
+        for url in [
+            "http://127.0.0.1:9000/b",
+            "http://127.1.2.3/x",
+            "https://localhost/x",
+            "http://minio.localhost:9000/",
+            "http://[::1]:9000/b",
+            "https://LOCALHOST/x",
+        ] {
+            assert_eq!(proxy_for(&s, url), None, "{url}");
+        }
+        for url in [
+            "http://128.0.0.1/x",
+            "https://localhost.example/x",
+            "http://[::2]/x",
+        ] {
+            assert_eq!(proxy_for(&s, url), Some("p"), "{url}");
+        }
     }
 
     #[test]
@@ -789,5 +952,45 @@ mod tests {
             false,
         );
         assert!(c.request(get("http://example.invalid/x")).await.is_err());
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_proxy_credentials() {
+        let s = settings(&[("HTTPS_PROXY", "http://alice:s3cr3t@proxy.example.com:1")]);
+        for text in [format!("{s:?}"), format!("{:?}", s.https.as_ref().unwrap())] {
+            assert!(!text.contains("YWxpY2U6czNjcjN0"), "{text}");
+            assert!(!text.contains("s3cr3t"), "{text}");
+            assert!(text.contains("proxy.example.com"), "{text}");
+            assert!(text.contains("[redacted]"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_brackets_an_ipv6_target() {
+        let (proxy_port, heads) = fake_server("HTTP/1.1 403 Forbidden\r\n\r\n").await;
+        let c = client(&[("HTTPS_PROXY", format!("http://127.0.0.1:{proxy_port}"))]);
+        let _ = c.request(get("https://[2001:db8::1]:8443/x")).await;
+        let head = heads.lock().unwrap()[0].clone();
+        assert!(
+            head.starts_with("CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_2xx_answer_to_connect_opens_the_tunnel() {
+        // RFC 9110 section 9.3.6: any 2xx means the tunnel is established.  The fake
+        // proxy then closes the connection, so the TLS handshake fails - but
+        // not with "proxy CONNECT failed".
+        let (proxy_port, _) = fake_server("HTTP/1.1 204 No Content\r\n\r\n").await;
+        let c = client(&[("HTTPS_PROXY", format!("http://127.0.0.1:{proxy_port}"))]);
+        let err = c
+            .request(get("https://api.example.invalid/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            !format!("{err:?}").contains("proxy CONNECT failed"),
+            "{err:?}"
+        );
     }
 }

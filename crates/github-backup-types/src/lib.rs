@@ -12,12 +12,15 @@
 //!
 //! | Module | Contents |
 //! |--------|----------|
-//! | [`config`] | Backup options and output-path configuration |
+//! | [`config`] | Backup options, the configuration file and output paths |
+//! | [`backup_state`] | Persisted incremental state, checkpoint and run history |
 //! | [`glob`] | Glob pattern matching for `--include-repos` / `--exclude-repos` |
 //! | [`repository`] | Repository metadata |
 //! | [`branch`] | Branch list and commit tips |
+//! | [`ruleset`] | Repository rulesets |
 //! | [`issue`] | Issues, comments, and events |
 //! | [`pull_request`] | Pull requests, review comments, commits, and reviews |
+//! | [`comment`] | Commit comments and gist comments |
 //! | [`release`] | Releases and binary release assets |
 //! | [`gist`] | Gist metadata |
 //! | [`label`] | Repository labels |
@@ -31,6 +34,8 @@
 //! | [`starred_queue`] | Durable queue types for starred-repo clone progress |
 //! | [`workflow`] | GitHub Actions workflow and workflow-run metadata |
 //! | [`environment`] | Repository deployment environments and protection rules |
+//! | [`package`] | GitHub Packages and their versions |
+//! | [`project`] | Projects (v2), their fields and items |
 //! | [`raw`] | [`Raw`]: a typed object that remembers the exact JSON it came from |
 //! | [`page`] | [`Page`]: a decoded API list that keeps objects it cannot parse |
 //!
@@ -44,13 +49,13 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+pub mod atomic_file;
 pub mod backup_state;
 pub mod branch;
-pub mod branch_protection;
 pub mod collaborator;
+pub mod comment;
 pub mod config;
 pub mod deploy_key;
-pub mod discussion;
 pub mod environment;
 pub mod gist;
 pub mod glob;
@@ -65,6 +70,7 @@ pub mod pull_request;
 pub mod raw;
 pub mod release;
 pub mod repository;
+pub mod ruleset;
 pub mod security_advisory;
 pub mod starred_queue;
 pub mod team;
@@ -76,14 +82,10 @@ pub use backup_state::{
     BackupCheckpoint, BackupRunEntry, BackupRunHistory, BackupState, RepoWatermark, RunRecord,
 };
 pub use branch::{Branch, BranchCommit};
-pub use branch_protection::{
-    AdminEnforcement, BranchProtection, RequiredPullRequestReviews, RequiredStatusChecks,
-    Restrictions, SimpleEnabled,
-};
 pub use collaborator::{Collaborator, CollaboratorPermissions};
+pub use comment::{CommitComment, GistComment};
 pub use config::{BackupOptions, ConfigFile, OutputConfig};
 pub use deploy_key::DeployKey;
-pub use discussion::{Discussion, DiscussionCategory, DiscussionComment};
 pub use environment::{DeploymentBranchPolicy, Environment, EnvironmentProtectionRule};
 pub use gist::Gist;
 pub use hook::Hook;
@@ -92,11 +94,12 @@ pub use label::Label;
 pub use milestone::Milestone;
 pub use package::{Package, PackageVersion};
 pub use page::Page;
-pub use project::{ClassicProject, ProjectCard, ProjectColumn};
+pub use project::{ProjectV2, ProjectV2Field, ProjectV2Item};
 pub use pull_request::{PullRequest, PullRequestComment, PullRequestCommit, PullRequestReview};
 pub use raw::Raw;
 pub use release::{Release, ReleaseAsset};
 pub use repository::Repository;
+pub use ruleset::Ruleset;
 pub use security_advisory::SecurityAdvisory;
 pub use team::{Team, TeamParent};
 pub use user::User;

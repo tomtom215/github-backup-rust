@@ -1,70 +1,70 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! GitHub Projects (classic and v2) API types.
+//! GitHub Projects (v2) API types.
+//!
+//! The models name only what the backup needs to walk a project (its number,
+//! its field ids, its items' ids); the files hold the objects exactly as the
+//! API returned them.
 
 use serde::{Deserialize, Serialize};
 
-use crate::user::User;
-
-/// A GitHub Classic Project (Projects v1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClassicProject {
-    /// Numeric project ID.
+/// A Projects v2 project (`GET /users/{username}/projectsV2`,
+/// `GET /orgs/{org}/projectsV2`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectV2 {
+    /// Unique project identifier.
     pub id: u64,
-    /// Project number within the repository/org.
+    /// Project number within its owner; the routes address a project by it.
     pub number: u64,
-    /// Project name.
-    pub name: String,
-    /// Project body / description.
+    /// Project title (empty when omitted).
     #[serde(default)]
-    pub body: Option<String>,
-    /// State: `"open"` or `"closed"`.
-    pub state: String,
-    /// Creator of the project.
-    pub creator: User,
-    /// Creation timestamp (ISO 8601).
-    pub created_at: String,
-    /// Last update timestamp (ISO 8601).
-    pub updated_at: String,
-    /// HTML URL on GitHub.
-    pub html_url: String,
-    /// Number of open cards across all columns.
-    #[serde(default)]
-    pub open_issues_count: Option<u64>,
+    pub title: String,
 }
 
-/// A column in a Classic Project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectColumn {
-    /// Numeric column ID.
+/// A field (column) of a Projects v2 project, built-in or custom.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectV2Field {
+    /// Unique field identifier; item listings name the fields to return by it.
     pub id: u64,
-    /// Column name (e.g. "To do", "In progress", "Done").
-    pub name: String,
-    /// Creation timestamp (ISO 8601).
-    pub created_at: String,
-    /// Last update timestamp (ISO 8601).
-    pub updated_at: String,
-    /// Cards in this column.
+    /// Field name (empty when omitted).
     #[serde(default)]
-    pub cards: Vec<ProjectCard>,
+    pub name: String,
 }
 
-/// A card in a Classic Project column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectCard {
-    /// Numeric card ID.
+/// An item (issue, pull request or draft issue) of a Projects v2 project,
+/// with the values of the fields it was requested with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectV2Item {
+    /// Unique item identifier.
     pub id: u64,
-    /// Free-text note (if not linked to an issue or PR).
-    #[serde(default)]
-    pub note: Option<String>,
-    /// Archive state.
-    pub archived: bool,
-    /// Creation timestamp (ISO 8601).
-    pub created_at: String,
-    /// Last update timestamp (ISO 8601).
-    pub updated_at: String,
-    /// URL of the content item this card represents (issue or PR URL).
-    #[serde(default)]
-    pub content_url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_parses_the_documented_shape() {
+        let json = serde_json::json!({
+            "id": 2, "node_id": "MDc6UHJvamVjdDEwMDI2MDM=", "number": 2,
+            "title": "My Projects", "description": null, "public": true,
+            "created_at": "2022-04-28T12:00:00Z", "updated_at": "2022-04-28T12:00:00Z"
+        });
+        let project: ProjectV2 = serde_json::from_value(json).expect("project");
+        assert_eq!((project.id, project.number), (2, 2));
+        assert_eq!(project.title, "My Projects");
+    }
+
+    #[test]
+    fn field_and_item_need_only_their_id() {
+        let field: ProjectV2Field =
+            serde_json::from_value(serde_json::json!({"id": 12345, "data_type": "text"}))
+                .expect("field");
+        assert_eq!(field.id, 12345);
+        let item: ProjectV2Item =
+            serde_json::from_value(serde_json::json!({"id": 13, "content_type": "Issue"}))
+                .expect("item");
+        assert_eq!(item.id, 13);
+    }
 }

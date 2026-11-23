@@ -36,6 +36,19 @@ code; where something is a limitation it says so.
   the others.
 - **`Debug` output** of the credential type is redacted.
 
+### GitHub App
+
+- The **private key** is read from a file (`--app-key`) or from
+  `GITHUB_APP_PRIVATE_KEY`, never from the command line or the config file.
+  The PEM text and the decoded key bytes are wiped from memory when they are
+  dropped; the parsed key lives inside `aws-lc` (the library rustls already
+  uses), whose allocator clears memory it frees.  Signing (RS256) is aws-lc's.
+- The **JWT** (valid for 9 minutes) and the **installation tokens** (one
+  hour) are sent only to the API host, as `Authorization: Bearer`, and are never
+  logged or written to a file.  Installation tokens reach `git` exactly as
+  personal tokens do (above), and are scrubbed from log and error text by
+  their `ghs_` prefix.
+
 ### Environment variables
 
 The recommended way to supply secrets: `GITHUB_TOKEN`, `AWS_ACCESS_KEY_ID`,
@@ -56,8 +69,8 @@ readable by group or others but does not refuse to use it.
 
 The scopes and fine-grained permissions per category are in
 [Authentication](../getting-started/authentication.md#what-each-category-needs).
-In short: a classic token with `repo`, `gist`, `read:org` and `read:packages`
-covers every category of `--all`; a fine-grained token is preferable when you do
+In short: a classic token with `repo`, `gist`, `read:org`, `read:packages`,
+`read:project` and `admin:repo_hook` covers every category of `--all`; a fine-grained token is preferable when you do
 not need gists or packages.  Fine-grained tokens **can** access an organisation's
 data when the organisation is the token's resource owner (and approves it), so
 organisation backups do not require a classic token.
@@ -86,30 +99,38 @@ organisation backups do not require a classic token.
 
 ## Dependency Policy
 
-`deny.toml` is enforced by `cargo-deny` in CI, in the release workflow and by a
-daily scheduled workflow:
+`deny.toml` is enforced by `cargo-deny` in CI and in the release workflow; a
+daily scheduled workflow (`audit.yml`) also checks the advisories against the
+`Cargo.lock` on `main`, so a new advisory is noticed without a code change:
 
 | Policy | Rule |
 |--------|------|
 | Banned crates | `openssl`, `openssl-sys`, `reqwest`, `native-tls` |
 | Allowed licences | MIT, Apache-2.0 (also with the LLVM exception), ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0, Zlib |
-| Advisories | `cargo deny check advisories` (RustSec) must pass; the CI job `rustsec/audit-check` additionally runs with one documented ignore (`RUSTSEC-2026-0097`, a build-time-only dependency) |
+| Advisories | `cargo deny check advisories` (RustSec) must pass; `deny.toml` ignores none |
 | Sources | only crates.io; no unknown registries or git dependencies |
 
-Dependabot proposes weekly updates for Cargo, GitHub Actions and the Docker base
-images.  The third-party GitHub Actions in the workflows are referenced by tag,
-not by commit SHA.
+Dependabot proposes weekly updates for Cargo dependencies (grouped, with a
+7-day cooldown) and GitHub Actions.  Every action in the workflows is pinned to
+a full commit SHA, and CI runs [zizmor](https://docs.zizmor.sh/) on the
+workflows.  The Rust toolchain (`rust-toolchain.toml`) and the Dockerfile's
+base images are bumped by hand.
 
 ---
 
 ## Release and Supply Chain
 
-- Release binaries (five targets) carry a GitHub **build-provenance
-  attestation** (see [Installation](../getting-started/installation.md#verify-build-provenance-optional)).
-  The attestation covers the binaries only; the container images, checksum files
-  and `SHA256SUMS.txt` are not attested, and no SBOM is published.
+- Release binaries (five targets) and `SHA256SUMS.txt` carry a GitHub
+  **build-provenance attestation** (see [Installation](../getting-started/installation.md#verify-build-provenance-optional));
+  the per-file `.sha256` files do not.  The binaries are not code-signed.
+- Container images (releases after v0.3.2, and `edge`) are packaged from the
+  Linux binaries built in the same workflow run, so a release image contains the
+  attested release binary.  Each image has an SBOM, max-mode BuildKit
+  provenance and a GitHub attestation pushed to the registry.
 - A release tag must point to a commit on `main`; the release workflow re-runs
-  the tests, clippy, the MSRV build and `cargo-deny` before building.
+  the tests (Linux, macOS, Windows), clippy, the MSRV check and `cargo-deny`
+  before building, restores no build cache, and creates the GitHub release as a
+  draft that is published only after the binaries and the image succeeded.
 
 ---
 
@@ -133,7 +154,8 @@ S3 credentials are accepted through `--s3-access-key` / `--s3-secret-key` /
 ## Integrity: What the Manifest Does and Does Not Do
 
 `--manifest` records SHA-256 digests of the data files under `json/` (not the
-history, state, checkpoint and lock files, which change on every run);
+history, state, checkpoint and lock files, which change on every run, nor
+temporary files of an unfinished write);
 `--verify` compares them.  It detects accidental damage and casual edits.  It
 does not cover the git clones, it is not signed (it sits next to the files it
 describes), and it has no digest of its own.
@@ -168,13 +190,10 @@ lint table; the attributes are per crate.
 
 ## Reporting Security Vulnerabilities
 
-Please do **not** open a public GitHub issue for security vulnerabilities.  Use
-GitHub's private security advisory feature:
-
-1. Open
-   [github.com/tomtom215/github-backup-rust/security/advisories/new](https://github.com/tomtom215/github-backup-rust/security/advisories/new).
-2. Describe the vulnerability and steps to reproduce.
-
-See [`SECURITY.md`](https://github.com/tomtom215/github-backup-rust/blob/main/SECURITY.md)
-for the disclosure policy, the in-scope and out-of-scope vulnerability classes
-and the expected response times.
+Please do **not** put the details of a vulnerability in a public GitHub issue.
+Use GitHub's private vulnerability reporting at
+[github.com/tomtom215/github-backup-rust/security/advisories/new](https://github.com/tomtom215/github-backup-rust/security/advisories/new)
+if that page offers a form; otherwise open an issue that only asks for a private
+contact.  [`SECURITY.md`](https://github.com/tomtom215/github-backup-rust/blob/main/SECURITY.md)
+has the details, the disclosure policy, the in-scope and out-of-scope
+vulnerability classes and the expected response times.

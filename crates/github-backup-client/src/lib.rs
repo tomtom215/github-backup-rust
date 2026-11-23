@@ -15,15 +15,19 @@
 //!
 //! | Capability | Details |
 //! |-----------|---------|
-//! | Authentication | Personal access token (classic & fine-grained) |
-//! | Pagination | Automatic via `Link` response header (including the `{"total_count", "<list>"}` wrappers of workflows, runs and environments) |
+//! | Authentication | Personal access token (classic & fine-grained); a GitHub App (JWT signed with `aws-lc-rs`, installation tokens renewed five minutes before they expire, single-flight); the OAuth device flow ([`oauth`]) on github.com or GHES |
+//! | API version | `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2022-11-28` on every request; `Deprecation` / `Sunset` headers are logged once per endpoint |
+//! | Pagination | Automatic via `Link` response header (including the `{"total_count", "<list>"}` wrappers of workflows, runs and environments); a next link to another origin or to a page already fetched is an error |
 //! | Lossless lists | Lists are decoded element by element into a [`Page`](github_backup_types::Page): the original JSON of every element is kept, and an element that does not fit its model is isolated and logged instead of failing the list |
-//! | Rate limiting | A 403/429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message is waited out (at least a minute and doubling when GitHub gives no hint; at most about an hour per request) and ends as [`ClientError::RateLimitExceeded`], never as a plain 403 |
-//! | Retries | GETs: up to 3 retries on 500/502/503/504, connection failures, timeouts and stalled bodies, with exponential back-off + jitter; 4xx fail fast |
-//! | Body cap | 16 MiB cap on API responses to protect against runaway streams |
+//! | Redirects | Up to 3 within the origin, with the credential (renamed or transferred repositories); non-GET requests follow only 307/308 |
+//! | Rate limiting | A 403/429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message is waited out (at least a minute and doubling when GitHub gives no hint; one wait at most about an hour, all waits of a request about two), pausing every clone of the client, and ends as [`ClientError::RateLimitExceeded`], never as a plain 403 |
+//! | Retries | GETs (and GraphQL queries): up to 3 retries on 500/502/503/504, connection failures, timeouts and stalled bodies, with exponential back-off + jitter; 4xx fail fast |
+//! | Body cap | 16 MiB cap on API responses ([`ClientError::BodyTooLarge`]) to protect against runaway streams |
+//! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports; Discussions are read through it, every connection followed with cursors |
 //! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
+//! | Attachments | Files attached to issues, comments and release notes, streamed like release assets; the credential (HTTP Basic) goes to `https://github.com` only, and only from a github.com client |
 //! | TLS | rustls with platform CA bundle |
-//! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] is shared with the webhook notifier |
+//! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] and [`ProxyConnector`] are shared with the webhook notifier, the device flow, the mirror destinations' APIs and the S3 client |
 //!
 //! # Example
 //!
@@ -45,6 +49,7 @@
 #![warn(missing_debug_implementations)]
 
 mod api_client;
+mod app_auth;
 mod client;
 mod decode;
 mod error;
@@ -52,10 +57,16 @@ pub mod oauth;
 mod pagination;
 pub mod proxy;
 mod rate_limit;
+mod token;
 
-pub use api_client::{AssetSink, BackupClient, BoxFuture};
-pub use client::GitHubClient;
+pub use api_client::{AssetSink, AttachmentDownload, BackupClient, BoxFuture, NodePage};
+pub use client::{AccountKind, GitHubClient, Installation};
 pub use error::ClientError;
 pub use pagination::parse_next_link;
-pub use proxy::{ProxyClient, ProxySettings};
+pub use proxy::{native_tls_config, ProxyClient, ProxyConnector, ProxySettings};
 pub use rate_limit::RateLimitInfo;
+pub use token::{GitToken, TokenSource};
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use app_auth::test_keys;

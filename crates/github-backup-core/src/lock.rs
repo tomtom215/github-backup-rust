@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! [`BackupLock`] holds an OS-level exclusive lock (`flock` on Unix,
-//! `LockFileEx` on Windows, via `fslock`) on `<owner-json-dir>/.backup.lock`.
+//! `LockFileEx` on Windows, via the standard library's `File::try_lock`) on `<owner-json-dir>/.backup.lock`.
 //! The kernel releases such a lock the moment the holding process dies — however
 //! it dies (`SIGKILL`, OOM kill, power loss, container stop) — so there is **no
 //! stale-lock state to detect and nothing to clean up by hand**.  An earlier
@@ -19,10 +19,9 @@
 //! race with a process that has just opened it.  It records the PID of the last
 //! holder purely so the "already running" message can name it.
 
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 
-use fslock::LockFile;
 use tracing::debug;
 
 /// RAII guard that holds the lock for its lifetime.
@@ -32,7 +31,7 @@ use tracing::debug;
 #[derive(Debug)]
 pub struct BackupLock {
     path: PathBuf,
-    _file: LockFile,
+    _file: std::fs::File,
 }
 
 /// Errors that can occur when acquiring a backup lock.
@@ -75,18 +74,21 @@ impl BackupLock {
         std::fs::create_dir_all(json_dir).map_err(LockError::DirCreate)?;
 
         let path = json_dir.join(".backup.lock");
-        let mut file = LockFile::open(&path).map_err(LockError::Write)?;
-        let acquired = file.try_lock().map_err(LockError::Write)?;
-        if !acquired {
-            let pid = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok());
-            return Err(LockError::AlreadyRunning { pid });
+        let file = open_lock_file(&path).map_err(LockError::Write)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                return Err(LockError::AlreadyRunning { pid });
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(LockError::Write(e)),
         }
 
         // Informational: who holds it now.
         let pid = std::process::id();
-        if let Err(e) = write_pid(&path, pid) {
+        if let Err(e) = write_pid(&file, pid) {
             debug!(path = %path.display(), error = %e, "could not record the PID in the lock file");
         }
         debug!(path = %path.display(), pid, "backup lock acquired");
@@ -100,13 +102,46 @@ impl BackupLock {
     }
 }
 
-/// Overwrites the lock file's content with `pid`.
-fn write_pid(path: &Path, pid: u32) -> std::io::Result<()> {
-    let mut f = std::fs::OpenOptions::new()
+impl Drop for BackupLock {
+    fn drop(&mut self) {
+        release(&self._file);
+    }
+}
+
+/// Releases the OS lock held on `file` before the handle is closed.
+///
+/// Closing alone is not enough: a `fork` on another thread (any child process
+/// this program starts) duplicates every descriptor until the child `exec`s,
+/// and a `flock` lock lives as long as any duplicate does.  An explicit unlock
+/// releases it at once regardless.
+pub fn release(file: &std::fs::File) {
+    if let Err(e) = file.unlock() {
+        debug!(error = %e, "could not release the lock explicitly; it is released when the file is closed");
+    }
+}
+
+/// Opens (creating if needed) the file an OS lock is taken on.
+///
+/// The file is never truncated here: a process that fails to get the lock must
+/// not wipe the holder's PID.
+pub fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .truncate(true)
-        .open(path)?;
-    f.write_all(pid.to_string().as_bytes())
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
+/// Overwrites the content of the locked `file` with `pid`.
+///
+/// It is written through the handle that holds the lock: on Windows the lock
+/// is mandatory, so a second handle (even of this process) may neither read
+/// nor write the file while it is held.
+fn write_pid(mut file: &std::fs::File, pid: u32) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.write_all(pid.to_string().as_bytes())
 }
 
 #[cfg(test)]
@@ -118,8 +153,26 @@ mod tests {
     fn acquire_creates_the_lock_file_and_records_the_pid() {
         let dir = tempdir().unwrap();
         let lock = BackupLock::acquire(dir.path()).expect("acquire lock");
-        let recorded = std::fs::read_to_string(lock.path()).unwrap();
+        let path = lock.path().to_path_buf();
+        // Windows refuses to read a file another handle has locked, so the
+        // file is read once the lock is released; the PID stays in it.
+        drop(lock);
+        let recorded = std::fs::read_to_string(path).unwrap();
         assert_eq!(recorded, std::process::id().to_string());
+    }
+
+    /// A shorter PID replaces a longer one completely (no leftover digits).
+    #[test]
+    fn a_new_holder_overwrites_the_whole_pid() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".backup.lock"), "9999999999").unwrap();
+        let lock = BackupLock::acquire(dir.path()).expect("acquire lock");
+        let path = lock.path().to_path_buf();
+        drop(lock);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     #[test]
@@ -128,7 +181,14 @@ mod tests {
         let _lock = BackupLock::acquire(dir.path()).expect("first acquire");
         match BackupLock::acquire(dir.path()) {
             Err(LockError::AlreadyRunning { pid }) => {
-                assert_eq!(pid, Some(std::process::id()));
+                // On Windows the holder's lock also stops others from reading
+                // the file, so the PID cannot be named there.
+                let expected = if cfg!(windows) {
+                    None
+                } else {
+                    Some(std::process::id())
+                };
+                assert_eq!(pid, expected);
             }
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }

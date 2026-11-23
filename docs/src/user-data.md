@@ -53,6 +53,13 @@ repository at a time.  Two situations:
   (`git fetch`) and retries what failed.  A large starred list therefore costs a
   full pass on every run.
 
+Items are matched by GitHub's repository id, so a starred repository that is
+renamed or transferred keeps its queue entry and is cloned under its new
+`<owner>/<repo>` name (the copy under the old name stays).  A name that is not a
+safe `<owner>/<repo>` pair of directory names is recorded as a failure and not
+cloned.  A queue file that cannot be read is replaced by a new one with a
+warning; that costs one full pass.
+
 ```bash
 # First run: clones whatever it can, writes progress to the queue
 github-backup octocat --output /backup --clone-starred
@@ -89,9 +96,9 @@ INFO starred repo cloned repo="rust-lang/rust" done=42 pending=1505 failed=0 tot
 
 ### Clone Type
 
-The clone mode follows the same `--clone-type` flag as owned repos (default:
-`mirror`; `--lfs` is not applied to starred repositories).  Use `--prefer-ssh`
-to clone via SSH instead of HTTPS.
+The clone mode follows the same `--clone-type` and `--lfs` flags as owned repos
+(default: `mirror`), and `--clone-host` applies too.  Use `--prefer-ssh` to
+clone via SSH instead of HTTPS.
 
 ### Not included in `--all`
 
@@ -203,3 +210,10 @@ When using `--org`, all flags are available but some apply only to organisation 
 | `--following` | User's following | Org's following |
 | `--org-members` | *Silently skipped* | Organisation member list |
 | `--org-teams` | *Silently skipped* | Organisation team list |
+| `--packages` | `/users/<user>/packages` (`/user/packages`, with private ones, when the token is the user's) | `/orgs/<org>/packages` |
+| `--projects` | `/users/<user>/projectsV2` | `/orgs/<org>/projectsV2` |
+
+Each of these lists is fetched on its own: one that fails is recorded as a
+failure and the others are still written.  They are snapshots of the current
+state, replaced on every run, except packages and projects, which accumulate
+(see [Output Directory Layout](configuration/output-layout.md#snapshots-and-accumulating-history)).

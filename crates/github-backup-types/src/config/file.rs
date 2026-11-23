@@ -32,8 +32,9 @@ use super::CloneType;
 /// Storing tokens in config files is convenient but less secure than providing
 /// them via the `GITHUB_TOKEN` environment variable.  Prefer environment
 /// variables in automated environments; restrict config file permissions to
-/// `0600` when a token must be stored.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `0600` when a token must be stored.  The `Debug` output shows `token`,
+/// `mirror_token` and `s3_secret_key` as `<redacted>`.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// GitHub username or organisation name to back up.
@@ -43,6 +44,18 @@ pub struct ConfigFile {
     ///
     /// Prefer the `GITHUB_TOKEN` environment variable over storing tokens here.
     pub token: Option<String>,
+
+    /// GitHub App to authenticate as, instead of a token: its client ID
+    /// (recommended) or numeric App ID.  Needs `app_key_path` (or the
+    /// `GITHUB_APP_PRIVATE_KEY` environment variable).
+    pub app_id: Option<String>,
+
+    /// Path of the GitHub App's private key (the `.pem` file GitHub issued).
+    pub app_key_path: Option<PathBuf>,
+
+    /// The GitHub App installation to act as.  Without it the installation is
+    /// looked up from `owner` (organisation first, then user).
+    pub app_installation_id: Option<u64>,
 
     /// Override the GitHub API base URL for GitHub Enterprise Server.
     ///
@@ -131,20 +144,37 @@ pub struct ConfigFile {
     pub action_runs: Option<bool>,
     /// Back up repository deployment environment configurations.
     pub environments: Option<bool>,
-    /// Back up GitHub Discussions threads and comments.
+    /// Back up GitHub Discussions (with comments, replies and categories).
     pub discussions: Option<bool>,
-    /// Back up Classic Projects (v1) and their columns.
+    /// Back up the owner's Projects (v2), their fields and items.
     pub projects: Option<bool>,
-    /// Back up GitHub Packages metadata for the target user.
+    /// Back up the comments on commits of each repository.
+    pub commit_comments: Option<bool>,
+    /// Download the files attached to issues, pull requests, comments and
+    /// release notes.
+    pub attachments: Option<bool>,
+    /// Back up GitHub Packages metadata for the target user or organisation.
     pub packages: Option<bool>,
 
-    /// Only back up repositories matching these glob patterns (comma-separated
-    /// or as a TOML array).
+    /// Categories to leave out of the backup (names as for `--skip`, e.g.
+    /// `["hooks", "packages"]`).
+    pub skip: Option<Vec<String>>,
+
+    /// Only back up repositories whose name (not `owner/name`) matches one of
+    /// these glob patterns.  A TOML array of strings, e.g.
+    /// `include_repos = ["rust-*", "docs"]`.
     pub include_repos: Option<Vec<String>>,
-    /// Exclude repositories matching these glob patterns.
+    /// Exclude repositories whose name matches one of these glob patterns (a
+    /// TOML array of strings).
     pub exclude_repos: Option<Vec<String>>,
 
-    /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
+    /// Expert override, like `--since`: treat items last updated before this
+    /// date (`2026-01-01`) or ISO 8601 timestamp as already backed up, for
+    /// every repository, instead of the per-repository watermarks.  Issue and
+    /// pull request lists are asked only for items updated since then and
+    /// merged into the stored lists (in full when a stored list is missing);
+    /// the comments, events, commits and reviews of items not changed since
+    /// then (whose files exist) are not fetched again.  Never stored.
     pub since: Option<String>,
 
     /// Override the hostname used in git clone URLs.
@@ -172,6 +202,12 @@ pub struct ConfigFile {
     /// accepted so that existing configuration files keep loading.
     pub no_prune: Option<bool>,
 
+    /// Check every repository with `git fsck` after each clone and update.
+    pub verify_git: Option<bool>,
+
+    /// Seconds a git command may go without output before it is stopped.
+    pub git_timeout: Option<u64>,
+
     // ── Report ────────────────────────────────────────────────────────────
     /// Write a JSON summary report to this file after the backup completes.
     pub report: Option<PathBuf>,
@@ -189,6 +225,9 @@ pub struct ConfigFile {
 
     /// Owner name at the mirror destination (username or org).
     pub mirror_owner: Option<String>,
+
+    /// Mirror destination type (default: `gitea`).
+    pub mirror_type: Option<MirrorType>,
 
     /// Create every repository as private at the mirror destination (this is
     /// the default; the key exists to say so explicitly).
@@ -227,6 +266,52 @@ pub struct ConfigFile {
     pub s3_include_assets: Option<bool>,
 }
 
+/// Kind of server a push mirror goes to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MirrorType {
+    /// Gitea, Forgejo or Codeberg (Gitea REST API v1).
+    #[default]
+    Gitea,
+    /// GitLab.com or self-hosted GitLab (REST API v4).
+    Gitlab,
+}
+
+impl std::str::FromStr for MirrorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "gitea" => Ok(Self::Gitea),
+            "gitlab" => Ok(Self::Gitlab),
+            other => Err(format!(
+                "unknown mirror type '{other}' (expected 'gitea' or 'gitlab')"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Debug for ConfigFile {
+    /// Every key, with the values of the three secret keys replaced by
+    /// `<redacted>`: a configuration logged while debugging must not leak them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut shown = self.clone();
+        for secret in [
+            &mut shown.token,
+            &mut shown.mirror_token,
+            &mut shown.s3_secret_key,
+        ] {
+            if secret.is_some() {
+                *secret = Some("<redacted>".to_string());
+            }
+        }
+        match serde_json::to_value(&shown) {
+            Ok(value) => write!(f, "ConfigFile {value}"),
+            Err(_) => f.write_str("ConfigFile { .. }"),
+        }
+    }
+}
+
 impl ConfigFile {
     /// Parses a [`ConfigFile`] from a TOML string.
     ///
@@ -249,5 +334,24 @@ impl ConfigFile {
             .map_err(|e| format!("cannot read config file '{}': {e}", path.display()))?;
         Self::from_toml_str(&content)
             .map_err(|e| format!("invalid config file '{}': {e}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_app_keys_parse() {
+        let cfg = ConfigFile::from_toml_str(
+            "app_id = \"Iv23liExample\"\napp_key_path = \"/run/secrets/app.pem\"\napp_installation_id = 42\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.app_id.as_deref(), Some("Iv23liExample"));
+        assert_eq!(
+            cfg.app_key_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/app.pem"))
+        );
+        assert_eq!(cfg.app_installation_id, Some(42));
     }
 }

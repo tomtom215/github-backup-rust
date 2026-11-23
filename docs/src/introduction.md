@@ -26,7 +26,7 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 | User and organisation data | Starred, watched, followers, following, organisation members and teams; optional clone of every starred repository |
 | Private data | A user's own private repositories and secret gists are included when the token belongs to that user |
 | Filters | `--include-repos` / `--exclude-repos` glob patterns on repository names |
-| Incremental runs | A watermark per repository; lists are always fetched in full and merged, so a run never loses data; `--full` forces a complete refresh |
+| Incremental runs | A watermark per repository; issue and pull request lists are asked only for changes and merged, so a run never loses data; unchanged repositories are not fetched again; `--full` forces a complete refresh |
 | Honest outcome | Failures never stop the rest of the run; exit status `3` means "finished but incomplete"; report, metrics, webhook and history agree |
 | S3 sync | The JSON metadata (not the clones) to AWS S3, Backblaze B2, MinIO, Cloudflare R2, Spaces or Wasabi, with content-digest skipping |
 | At-rest encryption | AES-256-GCM of the S3 uploads (`--encrypt-key`) |
@@ -42,15 +42,15 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 
 ## What It Does Not Back Up
 
-- **Discussions and Projects**: GitHub's REST API has no endpoints for them
-  (`--discussions` and `--projects` are accepted but do nothing).
-- Actions secrets and variables, code-scanning and Dependabot alerts, rulesets,
-  issue attachments, commit comments and statuses.
+- Actions secrets and variables, code-scanning and Dependabot alerts, and commit
+  statuses.  Issue attachments only with `--attachments` (part of `--all`).
 - **Git LFS objects** unless you pass `--lfs` (requires `git-lfs`).
 - Repository **clones are not uploaded to S3**, only the JSON metadata.
 - It cannot see what the token cannot see: other users' private data, or
-  categories the token lacks permission for (a 403/404 is skipped with an `INFO`
-  line and is not counted as a failure).
+  categories the token lacks permission for.  A category that does not exist
+  for a repository (404/410) is skipped; one GitHub refuses (403) is a failure
+  when you asked for it by flag, and a single warning under `--all` or the
+  default selection.
 - Pull requests, comments and reactions cannot be restored; `--restore` handles
   labels, milestones and issues only.
 
