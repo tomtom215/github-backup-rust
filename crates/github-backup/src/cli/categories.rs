@@ -54,6 +54,7 @@ const CATEGORIES: &[(&str, Switch)] = &[
     ("projects", |o| &mut o.projects),
     ("packages", |o| &mut o.packages),
     ("commit-comments", |o| &mut o.commit_comments),
+    ("attachments", |o| &mut o.attachments),
 ];
 
 /// Names that modify the selection instead of making one: `forks` and

@@ -1187,8 +1187,9 @@ fn form_round_trips_through_backup_options() {
         since: Some("2024-01-01T00:00:00Z".into()),
         dry_run: true,
         concurrency: 9,
-        // The form has no control for these two yet (a TUI follow-up).
+        // The form has no control for these yet (a TUI follow-up).
         commit_comments: false,
+        attachments: false,
         tolerate_forbidden: false,
         ..BackupOptions::all()
     };

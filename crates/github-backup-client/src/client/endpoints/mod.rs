@@ -17,10 +17,12 @@
 //! | [`actions`]     | workflows, workflow runs, deployment environments        |
 //! | [`community`]   | Projects (v2) and Packages                               |
 //! | [`mod@assets`]  | release asset downloads                                  |
+//! | [`mod@attachments`] | files attached to issues, comments and release notes |
 //! | [`mod@write`]   | label and milestone creation (used by restore mode)      |
 
 mod actions;
 mod assets;
+mod attachments;
 mod community;
 mod issues;
 mod keys;

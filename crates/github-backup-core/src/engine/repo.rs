@@ -32,12 +32,12 @@ use github_backup_types::{Raw, Repository};
 use super::steps::{RunControl, Steps};
 use crate::{
     backup::{
-        actions::backup_actions, branches::backup_branches, collaborators::backup_collaborators,
-        commit_comments::backup_commit_comments, deploy_keys::backup_deploy_keys,
-        environments::backup_environments, hooks::backup_hooks, is_forbidden, is_gone,
-        issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
-        pull_request::backup_pull_requests, refused, release::backup_releases,
-        repository::backup_repository, repository::should_include,
+        actions::backup_actions, attachments::backup_attachments, branches::backup_branches,
+        collaborators::backup_collaborators, commit_comments::backup_commit_comments,
+        deploy_keys::backup_deploy_keys, environments::backup_environments, hooks::backup_hooks,
+        is_forbidden, is_gone, issue::backup_issues, labels::backup_labels,
+        milestones::backup_milestones, pull_request::backup_pull_requests, refused,
+        release::backup_releases, repository::backup_repository, repository::should_include,
         security_advisories::backup_security_advisories, topics::backup_topics, wiki::backup_wiki,
         Outcome,
     },
@@ -322,6 +322,18 @@ where
         "commit comments",
         READ,
         backup_commit_comments(client, owner, name, opts, &meta_dir, storage),
+    )
+    .await;
+    // Last: it reads the bodies the categories above stored.
+    category(
+        ctx,
+        &mut steps,
+        &listed.full_name,
+        "attachments",
+        "a classic token for private repositories",
+        backup_attachments(client, opts, &meta_dir, storage, &|| {
+            ctx.refusals.first("attachments")
+        }),
     )
     .await;
 

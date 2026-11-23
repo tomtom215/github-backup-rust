@@ -356,8 +356,10 @@ impl ConfigState {
 
         let opts = BackupOptions {
             target,
-            // No form control yet: commit comments off, refusals are failures.
+            // No form control yet: commit comments and attachments off,
+            // refusals are failures.
             commit_comments: false,
+            attachments: false,
             tolerate_forbidden: false,
             full: *full,
             repositories: *repositories,
@@ -427,6 +429,7 @@ impl ConfigState {
             target,
             // No form control yet; the TUI leaves these at their defaults.
             commit_comments: _,
+            attachments: _,
             tolerate_forbidden: _,
             full,
             repositories,

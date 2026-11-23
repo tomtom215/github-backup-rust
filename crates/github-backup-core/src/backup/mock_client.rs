@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use github_backup_client::{AssetSink, BackupClient, BoxFuture, ClientError};
+use github_backup_client::{AssetSink, AttachmentDownload, BackupClient, BoxFuture, ClientError};
 use github_backup_types::{
     Branch, Collaborator, CommitComment, DeployKey, Environment, Gist, GistComment, Hook, Issue,
     IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion, Page, ProjectV2,
@@ -49,6 +49,8 @@ struct MockData {
     following: Vec<User>,
     starred: Vec<Repository>,
     asset_bytes: Vec<u8>,
+    /// Attachment URL → content and media type.  An URL not listed answers 404.
+    attachments: HashMap<String, (Vec<u8>, Option<String>)>,
     branches: Vec<Branch>,
     /// Maps branch name → protection rules.  Returns 404 when not found.
     branch_protections: HashMap<String, Value>,
@@ -238,6 +240,15 @@ impl MockBackupClient {
     }
 
     /// Pre-loads labels.
+    /// Serves `bytes` with media type `content_type` for the attachment `url`.
+    pub fn with_attachment(self, url: &str, bytes: &[u8], content_type: Option<&str>) -> Self {
+        self.inner.lock().unwrap().attachments.insert(
+            url.to_string(),
+            (bytes.to_vec(), content_type.map(str::to_string)),
+        );
+        self
+    }
+
     pub fn with_labels(self, labels: Vec<Label>) -> Self {
         self.inner.lock().unwrap().labels = labels;
         self
@@ -582,6 +593,29 @@ impl BackupClient for MockBackupClient {
                 sink.write_chunk(chunk)?;
             }
             Ok(d.len() as u64)
+        })
+    }
+
+    fn download_attachment<'a>(
+        &'a self,
+        url: &'a str,
+        sink: &'a mut dyn AssetSink,
+    ) -> Fut<'a, AttachmentDownload> {
+        let called = self.call("attachment", url);
+        let served = self.inner.lock().unwrap().attachments.get(url).cloned();
+        Box::pin(async move {
+            called?;
+            let (bytes, content_type) = served.ok_or_else(|| ClientError::ApiError {
+                status: 404,
+                body: format!("mock 404 for {url}"),
+            })?;
+            for chunk in bytes.chunks(4) {
+                sink.write_chunk(chunk)?;
+            }
+            Ok(AttachmentDownload {
+                bytes: bytes.len() as u64,
+                content_type,
+            })
         })
     }
 

@@ -331,8 +331,8 @@ pub struct Args {
     /// GitHub Actions & environments:
     ///   `--actions` `--environments`
     ///
-    /// Projects, packages and commit comments:
-    ///   `--projects` `--packages` `--commit-comments`
+    /// Projects, packages, commit comments and attachments:
+    ///   `--projects` `--packages` `--commit-comments` `--attachments`
     ///
     /// **Not included**:
     ///   `--action-runs`  — full workflow run history (can be very large)
@@ -351,7 +351,7 @@ pub struct Args {
         "gists", "starred_gists", "topics", "branches",
         "deploy_keys", "collaborators", "org_members", "org_teams",
         "actions", "environments", "discussions", "projects", "packages",
-        "commit_comments",
+        "commit_comments", "attachments",
     ])]
     pub all: bool,
 
@@ -625,6 +625,16 @@ pub struct Args {
     /// (`commit_comments.json`).
     #[arg(help_heading = "What to back up", long)]
     pub commit_comments: bool,
+
+    // ── Attachments ────────────────────────────────────────────────────────
+    /// Download the files and images attached to issues, pull requests,
+    /// comments, reviews and release notes, under `attachments/` in each
+    /// repository's metadata directory.
+    ///
+    /// Private repositories' attachments need a classic token: GitHub is
+    /// reported to refuse fine-grained and GitHub App tokens.
+    #[arg(help_heading = "What to back up", long)]
+    pub attachments: bool,
 
     // ── GitHub Packages ────────────────────────────────────────────────────
     /// Back up GitHub Packages metadata for the target user.

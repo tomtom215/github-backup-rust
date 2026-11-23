@@ -673,6 +673,7 @@ proptest! {
             discussions: false,
             projects: false,
             commit_comments,
+            attachments: false,
             tolerate_forbidden,
             packages: false,
             include_repos: vec![],

@@ -187,6 +187,13 @@ pub struct BackupOptions {
     /// (`commit_comments.json`).
     pub commit_comments: bool,
 
+    // ── Attachments ───────────────────────────────────────────────────────
+    /// Download the files and images attached to issues, pull requests,
+    /// their comments and reviews, commit comments and release notes, found
+    /// in the stored bodies (`attachments/` in each repository's metadata
+    /// directory).
+    pub attachments: bool,
+
     // ── GitHub Packages ───────────────────────────────────────────────────
     /// Backup GitHub Packages metadata for the target user or organisation.
     ///
@@ -352,6 +359,7 @@ impl BackupOptions {
             discussions: false,
             projects: true,
             commit_comments: true,
+            attachments: true,
             packages: true,
             include_repos: vec![],
             exclude_repos: vec![],

@@ -19,6 +19,7 @@
 //! ([`CoreError::is_fatal`]) are returned at once.
 
 pub mod actions;
+pub mod attachments;
 pub mod branches;
 pub mod collaborators;
 pub mod commit_comments;

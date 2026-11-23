@@ -195,6 +195,21 @@ struct Call<'a> {
     leave_origin: bool,
     /// A GraphQL request: a `200` can still be a rate limit.
     graphql: bool,
+    /// What the call's origin is sent besides `call.headers`.
+    origin: OriginHeaders,
+}
+
+/// The headers a [`Call`] sends to its own origin (never to another one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginHeaders {
+    /// An API request: the credential as a bearer token, the API media type
+    /// and version.
+    Api,
+    /// A request to GitHub's web host (an attachment): only the credential,
+    /// as HTTP Basic authentication `<token>:x-oauth-basic`.
+    WebBasic,
+    /// Nothing: the host is not GitHub's API or web host.
+    None,
 }
 
 impl<'a> Call<'a> {
@@ -207,6 +222,7 @@ impl<'a> Call<'a> {
             idempotent: true,
             leave_origin: false,
             graphql: false,
+            origin: OriginHeaders::Api,
         }
     }
 }
@@ -714,8 +730,9 @@ impl GitHubClient {
     /// Builds the request for one hop of `call` to `url`.
     ///
     /// The credential, `Accept: application/vnd.github+json` and the API
-    /// version go only to the origin of the call; the headers of the call are
-    /// sent on every hop and replace the defaults of the same name.  The
+    /// version go only to the origin of the call, as `call.origin` says; the
+    /// headers of the call are sent on every hop and replace the defaults of
+    /// the same name.  The
     /// `Authorization` header is omitted for [`Credential::Anonymous`] so that
     /// GitHub's unauthenticated rate-limit bucket applies.
     fn request(
@@ -730,18 +747,28 @@ impl GitHubClient {
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::new(call.body.clone()))?;
         let headers = req.headers_mut();
-        if same_origin {
-            headers.insert(header::ACCEPT, HeaderValue::from_static(ACCEPT_GITHUB_JSON));
-            headers.insert(
-                HeaderName::from_static(API_VERSION_HEADER),
-                HeaderValue::from_static(API_VERSION),
-            );
-            if let Some(auth) = self.credential.authorization_header() {
-                let mut value =
-                    HeaderValue::from_str(&auth).map_err(|e| ClientError::Http(e.into()))?;
-                value.set_sensitive(true);
-                headers.insert(header::AUTHORIZATION, value);
+        let auth = match (same_origin, call.origin) {
+            (false, _) | (true, OriginHeaders::None) => None,
+            (true, OriginHeaders::Api) => {
+                headers.insert(header::ACCEPT, HeaderValue::from_static(ACCEPT_GITHUB_JSON));
+                headers.insert(
+                    HeaderName::from_static(API_VERSION_HEADER),
+                    HeaderValue::from_static(API_VERSION),
+                );
+                self.credential.authorization_header()
             }
+            (true, OriginHeaders::WebBasic) => self.credential.token().map(|token| {
+                use base64::Engine as _;
+                let pair = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{token}:x-oauth-basic"));
+                format!("Basic {pair}")
+            }),
+        };
+        if let Some(auth) = auth {
+            let mut value =
+                HeaderValue::from_str(&auth).map_err(|e| ClientError::Http(e.into()))?;
+            value.set_sensitive(true);
+            headers.insert(header::AUTHORIZATION, value);
         }
         for (name, value) in call.headers {
             headers.insert(

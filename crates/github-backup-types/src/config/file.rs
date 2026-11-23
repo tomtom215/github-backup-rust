@@ -139,6 +139,9 @@ pub struct ConfigFile {
     pub projects: Option<bool>,
     /// Back up the comments on commits of each repository.
     pub commit_comments: Option<bool>,
+    /// Download the files attached to issues, pull requests, comments and
+    /// release notes.
+    pub attachments: Option<bool>,
     /// Back up GitHub Packages metadata for the target user or organisation.
     pub packages: Option<bool>,
 
