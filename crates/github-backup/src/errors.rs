@@ -70,9 +70,11 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
         || r.contains("requires authentication")
     {
         return Some(
-            "Authentication rejected.  Verify GITHUB_TOKEN is set to a current, \
-             unrevoked token at https://github.com/settings/tokens.  Run \
-             `github-backup --doctor` to confirm the token is reachable.",
+            "Authentication rejected.  Check that the token (GITHUB_TOKEN, GH_TOKEN, \
+             --token or the config file) is current and not revoked \
+             (https://github.com/settings/tokens), or, for a GitHub App, that \
+             the App is still installed and its key is current.  Run \
+             `github-backup --doctor` to check the credential.",
         );
     }
 
