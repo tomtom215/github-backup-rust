@@ -22,10 +22,14 @@ properties, GitHub's key order), not a summary: see
 
 | Type | First clone | Later runs | Use case |
 |------|-------------|-----------|----------|
-| `mirror` (default) | `git clone --mirror` | `git fetch --all --prune` | Complete backup: every branch and tag, `refs/pull/*`, full history |
-| `bare` | `git clone --bare` | `git fetch --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'` | Branches and tags only, no pull-request refs; slightly smaller |
-| `full` | `git clone --no-local` into `repos/<repo>/` | `git fetch --all --prune` | A working tree you can browse or build; not pushed by `--mirror-to` |
-| `shallow:<n>` | `git clone --mirror --depth <n>` | `git fetch --depth <n>` | Limited history to save disk space; not an archive |
+| `mirror` (default) | `git clone --mirror` | `git fetch --all` | Complete backup: every branch and tag, `refs/pull/*`, full history |
+| `bare` | `git clone --bare` | `git fetch origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'` | Branches and tags only, no pull-request refs; slightly smaller |
+| `full` | `git clone --no-local` into `repos/<repo>/` | `git fetch --update-head-ok origin` into local branches, `origin/*` and tags, then `git reset --hard` | A working tree you can browse or build; not pushed by `--mirror-to` |
+| `shallow:<n>` | `git clone --mirror --no-single-branch --depth <n>` | `git fetch --depth <n>` | Limited history to save disk space; not an archive |
+
+Every update also passes the pruning choice explicitly (`--prune`, or
+`--no-prune --no-prune-tags`), so a `fetch.prune` or `fetch.pruneTags` setting
+in your own git configuration never deletes refs the backup keeps.
 
 How the clone types behave in detail:
 
@@ -37,10 +41,15 @@ How the clone types behave in detail:
   renamed into place only when it is complete, so an interrupted clone leaves
   nothing under the real name (the staging directory is removed on the next
   run).
-* A **shallow** clone contains only the repository's default branch (and the
-  tags that point into it) at first, because git's `--depth` implies a single
-  branch for the initial clone; the next update fetches every branch at the
-  requested depth.
+* A **shallow** clone holds every branch and tag, each cut at `<n>` commits.
+  Updates fetch what is new and keep the history cut at `<n>`; they do not
+  deepen it.
+* A **full** clone is the tool's own copy: each update sets every local
+  branch, every `origin/*` branch and every tag to where it is on GitHub and
+  resets the working tree (`git reset --hard`) to the checked-out branch, so
+  local edits in it are discarded.  The checkout stays on the branch it was
+  cloned with (the default branch at the time); if that branch is deleted on
+  GitHub and `--prune` removes it, the working tree is left as it was.
 * `--lfs` adds `git lfs fetch --all origin` after the mirror update (the clone
   itself is always a mirror: `--lfs` overrides `--clone-type`).  It needs
   `git-lfs` on the `PATH`; without `--lfs` the clone holds LFS pointer files

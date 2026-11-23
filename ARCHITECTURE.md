@@ -104,8 +104,11 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   renamed; release assets are streamed to `.<file>.part` and renamed after the
   size and digest checks.
 - **Git** (`git/`): clones are made into a hidden staging directory and renamed
-  into place; updates use `fetch` (mirror: `--all --prune`; bare: explicit
-  refspecs; shallow: `--depth`; `--lfs`: mirror update plus `git lfs fetch --all`).
+  into place; updates use `fetch` with an explicit pruning choice (`--prune`
+  only with `--prune`, otherwise `--no-prune --no-prune-tags`) (mirror: `--all`;
+  bare: explicit refspecs; full: refspecs into local branches, `origin/*` and
+  tags, then `reset --hard`; shallow: `--depth`; `--lfs`: mirror update plus
+  `git lfs fetch --all`).
   Each `git` runs in its own process group with a **stall** timeout (600 s without
   output), is killed with its helpers on cancellation, and receives the token only
   through an environment variable and a host-scoped credential helper (`credential.rs`).

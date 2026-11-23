@@ -127,6 +127,11 @@ impl Default for CloneOptions {
 /// - If `dest` already exists, update it in-place.
 /// - If `dest` does not exist, perform a fresh clone.
 ///
+/// Updates prune refs deleted upstream only when `opts.prune` is set; the
+/// choice is always passed to git explicitly (`--prune`, or `--no-prune
+/// --no-prune-tags`), so pruning settings in the user's git configuration do
+/// not apply.
+///
 /// For HTTPS URLs, `opts.token` is passed through the git child's environment
 /// and a credential helper scoped to the URL's host (see `credential`).
 ///
@@ -135,8 +140,7 @@ impl Default for CloneOptions {
 pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a bare mirror (`git clone --mirror`).
     ///
-    /// If `dest` already exists, updates it with `git fetch --all` (deleted
-    /// refs are pruned only if `opts.prune` is set).
+    /// If `dest` already exists, updates every ref with `git fetch --all`.
     ///
     /// # Errors
     ///
@@ -151,8 +155,8 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` as a bare clone (`git clone --bare`).
     ///
-    /// Similar to `mirror_clone` but does not configure remote-tracking refs.
-    /// If `dest` already exists, updates refs with `git fetch --all`.
+    /// Holds branches and tags only (no other refs).  If `dest` already
+    /// exists, fetches `refs/heads/*` and `refs/tags/*` into the same names.
     ///
     /// # Errors
     ///
@@ -167,7 +171,10 @@ pub trait GitRunner: Send + Sync {
     /// Clones `url` into `dest` as a full working-tree clone.
     ///
     /// Use when you need to browse or build the backed-up source code.
-    /// If `dest` already exists, updates with `git fetch --all --prune`.
+    /// If `dest` already exists, every local branch, remote-tracking branch
+    /// and tag is set to its upstream position and the working tree is reset
+    /// (`reset --hard`) to the checked-out branch: the clone is the tool's
+    /// own, local edits in it are not kept.
     ///
     /// # Errors
     ///
@@ -181,9 +188,10 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` as a shallow clone with limited history.
     ///
-    /// Creates a bare-style repository with at most `depth` commits per
-    /// branch.  Reduces disk usage significantly but loses older history.
-    /// If `dest` already exists, deepens the clone with `git fetch --depth`.
+    /// Creates a mirror-style repository of every branch and tag with at most
+    /// `depth` commits each.  Reduces disk usage significantly but loses older
+    /// history.  If `dest` already exists, fetches what is new with
+    /// `git fetch --depth <depth>`, which keeps the history cut at `depth`.
     ///
     /// # Errors
     ///
@@ -198,7 +206,8 @@ pub trait GitRunner: Send + Sync {
 
     /// Clones `url` into `dest` using Git LFS.
     ///
-    /// Fetches LFS objects in addition to regular git objects.
+    /// A mirror clone (see [`mirror_clone`](Self::mirror_clone)) followed by
+    /// `git lfs fetch --all`, which adds the LFS objects of every ref.
     ///
     /// # Errors
     ///
@@ -369,7 +378,10 @@ impl Job {
         path_to_str(&self.dest)?;
         if self.dest.exists() {
             info!(dest = %self.dest.display(), "repository exists, updating mirror");
-            self.update(self.fetch_all_args())
+            // `git fetch --all` rather than `git remote update` because it
+            // accepts `--progress`; the mirror refspec (`+refs/*:refs/*`)
+            // updates every ref, force-pushed branches and moved tags included.
+            self.fetch(&["--all"])
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare mirror");
             self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, DEST])
@@ -382,27 +394,34 @@ impl Job {
             info!(dest = %self.dest.display(), "bare repository exists, fetching");
             // `git clone --bare` writes no fetch refspec, so `git fetch --all`
             // would exit 0 having fetched nothing, forever.  Name the refspecs.
-            let mut args = vec!["fetch", "--progress"];
-            if self.opts.prune {
-                args.push("--prune");
-            }
-            args.extend([
+            self.fetch(&[
                 "origin",
                 "+refs/heads/*:refs/heads/*",
                 "+refs/tags/*:refs/tags/*",
-            ]);
-            self.update(&args)
+            ])
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare");
             self.fresh_clone(&["clone", "--progress", "--bare", &self.url, DEST])
         }
     }
 
+    /// A working-tree clone.  Its update brings every local branch, every
+    /// remote-tracking branch and every tag to its upstream position (the
+    /// clone is ours: nobody is expected to commit in it) and then the working
+    /// tree to the checked-out branch.
     fn full_clone(&self) -> Result<(), CoreError> {
         path_to_str(&self.dest)?;
         if self.dest.exists() {
-            info!(dest = %self.dest.display(), "full clone exists, fetching all branches");
-            self.update(self.fetch_all_args())
+            info!(dest = %self.dest.display(), "full clone exists, updating branches, tags and checkout");
+            // `--update-head-ok` lets the fetch move the checked-out branch too.
+            self.fetch(&[
+                "--update-head-ok",
+                "origin",
+                "+refs/heads/*:refs/heads/*",
+                "+refs/heads/*:refs/remotes/origin/*",
+                "+refs/tags/*:refs/tags/*",
+            ])?;
+            self.check_out_head()
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning full working tree");
             self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, DEST])
@@ -413,14 +432,18 @@ impl Job {
         path_to_str(&self.dest)?;
         let depth_str = depth.to_string();
         if self.dest.exists() {
-            info!(dest = %self.dest.display(), depth, "shallow clone exists, deepening fetch");
-            self.update(&["fetch", "--progress", "--depth", &depth_str])
+            // Fetches what is new, keeping the history cut at `depth` commits.
+            info!(dest = %self.dest.display(), depth, "shallow clone exists, fetching");
+            self.fetch(&["--depth", &depth_str])
         } else {
             info!(url = %self.url, dest = %self.dest.display(), depth, "cloning shallow");
             self.fresh_clone(&[
                 "clone",
                 "--progress",
                 "--mirror",
+                // `--depth` implies `--single-branch`, which would leave every
+                // branch but the default one out of the first backup.
+                "--no-single-branch",
                 "--depth",
                 &depth_str,
                 &self.url,
@@ -435,45 +458,65 @@ impl Job {
     fn lfs_clone(&self) -> Result<(), CoreError> {
         self.mirror_clone()?;
         info!(dest = %self.dest.display(), "fetching LFS objects");
-        self.update(&["lfs", "fetch", "--all", "origin"])
+        self.run_update(&["lfs", "fetch", "--all", "origin"])
     }
 
-    /// Arguments that bring an existing clone up to date with its remote.
+    /// Runs `git fetch --progress <prune flags> <rest>` in the existing
+    /// repository.
     ///
-    /// `git fetch --all` is used rather than `git remote update` because it
-    /// accepts `--progress`; on a mirror clone the two yield identical refs
-    /// (including force-pushed branches and deleted tags with `--prune`).
-    fn fetch_all_args(&self) -> &'static [&'static str] {
-        if self.opts.prune {
-            &["fetch", "--progress", "--all", "--prune"]
-        } else {
-            &["fetch", "--progress", "--all"]
-        }
-    }
-
-    /// Runs an update command inside the existing repository.
+    /// The prune flags are always explicit: `--prune` when pruning was asked
+    /// for, `--no-prune --no-prune-tags` otherwise.  Leaving them out would let
+    /// a `fetch.prune`, `remote.<name>.prune` or `fetch.pruneTags` setting in
+    /// the user's or the system's git configuration delete refs that this
+    /// tool promises to keep.
     ///
     /// Not pruning has one failure mode: when a branch that was deleted on the
     /// remote is replaced by one whose name needs its place as a directory
     /// (`foo` deleted, `foo/bar` created), git cannot create the new ref while
     /// the stale one exists.  Such a fetch is repeated once with `--prune`, so
     /// the repository keeps being backed up; it loses only the stale refs.
-    fn update(&self, args: &[&str]) -> Result<(), CoreError> {
-        match self.run_update(args) {
+    fn fetch(&self, rest: &[&str]) -> Result<(), CoreError> {
+        let run = |prune: bool| {
+            let mut args = vec!["fetch", "--progress"];
+            if prune {
+                args.push("--prune");
+            } else {
+                args.extend(["--no-prune", "--no-prune-tags"]);
+            }
+            args.extend_from_slice(rest);
+            self.run_update(&args)
+        };
+        match run(self.opts.prune) {
             Err(CoreError::GitFailed { stderr, .. })
-                if !self.opts.prune
-                    && args.first() == Some(&"fetch")
-                    && is_ref_name_conflict(&stderr) =>
+                if !self.opts.prune && is_ref_name_conflict(&stderr) =>
             {
                 warn!(
                     dest = %self.dest.display(),
                     "a deleted branch blocks a new one of the same path; pruning deleted refs once to continue"
                 );
-                let mut retry = args.to_vec();
-                retry.insert(1, "--prune");
-                self.run_update(&retry)
+                run(true)
             }
             other => other,
+        }
+    }
+
+    /// Brings the working tree of a full clone to the commit its checked-out
+    /// branch now points to.
+    ///
+    /// Nothing is done when that branch does not resolve: the repository is
+    /// empty, or (with pruning) the branch was deleted upstream; the working
+    /// tree is then left as it was.
+    fn check_out_head(&self) -> Result<(), CoreError> {
+        match self.run_update(&["rev-parse", "--verify", "--quiet", "HEAD"]) {
+            Ok(()) => self.run_update(&["reset", "--hard", "--quiet", "HEAD"]),
+            Err(CoreError::GitFailed { .. }) => {
+                info!(
+                    dest = %self.dest.display(),
+                    "the checked-out branch has no commit (empty repository, or deleted upstream); working tree left as it was"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -498,7 +541,8 @@ impl Job {
     /// half-initialised repository that later updates would treat as complete
     /// and "fetch" nothing into forever.
     ///
-    /// `args_for` receives the staging path and returns git's arguments.
+    /// `args` are git's arguments, with [`DEST`] standing for the staging
+    /// directory.
     fn fresh_clone(&self, args: &[&str]) -> Result<(), CoreError> {
         let parent = self.dest.parent().unwrap_or_else(|| Path::new("."));
         let name = self
@@ -945,9 +989,11 @@ exit 128"#,
             .await
             .expect("update");
         let args = std::fs::read_to_string(&seen).expect("args");
-        assert!(args.contains("+refs/heads/*:refs/heads/*"), "{args}");
-        assert!(args.contains("+refs/tags/*:refs/tags/*"), "{args}");
-        assert!(!args.contains("--prune"), "pruning is opt-in: {args}");
+        let words: Vec<&str> = args.split_whitespace().collect();
+        assert!(words.contains(&"+refs/heads/*:refs/heads/*"), "{args}");
+        assert!(words.contains(&"+refs/tags/*:refs/tags/*"), "{args}");
+        assert!(!words.contains(&"--prune"), "pruning is opt-in: {args}");
+        assert!(words.contains(&"--no-prune"), "{args}");
 
         // With pruning requested the same update passes `--prune`.
         let opts = CloneOptions {
@@ -959,7 +1005,9 @@ exit 128"#,
             .await
             .expect("update");
         let args = std::fs::read_to_string(&seen).expect("args");
-        assert!(args.contains("--prune"), "{args}");
+        let words: Vec<&str> = args.split_whitespace().collect();
+        assert!(words.contains(&"--prune"), "{args}");
+        assert!(!words.contains(&"--no-prune"), "{args}");
     }
 
     /// LFS mode is a mirror (so refs advance on every run) plus the LFS objects.
@@ -978,7 +1026,10 @@ exit 128"#,
             .expect("update");
         let calls = std::fs::read_to_string(&seen).expect("calls");
         let lines: Vec<String> = calls.lines().map(subcommand).collect();
-        assert!(lines[0].starts_with("fetch --progress --all"), "{lines:?}");
+        assert_eq!(
+            lines[0], "fetch --progress --no-prune --no-prune-tags --all",
+            "{lines:?}"
+        );
         assert_eq!(lines[1], "lfs fetch --all origin", "{lines:?}");
     }
 
@@ -1033,8 +1084,8 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
         assert_eq!(lines.len(), 2, "{argv}");
         assert!(lines[0].starts_with("clone --progress --mirror "), "{argv}");
         assert_eq!(
-            lines[1], "fetch --progress --all",
-            "pruning is opt-in: {argv}"
+            lines[1], "fetch --progress --no-prune --no-prune-tags --all",
+            "pruning is opt-in, and not pruning is explicit: {argv}"
         );
 
         // `prune` adds `--prune` to the update (and only to the update).
@@ -1048,7 +1099,7 @@ if [ -t 0 ]; then echo stdin=tty; else echo stdin=none; fi; }} > '{}'"#,
             .expect("pruning update");
         let argv = std::fs::read_to_string(&log).expect("argv log");
         let last = argv.lines().map(subcommand).next_back().expect("a call");
-        assert_eq!(last, "fetch --progress --all --prune", "{argv}");
+        assert_eq!(last, "fetch --progress --prune --all", "{argv}");
     }
 }
 
@@ -1425,6 +1476,148 @@ mod prune_tests {
         let now = refs(&dest);
         assert!(now.contains(&"foo/bar".to_owned()), "{now:?}");
         assert!(!now.contains(&"foo".to_owned()), "{now:?}");
+    }
+
+    fn has_ref(repo: &Path, name: &str) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .current_dir(repo)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run git")
+            .success()
+    }
+
+    /// Updates `dest` with every clone type, the way the engine does.
+    async fn update_as(
+        runner: &ProcessGitRunner,
+        kind: &str,
+        url: &str,
+        dest: &Path,
+        opts: &CloneOptions,
+    ) -> Result<(), CoreError> {
+        match kind {
+            "mirror" => runner.mirror_clone(url, dest, opts).await,
+            "bare" => runner.bare_clone(url, dest, opts).await,
+            "full" => runner.full_clone(url, dest, opts).await,
+            "shallow" => runner.shallow_clone(url, dest, opts, 1).await,
+            other => panic!("unknown clone type {other}"),
+        }
+    }
+
+    /// Regression: with pruning off, updates passed no prune flag at all, so a
+    /// `fetch.prune` / `fetch.pruneTags` / `remote.<name>.prune` setting in the
+    /// user's git configuration silently deleted the refs the tool keeps.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_users_prune_settings_cannot_delete_kept_refs() {
+        for kind in ["mirror", "bare", "full", "shallow"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let url = origin_with_branches(dir.path(), &["feature"]);
+            let origin = dir.path().join("origin");
+            git(&origin, &["tag", "v1"]);
+            let dest = dir.path().join("clone");
+            let plain = ProcessGitRunner::new();
+            let opts = CloneOptions::unauthenticated();
+            update_as(&plain, kind, &url, &dest, &opts)
+                .await
+                .expect("clone");
+            assert!(has_ref(&dest, "refs/tags/v1"), "{kind}: tag not cloned");
+            let cloned = if kind == "full" {
+                "refs/remotes/origin/feature"
+            } else {
+                "refs/heads/feature"
+            };
+            assert!(has_ref(&dest, cloned), "{kind}: branch not cloned");
+
+            git(&origin, &["branch", "-D", "feature"]);
+            git(&origin, &["tag", "-d", "v1"]);
+
+            // git as the user has it configured.
+            let config = dir.path().join("gitconfig");
+            std::fs::write(
+                &config,
+                "[fetch]\n\tprune = true\n\tpruneTags = true\n[remote \"origin\"]\n\tprune = true\n\tpruneTags = true\n",
+            )
+            .expect("config");
+            let wrapper = dir.path().join("git-with-user-config");
+            std::fs::write(
+                &wrapper,
+                format!("GIT_CONFIG_GLOBAL='{}' exec git \"$@\"\n", config.display()),
+            )
+            .expect("wrapper");
+            let configured = ProcessGitRunner::with_shell_script(&wrapper);
+            update_as(&configured, kind, &url, &dest, &opts)
+                .await
+                .expect("update");
+
+            let branch = if kind == "full" {
+                "refs/remotes/origin/feature"
+            } else {
+                "refs/heads/feature"
+            };
+            assert!(has_ref(&dest, branch), "{kind}: {branch} was pruned");
+            assert!(has_ref(&dest, "refs/tags/v1"), "{kind}: tag v1 was pruned");
+        }
+    }
+
+    /// Regression: updating a full clone moved only `refs/remotes/origin/*`;
+    /// the working tree, the local branches and moved tags stayed at the state
+    /// of the first clone forever.
+    #[tokio::test]
+    async fn a_full_clone_update_brings_checkout_branches_and_tags_upstream() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = origin_with_branches(dir.path(), &[]);
+        let origin = dir.path().join("origin");
+        std::fs::write(origin.join("file.txt"), "one\n").expect("write");
+        git(&origin, &["add", "file.txt"]);
+        git(&origin, &["commit", "-q", "-m", "one"]);
+        git(&origin, &["tag", "release"]);
+        let dest = dir.path().join("full");
+        let runner = ProcessGitRunner::new();
+        let opts = CloneOptions::unauthenticated();
+        runner.full_clone(&url, &dest, &opts).await.expect("clone");
+
+        std::fs::write(origin.join("file.txt"), "two\n").expect("write");
+        git(&origin, &["commit", "-q", "-am", "two"]);
+        git(&origin, &["tag", "-f", "release"]);
+        git(&origin, &["branch", "topic"]);
+        runner.full_clone(&url, &dest, &opts).await.expect("update");
+
+        let upstream = git(&origin, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("file.txt")).expect("read"),
+            "two\n",
+            "the working tree must follow upstream"
+        );
+        assert_eq!(git(&dest, &["rev-parse", "HEAD"]), upstream);
+        assert_eq!(git(&dest, &["rev-parse", "refs/heads/main"]), upstream);
+        assert_eq!(
+            git(&dest, &["rev-parse", "refs/tags/release^{commit}"]),
+            upstream,
+            "a moved tag must move"
+        );
+        assert!(has_ref(&dest, "refs/heads/topic"), "new branches appear");
+        assert!(
+            git(&dest, &["status", "--porcelain"]).is_empty(),
+            "the checkout must be clean"
+        );
+    }
+
+    /// An empty upstream repository has nothing to check out; updating its
+    /// full clone must not fail.
+    #[tokio::test]
+    async fn a_full_clone_of_an_empty_repository_updates_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let origin = dir.path().join("empty.git");
+        std::fs::create_dir(&origin).expect("mkdir");
+        git(&origin, &["init", "-q", "--bare"]);
+        let url = format!("file://{}", origin.display());
+        let dest = dir.path().join("full");
+        let runner = ProcessGitRunner::new();
+        let opts = CloneOptions::unauthenticated();
+        runner.full_clone(&url, &dest, &opts).await.expect("clone");
+        runner.full_clone(&url, &dest, &opts).await.expect("update");
     }
 
     #[test]
