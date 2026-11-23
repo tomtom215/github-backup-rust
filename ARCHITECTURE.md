@@ -191,20 +191,28 @@ through an event channel and does not embed its own backup logic.  See the
 | `restore.rs` | `--restore` |
 | `report.rs`, `metrics.rs`, `notify.rs` | JSON report, Prometheus textfile, webhook |
 | `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt` |
+| `account.rs` | the default OWNER (the token's account) and user/organisation detection |
+| `schedule.rs` | `--every`: repeat the run at an interval |
 | `shutdown.rs` | signal handling and the exit watchdog |
 | `ui.rs`, `errors.rs`, `setup.rs`, `lock.rs` | banners, error hints and redaction, tracing setup, the output-directory lock |
 
 Flow of a normal run:
 
-1. Parse the arguments and the optional config file (command line wins for
-   single values; switches are OR-ed, lists unioned).
+1. Parse the arguments and the config file (`--config`, or the default
+   `~/.config/github-backup/config.toml` when it exists; command line wins for
+   single values; switches are OR-ed, lists unioned; no category selected means
+   all of them, minus `--skip`).  The token falls back to `GH_TOKEN`, then to
+   `gh auth token`; OWNER falls back to the token's account.
 2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify` and
-   `--restore` are handled and return before a backup.
+   `--restore` are handled and return before a backup (`--doctor` after the same
+   validation a run makes).  Mirror and S3 settings are checked before the run.
 3. Take the output lock, build the client, run `BackupEngine::run`, racing it
    against `SIGINT` / `SIGTERM`.
 4. Post-processing, each step's failure being **recorded**, not fatal: manifest,
    diff, mirror push, S3 sync.
 5. Write history, report and metrics, send the webhook, exit with `0` or `3`.
+   A signal during steps 3 to 5 writes them too, marked interrupted, and exits
+   `130`/`143`.  With `--every` steps 3 to 5 repeat at the interval.
 
 A `--dry-run` stops after step 3's listing: it takes no lock and writes nothing.
 

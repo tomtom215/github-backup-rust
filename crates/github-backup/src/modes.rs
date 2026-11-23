@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use github_backup_core::verify_manifest;
 
 use crate::cli::Args;
-use crate::{doctor, scopes, ui};
+use crate::{account, doctor, scopes, ui};
 
 /// Runs the verify-only mode: checks the SHA-256 manifest in `json_dir`.
 pub(crate) fn run_verify(json_dir: &std::path::Path) -> ExitCode {
@@ -98,63 +98,101 @@ pub(crate) async fn run_doctor(args: &Args) -> ExitCode {
     report.push(doctor::check_git_binary());
     report.push(doctor::check_output_dir(args.output.as_deref()));
     report.push(doctor::check_credential(args));
-    for check in doctor::check_api(args).await {
+    report.push(doctor::check_categories(args));
+    if let Some(check) = doctor::check_destinations(args) {
         report.push(check);
     }
+    let api_checks = doctor::check_api(args).await;
+    let api_ok = api_checks.iter().all(|c| c.status == doctor::Status::Pass);
+    for check in api_checks {
+        report.push(check);
+    }
+    if api_ok {
+        let credential = args
+            .token
+            .clone()
+            .map_or(github_backup_types::config::Credential::Anonymous, |t| {
+                github_backup_types::config::Credential::Token(t)
+            });
+        if let Ok(api) = account::Api::new(&credential, args.api_url.as_deref()) {
+            report.push(doctor::check_owner(args, &api).await);
+        }
+    }
 
-    let ansi = ui::use_ansi();
+    let ansi = ui::use_ansi_on(std::io::stdout());
     let label = if args.check { "check" } else { "doctor" };
-    println!("github-backup {label} v{}", env!("CARGO_PKG_VERSION"));
-    println!();
-    println!("{}", report.render(ansi));
-    println!();
+    let mut out = format!(
+        "github-backup {label} v{}\n\n{}\n\n",
+        env!("CARGO_PKG_VERSION"),
+        report.render(ansi)
+    );
 
     // `--check` echoes the resolved configuration so the user can confirm
     // the categories really are what they expect.
     if args.check {
-        println!("Resolved configuration:");
-        println!(
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "Resolved configuration:");
+        let _ = writeln!(
+            out,
             "  owner            {}",
-            args.owner.as_deref().unwrap_or("(unset)")
+            args.owner.as_deref().unwrap_or("(the token's account)")
         );
-        println!(
+        let _ = writeln!(
+            out,
             "  output           {}",
             args.output
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(unset)".to_string())
+                .unwrap_or_else(|| ". (current directory)".to_string())
         );
-        println!(
+        let _ = writeln!(
+            out,
             "  api_url          {}",
             args.api_url
                 .as_deref()
                 .unwrap_or("https://api.github.com (default)")
         );
-        println!("  concurrency      {}", args.concurrency.unwrap_or(4));
-        println!(
-            "  enabled scopes   {}",
+        let _ = writeln!(
+            out,
+            "  concurrency      {}",
+            args.concurrency.unwrap_or(4).max(1)
+        );
+        let _ = writeln!(
+            out,
+            "  token scopes     {}",
             scopes::recommended_scopes(args).join(" ")
         );
-        println!();
+        let _ = writeln!(out);
     }
 
     let failures = report.failures();
     let warnings = report.warnings();
-    if failures > 0 {
-        println!(
-            "Summary: {failures} blocking issue{} and {warnings} warning{} — backup will not start.",
-            if failures == 1 { "" } else { "s" },
-            if warnings == 1 { "" } else { "s" },
-        );
-        ExitCode::FAILURE
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let (summary, code) = if failures > 0 {
+        (
+            format!(
+                "Summary: {failures} blocking issue{} and {warnings} warning{} — backup will not start.",
+                plural(failures),
+                plural(warnings),
+            ),
+            ExitCode::FAILURE,
+        )
     } else if warnings > 0 {
-        println!(
-            "Summary: ready, but {warnings} warning{} to consider.",
-            if warnings == 1 { "" } else { "s" }
-        );
-        ExitCode::SUCCESS
+        (
+            format!(
+                "Summary: ready, but {warnings} warning{} to consider.",
+                plural(warnings)
+            ),
+            ExitCode::SUCCESS,
+        )
     } else {
-        println!("Summary: ready — every check passed.");
-        ExitCode::SUCCESS
-    }
+        (
+            "Summary: ready — every check passed.".to_string(),
+            ExitCode::SUCCESS,
+        )
+    };
+    out.push_str(&summary);
+    out.push('\n');
+    ui::out(&out);
+    code
 }

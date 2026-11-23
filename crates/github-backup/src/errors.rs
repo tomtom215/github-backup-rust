@@ -78,6 +78,7 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
 
     // Network failures.
     if r.contains("connection refused")
+        || r.contains("client error (connect)")
         || r.contains("dns error")
         || r.contains("tcp connect")
         || r.contains("network is unreachable")
@@ -94,6 +95,15 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
             "TLS handshake failed.  Update your system's CA bundle \
              (e.g. install ca-certificates), or set HTTPS_PROXY if traffic \
              must traverse a TLS-intercepting proxy.",
+        );
+    }
+
+    // A response larger than the client accepts.
+    if r.contains("response body exceeds") {
+        return Some(
+            "GitHub sent a response larger than the client accepts.  This is \
+             usually a proxy or server error page; check HTTPS_PROXY and --api-url, \
+             then re-run.",
         );
     }
 
@@ -138,6 +148,18 @@ mod tests {
     #[test]
     fn explain_error_recognises_git_missing() {
         assert!(explain_error("could not start git: ENOENT").is_some());
+    }
+
+    /// hyper reports an unreachable host as "client error (Connect)".
+    #[test]
+    fn explain_error_recognises_hyper_connect_errors() {
+        let hint = explain_error("HTTP error: client error (Connect)").expect("hint");
+        assert!(hint.contains("Could not reach"), "{hint}");
+    }
+
+    #[test]
+    fn explain_error_recognises_an_oversized_response() {
+        assert!(explain_error("response body exceeds the 16 MiB cap").is_some());
     }
 
     #[test]

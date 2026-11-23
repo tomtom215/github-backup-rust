@@ -19,12 +19,15 @@
 //! refused — is recorded as a failure and yields `3`.  The summary, report,
 //! metrics, run history and webhook all read from the same failure list, so
 //! they cannot disagree with the exit status.
+//!
+//! A run interrupted by a signal — during the backup or during the
+//! post-processing — still writes its history entry, report and metrics,
+//! marked unsuccessful, and sends an `interrupted` notification.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
-use zeroize::Zeroizing;
 
 use github_backup_client::GitHubClient;
 use github_backup_core::ProcessGitRunner;
@@ -35,12 +38,13 @@ use github_backup_types::config::{BackupTarget, Credential, OutputConfig};
 
 use crate::cli::Args;
 use crate::metrics::write_prometheus_metrics;
-use crate::notify::{self, Notification, Status};
+use crate::notify::{self, Notification, NotifyFormat, Status};
 use crate::post_process::{
     build_mirror_dest, build_s3_config, run_diff, run_mirror_push_dest, run_s3_sync_with,
     validate_post_processing, MirrorDest, S3RunOptions,
 };
 use crate::report::{self, unix_secs_to_iso8601, write_report};
+use crate::shutdown::Shutdown;
 use crate::{errors, lock, restore, shutdown, ui};
 
 /// Every item was backed up.
@@ -53,6 +57,10 @@ pub(crate) const EXIT_INCOMPLETE: u8 = 3;
 /// The failure scope used for everything that happens after the engine.
 const POST_SCOPE: &str = "post-processing";
 
+/// How long an interrupted run may spend on its notification: the watchdog
+/// ends the process [`shutdown::SHUTDOWN_GRACE`] after the signal.
+const INTERRUPTED_NOTIFY_LIMIT: Duration = Duration::from_secs(3);
+
 /// What to do after the engine has finished, captured from the arguments.
 struct Post {
     report: Option<PathBuf>,
@@ -64,10 +72,10 @@ struct Post {
     metrics: Option<PathBuf>,
     diff_with: Option<PathBuf>,
     webhook: Option<String>,
+    notify_format: NotifyFormat,
     history_size: usize,
     quiet: bool,
     dry_run: bool,
-    keep_last_or_age: bool,
 }
 
 impl Post {
@@ -82,11 +90,32 @@ impl Post {
             metrics: args.prometheus_metrics.clone(),
             diff_with: args.diff_with.clone(),
             webhook: args.notify_webhook.clone(),
+            notify_format: args.notify_format,
             history_size: args.history_size,
             quiet: args.quiet,
             dry_run: args.dry_run,
-            keep_last_or_age: args.keep_last.is_some() || args.max_age_days.is_some(),
         }
+    }
+}
+
+/// The time base of one run.
+#[derive(Clone, Copy)]
+struct Clock {
+    started_at_unix: u64,
+    started: Instant,
+}
+
+impl Clock {
+    fn start() -> Self {
+        Self {
+            started_at_unix: report::unix_now_secs(),
+            started: Instant::now(),
+        }
+    }
+
+    /// Seconds since the run started, post-processing included.
+    fn elapsed_secs(self) -> f64 {
+        self.started.elapsed().as_secs_f64()
     }
 }
 
@@ -131,21 +160,24 @@ async fn check_token_scopes(
     }
 }
 
-/// Runs the backup described by `args` and everything that follows it.
+/// Runs the backup described by `args` and everything that follows it, and
+/// returns the exit status.
 pub(crate) async fn execute(
     args: Args,
     credential: Credential,
-    encrypt_key: Option<Zeroizing<[u8; 32]>>,
-) -> ExitCode {
+    encrypt_key: Option<&[u8; 32]>,
+    shutdown: &mut Shutdown,
+) -> u8 {
     let post = Post::from_args(&args);
     // Unusable mirror or S3 settings are reported now, not after the backup.
     if !post.dry_run {
         if let Err(e) = validate_post_processing(&args) {
             error!("{e}");
-            return ExitCode::from(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
     }
     let api_url = args.api_url.clone();
+    let defaulted = args.uses_default_categories();
     let (owner, output_path, opts) = args.into_backup_options();
     let output = OutputConfig::new(&output_path);
 
@@ -158,7 +190,7 @@ pub(crate) async fn execute(
             Ok(l) => Some(l),
             Err(e) => {
                 error!("{e}");
-                return ExitCode::from(EXIT_FAILURE);
+                return EXIT_FAILURE;
             }
         }
     };
@@ -171,20 +203,27 @@ pub(crate) async fn execute(
         Ok(c) => c,
         Err(e) => {
             error!("failed to initialise GitHub client: {e}");
-            return ExitCode::from(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
     };
 
     check_token_scopes(&client, &opts).await;
 
-    let started_at_unix = report::unix_now_secs();
+    let clock = Clock::start();
 
-    // A one-line "what is about to happen" plan, skipped under --quiet so cron
+    // A short "what is about to happen" plan, skipped under --quiet so cron
     // and journal scrapes stay clean.
     if !post.quiet {
-        ui::print_plan(&owner, &output_path, &opts, post.dry_run, &output);
+        ui::print_plan(&ui::Plan {
+            owner: &owner,
+            output_path: &output_path,
+            opts: &opts,
+            defaulted,
+            output: &output,
+        });
     }
 
+    let clones = opts.repositories;
     let engine = BackupEngine::new(
         client.clone(),
         FsStorage::new(),
@@ -202,7 +241,7 @@ pub(crate) async fn execute(
     let mut engine_run = Box::pin(engine.run(&owner));
     let backup_result = tokio::select! {
         result = &mut engine_run => result,
-        code = shutdown::wait_for_shutdown_signal() => {
+        code = shutdown.recv() => {
             warn!(
                 exit_code = code,
                 "backup interrupted by signal — partial data may remain on disk; \
@@ -211,25 +250,40 @@ pub(crate) async fn execute(
             shutdown::begin_shutdown(&cancel, code);
             // Steps abandon in-flight requests and git is killed, so this is
             // quick; the bound keeps a stuck task from outlasting the watchdog.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(4), engine_run).await;
-            return ExitCode::from(code);
+            let stats = match tokio::time::timeout(Duration::from_secs(4), engine_run).await {
+                Ok(Ok(stats)) => stats,
+                _ => BackupStats::new(),
+            };
+            return interrupted(&post, &output, &owner, &stats, clock, code).await;
         }
     };
 
     let stats = match backup_result {
         Ok(stats) => stats,
-        Err(e) => return fatal(&post, &output, &owner, started_at_unix, &e).await,
+        Err(e) => return fatal(&post, &output, &owner, clock, &e).await,
     };
 
-    finish(
-        &post,
-        &output,
-        &owner,
-        &stats,
-        started_at_unix,
-        encrypt_key.as_deref(),
-    )
-    .await
+    // Post-processing can take long (mirror pushes, S3 uploads): a signal
+    // must stop it as promptly as it stops the backup.
+    let post_processing = post_process(&post, &output, &owner, &stats, clock, encrypt_key);
+    tokio::select! {
+        () = post_processing => {}
+        code = shutdown.recv() => {
+            warn!(exit_code = code, "post-processing interrupted by signal");
+            shutdown::begin_shutdown(&cancel, code);
+            return interrupted(&post, &output, &owner, &stats, clock, code).await;
+        }
+    }
+
+    tokio::select! {
+        code = report_outcome(&post, &output, &owner, &stats, clock, clones) => code,
+        code = shutdown.recv() => {
+            // The report, metrics and history are already written; only the
+            // notification was still on its way.
+            warn!(exit_code = code, "interrupted while sending the notification");
+            code
+        }
+    }
 }
 
 /// `--restore`: re-creates labels, milestones and issues from the **local
@@ -238,18 +292,25 @@ pub(crate) async fn execute(
 /// It is a mode of its own — no backup is made first and the source account is
 /// not contacted — so it works when the source repository or account is gone.
 /// Confirmation is asked before anything else happens.
-pub(crate) async fn execute_restore(args: Args, credential: Credential) -> ExitCode {
+pub(crate) async fn execute_restore(args: Args, credential: Credential) -> u8 {
     let yes = args.restore_yes;
     let dry_run = args.dry_run;
+    let into_source = args.restore_into_source;
     let target_org_arg = args.restore_target_org.clone();
     let api_url = args.api_url.clone();
     let (owner, output_path, _opts) = args.into_backup_options();
-    let target_org = target_org_arg.unwrap_or_else(|| owner.clone());
+    let target_org = match restore::choose_target(&owner, target_org_arg.as_deref(), into_source) {
+        Ok(t) => t,
+        Err(why) => {
+            error!("{why}");
+            return EXIT_FAILURE;
+        }
+    };
     let output = OutputConfig::new(&output_path);
 
-    if !dry_run && !restore::confirm_restore(&target_org, yes) {
+    if !dry_run && !restore::confirm_restore(&owner, &target_org, yes) {
         error!("restore aborted — pass --restore-yes to confirm non-interactively");
-        return ExitCode::from(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     let client = match api_url.as_deref() {
@@ -260,7 +321,7 @@ pub(crate) async fn execute_restore(args: Args, credential: Credential) -> ExitC
         Ok(c) => c,
         Err(e) => {
             error!("failed to initialise GitHub client: {e}");
-            return ExitCode::from(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
     };
 
@@ -271,12 +332,12 @@ pub(crate) async fn execute_restore(args: Args, credential: Credential) -> ExitC
                 "restore finished with errors: {} item(s) could not be restored (exit status {EXIT_INCOMPLETE})",
                 stats.errored()
             );
-            ExitCode::from(EXIT_INCOMPLETE)
+            EXIT_INCOMPLETE
         }
-        Ok(_) => ExitCode::from(EXIT_OK),
+        Ok(_) => EXIT_OK,
         Err(e) => {
             error!("restore failed: {e}");
-            ExitCode::from(EXIT_FAILURE)
+            EXIT_FAILURE
         }
     }
 }
@@ -285,96 +346,120 @@ pub(crate) async fn execute_restore(args: Args, credential: Credential) -> ExitC
 ///
 /// The report, metrics and history are written too — with the run marked failed
 /// — so monitors reading them do not keep seeing the previous run's success.
-async fn fatal(
-    post: &Post,
-    output: &OutputConfig,
-    owner: &str,
-    started_at_unix: u64,
-    e: &CoreError,
-) -> ExitCode {
+async fn fatal(post: &Post, output: &OutputConfig, owner: &str, clock: Clock, e: &CoreError) -> u8 {
     let raw = errors::redact_secrets(&e.to_string());
     error!("backup failed: {raw}");
     if let Some(hint) = errors::explain_error(&raw) {
         error!("hint: {hint}");
     }
     if post.dry_run {
-        return ExitCode::from(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     let stats = BackupStats::new();
     stats.record_failure(owner, "run", raw.clone());
-    let elapsed = report::unix_now_secs().saturating_sub(started_at_unix);
-    write_history(post, output, owner, &stats, started_at_unix, elapsed);
-    write_outputs(post, owner, &stats, started_at_unix);
-
-    if let Some(url) = &post.webhook {
-        notify::send_webhook(
-            url,
-            &Notification {
-                status: Status::Failure,
-                owner,
-                error: Some(&raw),
-                repos_backed_up: 0,
-                repos_errored: 0,
-                failures: &stats.failures(),
-            },
-        )
-        .await;
-    }
-    ExitCode::from(EXIT_FAILURE)
+    write_records(post, output, owner, &stats, clock);
+    notify(post, owner, &stats, Status::Failure, Some(&raw)).await;
+    EXIT_FAILURE
 }
 
-/// Writes the `--report` and `--prometheus-metrics` files, if requested.
-fn write_outputs(post: &Post, owner: &str, stats: &BackupStats, started_at_unix: u64) {
+/// Records a run stopped by a signal: history, report and metrics marked
+/// unsuccessful, and a (time-bounded) `interrupted` notification.
+async fn interrupted(
+    post: &Post,
+    output: &OutputConfig,
+    owner: &str,
+    stats: &BackupStats,
+    clock: Clock,
+    code: u8,
+) -> u8 {
+    if post.dry_run {
+        return code;
+    }
+    stats.record_failure(
+        owner,
+        "run",
+        format!("interrupted by a signal (exit status {code})"),
+    );
+    write_records(post, output, owner, stats, clock);
+    let send = notify(post, owner, stats, Status::Interrupted, None);
+    if tokio::time::timeout(INTERRUPTED_NOTIFY_LIMIT, send)
+        .await
+        .is_err()
+    {
+        warn!("the interrupted-run notification did not finish in time");
+    }
+    code
+}
+
+/// Writes the run history entry and the `--report` / `--prometheus-metrics`
+/// files.
+fn write_records(
+    post: &Post,
+    output: &OutputConfig,
+    owner: &str,
+    stats: &BackupStats,
+    clock: Clock,
+) {
+    let elapsed = clock.elapsed_secs();
+    write_history(post, output, owner, stats, clock.started_at_unix, elapsed);
     if let Some(path) = &post.report {
-        match write_report(path, owner, stats, started_at_unix) {
+        match write_report(path, owner, stats, clock.started_at_unix, elapsed) {
             Ok(()) => info!(path = %path.display(), "wrote summary report"),
             Err(e) => error!("failed to write report: {e}"),
         }
     }
     if let Some(path) = &post.metrics {
-        match write_prometheus_metrics(path, owner, stats, started_at_unix) {
+        match write_prometheus_metrics(path, owner, stats, clock.started_at_unix, elapsed) {
             Ok(()) => info!(path = %path.display(), "wrote Prometheus metrics"),
             Err(e) => error!("failed to write Prometheus metrics: {e}"),
         }
     }
 }
 
-/// Everything after a completed engine run: post-processing, then the reports
-/// that must include its outcome, then the exit status.
-async fn finish(
+/// Sends the `--notify-webhook` notification, if one is configured.
+async fn notify(
+    post: &Post,
+    owner: &str,
+    stats: &BackupStats,
+    status: Status,
+    error: Option<&str>,
+) {
+    let Some(url) = &post.webhook else {
+        return;
+    };
+    notify::send_webhook(
+        url,
+        post.notify_format,
+        &Notification {
+            status,
+            owner,
+            error,
+            repos_backed_up: stats.repos_backed_up(),
+            repos_errored: stats.repos_errored(),
+            failures: &stats.failures(),
+        },
+    )
+    .await;
+}
+
+/// The steps after a completed engine run that can add failures: manifest,
+/// diff, mirror push and S3 sync.  Nothing here runs for a dry run.
+async fn post_process(
     post: &Post,
     output: &OutputConfig,
     owner: &str,
     stats: &BackupStats,
-    started_at_unix: u64,
+    clock: Clock,
     encrypt_key: Option<&[u8; 32]>,
-) -> ExitCode {
+) {
     if post.dry_run {
-        // A dry run changes nothing: no manifest, mirror push, S3 sync, report,
-        // metrics, history or webhook.
-        if !post.quiet {
-            ui::print_summary_banner(
-                stats,
-                report::unix_now_secs().saturating_sub(started_at_unix),
-                true,
-            );
-        }
-        info!("dry run: skipped state, report, metrics, mirror push, S3 sync and notification");
-        return ExitCode::from(EXIT_OK);
-    }
-
-    if post.keep_last_or_age {
-        warn!(
-            "--keep-last and --max-age-days are deprecated and ignored: github-backup keeps \
-             one continuously updated backup per owner, and deleting directories by name \
-             pattern was unsafe.  Rotate snapshots with your backup tool (restic, borg, ZFS)."
-        );
+        return;
     }
 
     // ── SHA-256 manifest (before the upload so the manifest is uploaded too) ──
     if post.manifest {
-        let created_at = unix_secs_to_iso8601(started_at_unix);
+        let created_at = unix_secs_to_iso8601(clock.started_at_unix);
         match write_manifest(&output.owner_json_dir(owner), &created_at) {
             Ok(n) => info!(entries = n, "SHA-256 manifest written"),
             Err(e) => record(stats, "manifest", format!("failed to write manifest: {e}")),
@@ -410,48 +495,51 @@ async fn finish(
             record(stats, "s3 sync", errors::redact_secrets(&e.to_string()));
         }
     }
+}
 
-    // ── From here on the failure list is final ───────────────────────────────
-    let finished_at_unix = report::unix_now_secs();
-    let elapsed = finished_at_unix.saturating_sub(started_at_unix);
+/// The end of a completed run: summary, history, report, metrics, webhook and
+/// the exit status.  From here on the failure list is final.
+async fn report_outcome(
+    post: &Post,
+    output: &OutputConfig,
+    owner: &str,
+    stats: &BackupStats,
+    clock: Clock,
+    clones: bool,
+) -> u8 {
+    let elapsed = clock.elapsed_secs() as u64;
+    if post.dry_run {
+        // A dry run changes nothing: no manifest, mirror push, S3 sync, report,
+        // metrics, history or webhook.
+        if !post.quiet {
+            ui::print_summary_banner(stats, elapsed, true, clones);
+        }
+        info!("dry run: skipped state, report, metrics, mirror push, S3 sync and notification");
+        return EXIT_OK;
+    }
+
     if !post.quiet {
-        ui::print_summary_banner(stats, elapsed, false);
+        ui::print_summary_banner(stats, elapsed, false, clones);
     }
+    write_records(post, output, owner, stats, clock);
 
-    write_history(post, output, owner, stats, started_at_unix, elapsed);
-
-    write_outputs(post, owner, stats, started_at_unix);
-
-    let failures = stats.failures();
-    let incomplete = !failures.is_empty();
-    if let Some(url) = &post.webhook {
-        notify::send_webhook(
-            url,
-            &Notification {
-                status: if incomplete {
-                    Status::Partial
-                } else {
-                    Status::Success
-                },
-                owner,
-                error: None,
-                repos_backed_up: stats.repos_backed_up(),
-                repos_errored: stats.repos_errored(),
-                failures: &failures,
-            },
-        )
-        .await;
-    }
+    let incomplete = stats.has_failures();
+    let status = if incomplete {
+        Status::Partial
+    } else {
+        Status::Success
+    };
+    notify(post, owner, stats, status, None).await;
 
     if incomplete {
+        let failures = stats.failure_count();
         error!(
-            failures = failures.len(),
-            "backup is incomplete: {} item(s) could not be backed up (exit status {EXIT_INCOMPLETE})",
-            failures.len()
+            failures,
+            "backup is incomplete: {failures} item(s) could not be backed up (exit status {EXIT_INCOMPLETE})",
         );
-        ExitCode::from(EXIT_INCOMPLETE)
+        EXIT_INCOMPLETE
     } else {
-        ExitCode::from(EXIT_OK)
+        EXIT_OK
     }
 }
 
@@ -468,7 +556,7 @@ fn write_history(
     owner: &str,
     stats: &BackupStats,
     started_at_unix: u64,
-    elapsed_secs: u64,
+    elapsed_secs: f64,
 ) {
     let path = output.backup_history_path(owner);
     let mut history = BackupRunHistory::load(&path).unwrap_or_default();
@@ -476,7 +564,7 @@ fn write_history(
         BackupRunEntry {
             timestamp: unix_secs_to_iso8601(started_at_unix),
             repos_backed_up: stats.repos_backed_up(),
-            elapsed_secs: elapsed_secs as f64,
+            elapsed_secs,
             success: !stats.has_failures(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             failures: stats.failure_count() as u64,
@@ -488,5 +576,75 @@ fn write_history(
             info!(path = %path.display(), entries = history.entries.len(), "wrote backup history")
         }
         Err(e) => warn!(error = %e, "failed to write backup history file"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post(dir: &std::path::Path) -> Post {
+        Post {
+            report: Some(dir.join("report.json")),
+            mirror: None,
+            s3: None,
+            s3_include_assets: false,
+            s3_delete_stale: false,
+            manifest: false,
+            metrics: Some(dir.join("metrics.prom")),
+            diff_with: None,
+            webhook: None,
+            notify_format: NotifyFormat::Json,
+            history_size: 20,
+            quiet: true,
+            dry_run: false,
+        }
+    }
+
+    /// An interrupted run used to write nothing, so monitors kept showing the
+    /// previous run's success.
+    #[tokio::test]
+    async fn an_interrupted_run_writes_report_metrics_and_history_as_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = OutputConfig::new(dir.path());
+        let post = post(dir.path());
+        let stats = BackupStats::new();
+        let code = interrupted(&post, &output, "octocat", &stats, Clock::start(), 143).await;
+        assert_eq!(code, 143);
+
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["success"], false);
+        assert!(report["failures"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted"));
+        let metrics = std::fs::read_to_string(dir.path().join("metrics.prom")).unwrap();
+        assert!(metrics.contains("github_backup_success{owner=\"octocat\"} 0"));
+        let history = BackupRunHistory::load(&output.backup_history_path("octocat")).unwrap();
+        assert!(!history.entries.last().expect("entry").success);
+    }
+
+    /// The fatal path built a fresh `BackupStats`, so its report said the run
+    /// took 0 seconds whatever it really took.
+    #[tokio::test]
+    async fn a_fatal_run_reports_its_real_duration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = OutputConfig::new(dir.path());
+        let post = post(dir.path());
+        let clock = Clock {
+            started_at_unix: report::unix_now_secs(),
+            started: Instant::now() - Duration::from_secs(90),
+        };
+        let code = fatal(&post, &output, "octocat", clock, &CoreError::Interrupted).await;
+        assert_eq!(code, EXIT_FAILURE);
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("report.json")).unwrap())
+                .unwrap();
+        assert!(
+            report["duration_secs"].as_f64().unwrap() >= 90.0,
+            "{report}"
+        );
     }
 }

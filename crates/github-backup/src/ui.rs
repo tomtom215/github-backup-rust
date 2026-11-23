@@ -8,7 +8,20 @@ use github_backup_core::{BackupStats, Failure};
 use github_backup_types::backup_state::BackupRunHistory;
 use github_backup_types::config::OutputConfig;
 
-use crate::cli::Args;
+use crate::cli::{categories, Args};
+
+/// Writes `text` to stdout.  A closed pipe (`github-backup ... | head`) ends
+/// the output quietly instead of panicking like `print!` does.
+pub(crate) fn out(text: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+}
+
+/// Writes `text` to stderr, ignoring a closed pipe (see [`out`]).
+pub(crate) fn err(text: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+}
 
 /// Returns `true` if the human-facing output may use ANSI colour codes.
 ///
@@ -18,14 +31,19 @@ use crate::cli::Args;
 /// same conventions as `setup::init_tracing`: `NO_COLOR` disables,
 /// `CLICOLOR_FORCE=1` forces, otherwise autodetect.
 pub(crate) fn use_ansi() -> bool {
-    use std::io::IsTerminal as _;
+    use_ansi_on(std::io::stderr())
+}
+
+/// Like [`use_ansi`], for output written to `stream` (`--doctor` prints to
+/// stdout).
+pub(crate) fn use_ansi_on(stream: impl std::io::IsTerminal) -> bool {
     if no_color_env_set() {
         return false;
     }
     if std::env::var("CLICOLOR_FORCE").as_deref() == Ok("1") {
         return true;
     }
-    std::io::stderr().is_terminal()
+    stream.is_terminal()
 }
 
 /// Returns `true` iff `NO_COLOR` is set to a non-empty value, per the
@@ -39,45 +57,64 @@ pub(crate) fn no_color_env_set() -> bool {
     matches!(std::env::var("NO_COLOR"), Ok(ref v) if !v.is_empty())
 }
 
-/// Prints a one-shot summary of what the run is about to do.
-///
-/// Aimed at non-technical operators who want to see, in one glance,
-/// which owner is being backed up, where the files will land, and
-/// roughly how long it will take if there's a previous run to compare
-/// against.  Skipped under `--quiet` to keep cron / journald output
-/// machine-friendly.
-pub(crate) fn print_plan(
-    owner: &str,
-    output_path: &std::path::Path,
-    opts: &github_backup_types::config::BackupOptions,
-    dry_run: bool,
-    output: &OutputConfig,
-) {
-    let bold = if use_ansi() { "\x1b[1m" } else { "" };
-    let reset = if use_ansi() { "\x1b[0m" } else { "" };
-    let dim = if use_ansi() { "\x1b[2m" } else { "" };
+/// What the pre-run plan banner shows.
+pub(crate) struct Plan<'a> {
+    pub owner: &'a str,
+    pub output_path: &'a std::path::Path,
+    pub opts: &'a github_backup_types::config::BackupOptions,
+    /// No category was selected, so everything is backed up.
+    pub defaulted: bool,
+    pub output: &'a OutputConfig,
+}
 
-    let mode = if dry_run {
+/// Renders the pre-run plan: owner, mode, where the files go, the concurrency
+/// and the categories.
+pub(crate) fn render_plan(plan: &Plan<'_>, ansi: bool) -> String {
+    use std::fmt::Write as _;
+    let (bold, dim, reset) = if ansi {
+        ("\x1b[1m", "\x1b[2m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let opts = plan.opts;
+    let mode = if opts.dry_run {
         format!("{bold}dry run{reset} (no files will be written)")
     } else {
         format!("{bold}backup{reset}")
     };
+    // The absolute path, so a run started from an unexpected directory is
+    // obvious.
+    let output =
+        std::path::absolute(plan.output_path).unwrap_or_else(|_| plan.output_path.to_path_buf());
     let categories = enabled_category_list(opts);
+    let categories = if plan.defaulted {
+        format!("everything (no category selected; --skip leaves some out): {categories}")
+    } else {
+        categories
+    };
 
-    eprintln!();
-    eprintln!("{bold}━━ github-backup ━━{reset}");
-    eprintln!("  Owner       {owner}");
-    eprintln!("  Mode        {mode}");
-    eprintln!("  Output      {}", output_path.display());
-    eprintln!("  Concurrency {}", opts.concurrency);
-    eprintln!("  Categories  {categories}");
-    if let Some(eta) = estimated_duration_from_history(output, owner) {
-        eprintln!(
+    let mut out = String::new();
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{bold}━━ github-backup ━━{reset}");
+    let _ = writeln!(out, "  Owner       {}", plan.owner);
+    let _ = writeln!(out, "  Mode        {mode}");
+    let _ = writeln!(out, "  Output      {}", output.display());
+    let _ = writeln!(out, "  Concurrency {}", opts.concurrency.max(1));
+    let _ = writeln!(out, "  Categories  {categories}");
+    if let Some(eta) = estimated_duration_from_history(plan.output, plan.owner) {
+        let _ = writeln!(
+            out,
             "  Last run    {dim}~{}s elapsed → expect a similar duration{reset}",
             eta.as_secs()
         );
     }
-    eprintln!();
+    let _ = writeln!(out);
+    out
+}
+
+/// Prints the pre-run plan to stderr.  Skipped under `--quiet`.
+pub(crate) fn print_plan(plan: &Plan<'_>) {
+    err(&render_plan(plan, use_ansi()));
 }
 
 /// The facts the end-of-run summary reports.
@@ -92,10 +129,18 @@ pub(crate) struct SummaryView {
     pub failures: Vec<Failure>,
     pub elapsed_secs: u64,
     pub dry_run: bool,
+    /// Repositories were cloned (`--repositories`); without it a processed
+    /// repository only has its metadata.
+    pub clones: bool,
 }
 
 impl SummaryView {
-    pub(crate) fn from_stats(stats: &BackupStats, elapsed_secs: u64, dry_run: bool) -> Self {
+    pub(crate) fn from_stats(
+        stats: &BackupStats,
+        elapsed_secs: u64,
+        dry_run: bool,
+        clones: bool,
+    ) -> Self {
         Self {
             backed_up: stats.repos_backed_up(),
             skipped: stats.repos_skipped(),
@@ -106,6 +151,7 @@ impl SummaryView {
             failures: stats.failures(),
             elapsed_secs,
             dry_run,
+            clones,
         }
     }
 }
@@ -183,7 +229,16 @@ pub(crate) fn render_summary(v: &SummaryView, ansi: bool) -> String {
             if v.skipped == 1 { "y" } else { "ies" }
         );
     } else {
-        let _ = writeln!(out, "   {} repo(s) backed up completely", v.backed_up);
+        if v.clones {
+            let _ = writeln!(out, "   {} repo(s) backed up completely", v.backed_up);
+        } else {
+            // Nothing was cloned: these repositories have metadata only.
+            let _ = writeln!(
+                out,
+                "   {} repo(s) processed (metadata only: git data not cloned without --repositories)",
+                v.backed_up
+            );
+        }
         if v.errored > 0 {
             let _ = writeln!(out, "   {colour}{} repo(s) incomplete{reset}", v.errored);
         }
@@ -256,9 +311,14 @@ pub(crate) fn render_summary(v: &SummaryView, ansi: bool) -> String {
 /// Non-technical users tend to scroll past pages of structured log lines
 /// without internalising the numbers; this block gives them a clear pass/fail
 /// signal, the tally, and — when something failed — exactly what.
-pub(crate) fn print_summary_banner(stats: &BackupStats, elapsed_secs: u64, dry_run: bool) {
-    let view = SummaryView::from_stats(stats, elapsed_secs, dry_run);
-    eprint!("{}", render_summary(&view, use_ansi()));
+pub(crate) fn print_summary_banner(
+    stats: &BackupStats,
+    elapsed_secs: u64,
+    dry_run: bool,
+    clones: bool,
+) {
+    let view = SummaryView::from_stats(stats, elapsed_secs, dry_run, clones);
+    err(&render_summary(&view, use_ansi()));
 }
 
 /// Formats a duration in seconds as `Hh Mm Ss`, dropping leading zero
@@ -296,46 +356,7 @@ pub(crate) fn estimated_duration_from_history(
 /// the right set was selected.  Truncates after the first eight to keep
 /// the line readable.
 pub(crate) fn enabled_category_list(opts: &github_backup_types::config::BackupOptions) -> String {
-    let mut cats: Vec<&'static str> = Vec::new();
-    if opts.repositories {
-        cats.push("repos");
-    }
-    if opts.issues {
-        cats.push("issues");
-    }
-    if opts.pulls {
-        cats.push("pulls");
-    }
-    if opts.releases {
-        cats.push("releases");
-    }
-    if opts.wikis {
-        cats.push("wikis");
-    }
-    if opts.gists {
-        cats.push("gists");
-    }
-    if opts.starred {
-        cats.push("starred");
-    }
-    if opts.clone_starred {
-        cats.push("clone-starred");
-    }
-    if opts.actions {
-        cats.push("actions");
-    }
-    if opts.environments {
-        cats.push("environments");
-    }
-    if opts.discussions {
-        cats.push("discussions");
-    }
-    if opts.projects {
-        cats.push("projects");
-    }
-    if opts.packages {
-        cats.push("packages");
-    }
+    let cats = categories::enabled(opts);
     if cats.is_empty() {
         return "(none — nothing to do!)".to_string();
     }
@@ -348,21 +369,14 @@ pub(crate) fn enabled_category_list(opts: &github_backup_types::config::BackupOp
 
 /// Heuristic: was `github-backup` invoked with no meaningful arguments?
 ///
-/// Used to swap the bare "no owner specified" error for a friendlier
-/// quickstart message.  We treat any auth, config-file, output, category,
-/// or special-mode flag as a real invocation; everything else is treated
-/// as a first-contact run.
+/// Used, when no credential could be found either, to swap the bare "no
+/// owner" error for a friendlier quickstart message.  Any owner, config file,
+/// output or special-mode flag counts as a real invocation.
 pub(crate) fn invoked_without_arguments(args: &Args) -> bool {
     args.owner.is_none()
         && args.config.is_none()
         && args.output.is_none()
-        && args.token.is_none()
         && !args.device_auth
-        && !args.tui
-        && !args.doctor
-        && !args.check
-        && !args.list_scopes
-        && !args.print_config_template
         && !args.verify
         && !args.decrypt
         && !args.restore
@@ -379,18 +393,21 @@ pub(crate) fn print_quickstart() {
     let q = format!(
         r#"{bold}github-backup{reset} v{ver} — back up everything GitHub knows about an account.
 
-{bold}Quickstart{reset}
-  1.  Create a personal access token:
-        https://github.com/settings/tokens/new
-      For a full backup, tick the {bold}repo{reset} and {bold}read:org{reset} scopes.
+No GitHub token was found (--token, GITHUB_TOKEN, GH_TOKEN, the config
+file, or the GitHub CLI).
 
-  2.  Export the token so it does not appear in your shell history:
+{bold}Quickstart{reset}
+  1.  Log in with the GitHub CLI (https://cli.github.com):
+        {dim}$ gh auth login{reset}
+      or create a personal access token with the {bold}repo{reset}, {bold}read:org{reset} and
+      {bold}gist{reset} scopes at https://github.com/settings/tokens/new and export it:
         {dim}$ export GITHUB_TOKEN=ghp_yourtokenhere{reset}
 
-  3.  Run a real backup:
-        {dim}$ github-backup octocat --output ~/github-backups --all{reset}
+  2.  Back up everything your account owns:
+        {dim}$ github-backup --output ~/github-backups{reset}
+      (add an OWNER to back up another user or an organisation)
 
-  4.  Or launch the interactive TUI for a guided run:
+  3.  Or launch the interactive TUI for a guided run:
         {dim}$ github-backup octocat --tui{reset}
 
 {bold}Helpful flags{reset}
@@ -404,7 +421,7 @@ Documentation:  https://tomtom215.github.io/github-backup-rust/
 "#,
         ver = env!("CARGO_PKG_VERSION"),
     );
-    eprintln!("{q}");
+    err(&format!("{q}\n"));
 }
 
 #[cfg(test)]
@@ -415,6 +432,41 @@ mod tests {
     fn invoked_without_arguments_true_for_bare_run() {
         let a = crate::cli::test_support::parse(&["github-backup"]);
         assert!(invoked_without_arguments(&a));
+    }
+
+    #[test]
+    fn a_default_plan_says_everything_is_backed_up_and_never_shows_zero_workers() {
+        use github_backup_types::config::BackupOptions;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = OutputConfig::new(dir.path());
+        let opts = BackupOptions {
+            concurrency: 0,
+            ..BackupOptions::all()
+        };
+        let text = render_plan(
+            &Plan {
+                owner: "octocat",
+                output_path: dir.path(),
+                opts: &opts,
+                defaulted: true,
+                output: &output,
+            },
+            false,
+        );
+        assert!(text.contains("Concurrency 1"), "{text}");
+        assert!(text.contains("everything (no category selected"), "{text}");
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+    }
+
+    /// U1: a run without `--repositories` clones nothing, yet its summary said
+    /// "N repo(s) backed up completely".
+    #[test]
+    fn a_run_without_clones_does_not_claim_complete_repositories() {
+        let mut v = view();
+        v.clones = false;
+        let out = render_summary(&v, false);
+        assert!(!out.contains("backed up completely"), "{out}");
+        assert!(out.contains("metadata only"), "{out}");
     }
 
     #[test]
@@ -496,6 +548,7 @@ mod tests {
             failures: vec![],
             elapsed_secs: 42,
             dry_run: false,
+            clones: true,
         }
     }
 

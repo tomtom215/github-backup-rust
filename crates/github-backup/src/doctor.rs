@@ -24,6 +24,7 @@ use std::time::Duration;
 use github_backup_client::{ClientError, GitHubClient};
 use github_backup_types::config::Credential;
 
+use crate::account::{AccountKind, Api};
 use crate::cli::Args;
 
 /// Outcome of a single check.
@@ -38,17 +39,6 @@ pub enum Status {
 }
 
 impl Status {
-    /// Returns `true` when this status indicates a problem the user
-    /// should act on (currently only `Fail`).
-    ///
-    /// Exposed publicly so other tools can reuse the [`Report`] type
-    /// without having to know about the variants directly.
-    #[must_use]
-    #[allow(dead_code)] // part of the public diagnostic surface
-    pub fn is_blocking(self) -> bool {
-        matches!(self, Status::Fail)
-    }
-
     fn glyph(self, ansi: bool) -> &'static str {
         if !ansi {
             return match self {
@@ -333,6 +323,104 @@ fn token_kind(token: &str) -> TokenKind {
     }
 }
 
+/// Checks the mirror and S3 settings (see `setup::check_destinations`).
+pub fn check_destinations(args: &Args) -> Option<Check> {
+    if args.mirror_to.is_none() && args.s3_bucket.is_none() {
+        return None;
+    }
+    Some(match crate::setup::check_destinations(args) {
+        Ok(()) => Check::pass(
+            "mirror / S3 settings",
+            [
+                args.mirror_to.as_deref().map(|u| format!("mirror to {u}")),
+                args.s3_bucket.as_deref().map(|b| format!("S3 bucket {b}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", "),
+        ),
+        Err(why) => Check::fail(
+            "mirror / S3 settings",
+            why,
+            "the backup would run and then fail at this step",
+        ),
+    })
+}
+
+/// Checks which categories a run would back up.
+pub fn check_categories(args: &Args) -> Check {
+    let mut resolved = args.clone();
+    resolved.owner.get_or_insert_with(String::new);
+    let defaulted = resolved.uses_default_categories();
+    let (_, _, opts) = resolved.into_backup_options();
+    let list = crate::ui::enabled_category_list(&opts);
+    if !crate::cli::categories::any_selected(&opts) {
+        return Check::fail(
+            "categories",
+            "nothing would be backed up",
+            "remove some names from --skip / skip",
+        );
+    }
+    if defaulted {
+        Check::pass("categories", format!("everything (default): {list}"))
+    } else {
+        Check::pass("categories", list)
+    }
+}
+
+/// Checks OWNER: that it exists and whether it is an organisation, or,
+/// without OWNER, which account the token belongs to.
+pub async fn check_owner(args: &Args, api: &Api) -> Check {
+    match args.owner.as_deref() {
+        None if args.token.is_none() => Check::fail(
+            "owner",
+            "no OWNER given and no token to find the account by",
+            "pass OWNER, or log in (`gh auth login`) / set GITHUB_TOKEN",
+        ),
+        None => match api.authenticated_login().await {
+            Ok(login) => Check::pass(
+                "owner",
+                format!("not given: the token's account, {login}, will be backed up"),
+            ),
+            Err(e) => Check::fail(
+                "owner",
+                format!("not given, and the token's account is unknown ({e})"),
+                "pass OWNER explicitly",
+            ),
+        },
+        Some(owner) => match api.account_kind(owner).await {
+            Ok(Some(AccountKind::Organization)) => Check::pass(
+                "owner",
+                format!(
+                    "{owner} is an organisation{}",
+                    if args.org {
+                        ""
+                    } else {
+                        " (backed up as one even without --org)"
+                    }
+                ),
+            ),
+            Ok(Some(AccountKind::User)) if args.org => Check::warn(
+                "owner",
+                format!("{owner} is a user, not an organisation"),
+                "drop --org / `org = true` (the run treats it as a user)",
+            ),
+            Ok(Some(AccountKind::User)) => Check::pass("owner", format!("{owner} is a user")),
+            Ok(None) => Check::fail(
+                "owner",
+                format!("no GitHub account named {owner}"),
+                "check the spelling of OWNER",
+            ),
+            Err(e) => Check::warn(
+                "owner",
+                format!("could not be checked: {e}"),
+                "see the API check above",
+            ),
+        },
+    }
+}
+
 /// How long `--doctor` waits for the API before calling it unreachable.
 const API_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -497,13 +585,6 @@ mod tests {
         assert_eq!(token_kind("ghs_abc"), TokenKind::ServerToServer);
         assert_eq!(token_kind("ghr_abc"), TokenKind::ServerToServer);
         assert_eq!(token_kind("plain-text"), TokenKind::Unknown);
-    }
-
-    #[test]
-    fn status_is_blocking_only_for_fail() {
-        assert!(!Status::Pass.is_blocking());
-        assert!(!Status::Warn.is_blocking());
-        assert!(Status::Fail.is_blocking());
     }
 
     #[test]

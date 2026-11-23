@@ -34,8 +34,9 @@ github-backup octocat \
 ```
 
 `OWNER` (`octocat` here) names the backup to read; `--restore-target-org`
-names where to write (default: the same name as `OWNER`; do not restore into the
-repositories you backed up).  The tool prints a warning banner and asks you to
+names where to write and is required.  Restoring into `OWNER` itself is refused
+unless you add `--restore-into-source`: issues that still exist there would be
+created a second time.  The tool prints a warning banner and asks you to
 type `yes`.  When stdin is not a terminal, confirm with the flag or the
 environment variable:
 

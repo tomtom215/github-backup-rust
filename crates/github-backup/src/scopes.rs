@@ -35,12 +35,6 @@ pub fn recommended_scopes(args: &Args) -> Vec<&'static str> {
         // The restore flow writes to GitHub.
         set.insert("repo");
     }
-    if matches!(
-        args.mirror_type.as_str(),
-        "gitea-org" | "gitlab-group" | "org"
-    ) {
-        set.insert("read:org");
-    }
     finish(set)
 }
 
@@ -256,9 +250,20 @@ mod tests {
 
     #[test]
     fn render_recommendation_reports_anonymous_ok_when_no_scope_needed() {
-        // Just `octocat` with no categories → no scopes required.
-        let a = args(&[]);
+        // Followers and following are public data.  (A bare `octocat` used
+        // to be the example, but with no category selected a run now backs
+        // up everything.)
+        let a = args(&["--followers", "--following"]);
         let out = render_recommendation(&a);
         assert!(out.contains("anonymous access is sufficient"));
+    }
+
+    /// No category selected means everything, so the scopes are those of `--all`.
+    #[test]
+    fn no_category_recommends_the_scopes_of_all() {
+        assert_eq!(
+            recommended_scopes(&args(&[])),
+            recommended_scopes(&args(&["--all"]))
+        );
     }
 }

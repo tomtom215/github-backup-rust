@@ -147,6 +147,14 @@ path must be writable, which `StateDirectory=` provides.
 its lock and exits `143` within a few seconds; the next run resumes (within 6
 hours) from the checkpoint.  No cleanup of lock files is ever needed.
 
+## Without a Timer
+
+A plain service running `github-backup ... --every 24h` (with
+`Restart=on-failure`) also works; see
+[Built-in schedule](cron.md#built-in-schedule---every).  The timer is still
+the better choice on systemd: each run is a separate unit activation with its
+own exit status in the journal, and `OnFailure=` fires per run.
+
 ## Multiple Owners
 
 Create separate service/timer pairs per owner, or one script that does not stop

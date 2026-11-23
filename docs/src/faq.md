@@ -12,11 +12,31 @@ Cloud uses `https://api.github.com` and needs nothing special.
 
 ### Can I back up a GitHub organisation?
 
-Yes.  Pass `--org`:
+Yes.  Name it; the tool recognises an organisation and backs it up as one (you
+may still pass `--org`):
 
 ```bash
-github-backup my-org --output /backup --org --all
+github-backup my-org --output /backup
 ```
+
+### What does a run back up when I give no category flags?
+
+Everything, as with `--all` (the plan banner says
+`everything (no category selected ...)`).  Name categories to back up only
+those (`--repositories --issues`), or leave some out of everything with
+`--skip`, for example `--skip release-assets,packages`.
+
+### Which account is backed up when I give no OWNER?
+
+The account the token belongs to; the log says `no OWNER given: backing up
+<login>`.  Give OWNER (or `owner` in the config file) for any other user or an
+organisation.  An anonymous run (no token anywhere) needs OWNER.
+
+### Can I run it as a long-lived service instead of with cron?
+
+Yes: `--every 24h` (or `6h`, `30m`, ...) backs up at once and then at that
+interval until it is stopped; see
+[Built-in schedule](deployment/cron.md#built-in-schedule---every).
 
 ### What is *not* backed up?
 
@@ -85,13 +105,16 @@ never stop the other repositories.  See
 It depends on the categories; see
 [What each category needs](getting-started/authentication.md#what-each-category-needs).
 For a complete backup of your own account a classic token with `repo`, `gist`,
-`read:org` and `read:packages` is enough.  Public data needs no token.
+`read:org` and `read:packages` is enough.  The GitHub CLI's login
+(`gh auth login`, used automatically) has all of them but `read:packages`.
+Public data needs no token.
 
 ### My token expired.  What happens?
 
 GitHub answers 401; the run stops at once (exit status `1`), reports the reason
 and a hint, and writes the report, metrics and a `failure` webhook so monitoring
-sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file).
+sees it.  Create a new token and update `GITHUB_TOKEN` (or the config file, or
+log in again with `gh auth login`).
 `github-backup --doctor` tells you whether the token is accepted.
 
 ### Can I use a GitHub App token?
@@ -116,7 +139,8 @@ items on every run, plus the per-item requests for the items that changed.
 ### How do I speed it up?
 
 1. Raise `--concurrency` (for example 8), as far as the rate limit allows.
-2. Enable only the categories you need instead of `--all`.
+2. Back up only the categories you need (name them, or `--skip` the others)
+   instead of everything.
 3. Use `--clone-type shallow:10` to limit history (at the cost of a complete
    backup).
 4. Leave the incremental state alone: do not use `--full` on every run.

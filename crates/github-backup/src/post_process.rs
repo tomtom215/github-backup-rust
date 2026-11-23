@@ -327,15 +327,15 @@ pub fn build_mirror_dest(args: &Args) -> Option<MirrorDest> {
         .clone()
         .unwrap_or_else(|| args.owner.clone().unwrap_or_default());
 
-    match args.mirror_type.as_str() {
-        "gitlab" => Some(MirrorDest::GitLab(GitLabConfig {
+    match args.mirror_type.unwrap_or_default() {
+        github_backup_types::config::MirrorType::Gitlab => Some(MirrorDest::GitLab(GitLabConfig {
             base_url,
             token,
             namespace: owner,
             private: mirror_forced_private(args),
             prune: args.prune,
         })),
-        _ => Some(MirrorDest::Gitea(GiteaConfig {
+        github_backup_types::config::MirrorType::Gitea => Some(MirrorDest::Gitea(GiteaConfig {
             base_url,
             token,
             owner,
