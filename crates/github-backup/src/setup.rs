@@ -203,35 +203,20 @@ pub(crate) fn validate_owner_name(owner: &str) -> Result<(), &'static str> {
 
 /// Checks the mirror and S3 settings before anything else happens, so that a
 /// missing token or key fails the run at once instead of after the whole
-/// backup.
+/// backup.  The checks are [`crate::post_process::validate_post_processing`];
+/// an OWNER that is still to be taken from the token stands in for the
+/// mirror owner it defaults to.
 ///
 /// # Errors
 ///
 /// A message naming the missing or malformed setting.
 pub(crate) fn check_destinations(args: &Args) -> Result<(), String> {
-    if let Some(url) = &args.mirror_to {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
-            return Err(format!(
-                "--mirror-to '{url}' is not a URL; give the base URL with its scheme, \
-                 e.g. https://codeberg.org"
-            ));
-        }
-        if args
-            .mirror_token
-            .as_deref()
-            .is_none_or(|t| t.trim().is_empty())
-        {
-            return Err(
-                "--mirror-to is set but there is no mirror token; set MIRROR_TOKEN \
-                        (preferred), --mirror-token or mirror_token in the config file"
-                    .to_string(),
-            );
-        }
+    if args.owner.is_none() && args.mirror_owner.is_none() && args.mirror_to.is_some() {
+        let mut resolved = args.clone();
+        resolved.owner = Some("the token's account".to_string());
+        return crate::post_process::validate_post_processing(&resolved);
     }
-    if let Some(s3) = crate::post_process::build_s3_config(args) {
-        crate::post_process::check_s3_config(&s3)?;
-    }
-    Ok(())
+    crate::post_process::validate_post_processing(args)
 }
 
 /// Resolves the GitHub credential from CLI args.

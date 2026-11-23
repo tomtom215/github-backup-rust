@@ -3,7 +3,10 @@
 Schedule `github-backup` with cron for periodic backups.  (A
 [systemd timer](systemd.md) gives better logging and failure handling when it is
 available, and in a container or anywhere without a scheduler the
-[built-in schedule](#built-in-schedule---every) needs neither.)
+[built-in schedule](#built-in-schedule---every) needs neither.)  The examples
+run `/usr/local/bin/github-backup`; `sudo sh install.sh --dir /usr/local/bin`
+installs the release binary there (see
+[Installation](../getting-started/installation.md#install-script-linux-macos)).
 
 ## Built-in Schedule (`--every`)
 

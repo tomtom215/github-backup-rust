@@ -8,22 +8,37 @@
 #     git tag -a v0.4.0 -m "Release v0.4.0"
 #     git push origin v0.4.0
 #
+# Dry run: start it from the Actions tab ("Run workflow") on any branch.  It
+# runs the release gate and builds every binary and the multi-arch image, but
+# attests nothing, publishes nothing and creates no release.  The version is
+# taken from Cargo.toml instead of a tag.
+#
 # Job dependency graph:
 #
 #   validate ──┬──► ci (matrix) ──┐
-#              └──► security ─────┼──► binaries ──┬──► github-release
-#                                 └──────────────►└──► docker
+#              └──► security ─────┴──► binaries ──┬──► github-release (draft) ──┐
+#                                                 └──► docker (image.yml) ──────┴──► publish
+#
+# The GitHub release is created as a draft and published by the last job, only
+# after the binaries, the release and the container image all succeeded.
 #
 # This project does NOT publish to crates.io. Releases ship as:
 #   * pre-built binaries for five targets, attached to the GitHub Release.
 #     The two Linux binaries are STATIC musl executables built by the
 #     Dockerfile's `export` stage (no glibc version requirement); each is
-#     checked with `file`/`ldd` and run with `--version` before upload.
-#     Every binary gets a signed build-provenance attestation (GitHub
-#     artifact attestations, SLSA v1.0 Build Level 2 as GitHub documents it)
-#   * multi-arch container images on GHCR (`ghcr.io/<repo>:<tag>`)
+#     checked with `file`/`ldd`.  Every binary is run with `--version` on its
+#     runner (the macOS x86_64 one only where Rosetta 2 is available) and gets
+#     a signed build-provenance attestation (GitHub artifact attestations,
+#     SLSA v1.0 Build Level 2 as GitHub documents it); so does SHA256SUMS.txt.
+#   * multi-arch container images on GHCR (`ghcr.io/<repo>:<tag>`), packaged
+#     from those same attested Linux binaries (see image.yml), with an SBOM,
+#     max-mode BuildKit provenance and a GitHub attestation.
 #   * source install via `cargo install --git`
 # Every workspace crate is marked `publish = false` in its `Cargo.toml`.
+#
+# Toolchain: rust-toolchain.toml (the Linux binaries use the Dockerfile's
+# RUST_VERSION, which CI keeps equal to it).  No job restores or saves a
+# build cache, so nothing cached by another workflow can reach a release.
 
 name: Release
 
@@ -32,6 +47,7 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"        # stable:      v1.2.3
       - "v[0-9]+.[0-9]+.[0-9]+-*"      # pre-release: v1.2.3-alpha.1
+  workflow_dispatch:                   # dry run (see above)
 
 # Prevent concurrent releases for the same ref.
 concurrency:
@@ -45,29 +61,25 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pinned toolchain for the release gate and the non-Linux binaries, so a new
-  # stable release cannot break (or silently change) a release.  Linux binaries
-  # use the Dockerfile's pinned `rust:1.88-alpine` builder.  Keep in sync with
-  # ci.yml.
-  RUST_TOOLCHAIN: "1.97.0"
-  # NOTE: third-party actions are referenced by tag, not by commit SHA: SHAs
-  # must be resolved from GitHub and verified, which was not possible when this
-  # file was written.  .github/dependabot.yml keeps the refs current.
 
 jobs:
   # ── Job 1: Validate tag, version consistency, and changelog entry ───────────
   validate:
     name: Validate release tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version:       ${{ steps.meta.outputs.version }}
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      dry_run:       ${{ steps.meta.outputs.dry_run }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # needed to prove the tagged commit is on main
+          persist-credentials: false
 
       - name: Tag must point at a commit on main
+        if: github.event_name == 'push'
         shell: bash
         run: |
           git fetch --no-tags origin main:refs/remotes/origin/main
@@ -76,12 +88,47 @@ jobs:
             exit 1
           fi
 
+      - name: Read the workspace version
+        id: workspace
+        shell: bash
+        run: |
+          # All member crates inherit `version.workspace = true`, so we only
+          # need `[workspace.package].version` in the root manifest.
+          #
+          # NOTE: the leading regex uses `^[^"]*"` (not `.*"`) because awk
+          # regexes are greedy — `.*"` would match through the closing quote
+          # and leave an empty string.
+          WS_VER=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/                     { in_section = 0 }
+            in_section && /^[[:space:]]*version[[:space:]]*=/ {
+              gsub(/^[^"]*"/, "", $0); gsub(/".*/, "", $0); print; exit
+            }
+          ' Cargo.toml)
+
+          if [[ -z "$WS_VER" ]]; then
+            echo "::error file=Cargo.toml::could not parse [workspace.package].version"
+            exit 1
+          fi
+          echo "version=$WS_VER" >> "$GITHUB_OUTPUT"
+
       - name: Extract version metadata
         id: meta
         shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          WS_VER: ${{ steps.workspace.outputs.version }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
+          if [[ "$EVENT" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            DRY_RUN=false
+          else
+            TAG="v${WS_VER}"
+            VERSION="${WS_VER}"
+            DRY_RUN=true
+            echo "::notice::Dry run on ${GITHUB_REF_NAME}: building v${VERSION}; nothing is attested or published."
+          fi
 
           echo "::group::Tag metadata"
           printf 'Tag:        %s\n' "$TAG"
@@ -103,35 +150,21 @@ jobs:
           fi
 
           printf 'Pre-release: %s\n' "$IS_PRE"
+          printf 'Dry run:     %s\n' "$DRY_RUN"
           echo "::endgroup::"
 
-          echo "version=$VERSION"      >> "$GITHUB_OUTPUT"
-          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "is_prerelease=$IS_PRE"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify workspace version matches tag
         shell: bash
+        env:
+          TAG_VER: ${{ steps.meta.outputs.version }}
+          WS_VER: ${{ steps.workspace.outputs.version }}
         run: |
-          TAG_VER="${{ steps.meta.outputs.version }}"
-
-          # All member crates inherit `version.workspace = true`, so we only
-          # need to check `[workspace.package].version` in the root manifest.
-          #
-          # NOTE: the leading regex uses `^[^"]*"` (not `.*"`) because awk
-          # regexes are greedy — `.*"` would match through the closing quote
-          # and leave an empty string.
-          WS_VER=$(awk '
-            /^\[workspace\.package\]/ { in_section = 1; next }
-            /^\[/                     { in_section = 0 }
-            in_section && /^[[:space:]]*version[[:space:]]*=/ {
-              gsub(/^[^"]*"/, "", $0); gsub(/".*/, "", $0); print; exit
-            }
-          ' Cargo.toml)
-
-          if [[ -z "$WS_VER" ]]; then
-            echo "::error file=Cargo.toml::could not parse [workspace.package].version"
-            exit 1
-          fi
-
           if [[ "$WS_VER" != "$TAG_VER" ]]; then
             echo "::error file=Cargo.toml::workspace.package.version ($WS_VER) does not match tag ($TAG_VER)"
             echo "Bump the version in Cargo.toml before tagging."
@@ -157,10 +190,15 @@ jobs:
 
       - name: Verify CHANGELOG entry exists
         shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DRY_RUN: ${{ steps.meta.outputs.dry_run }}
         run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-
           if ! grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+              echo "::warning file=CHANGELOG.md::no '## [$VERSION]' entry yet; a tagged release would fail here."
+              exit 0
+            fi
             echo "::error file=CHANGELOG.md::no '## [$VERSION]' entry in CHANGELOG.md."
             echo "Add release notes for v$VERSION before tagging."
             exit 1
@@ -172,72 +210,79 @@ jobs:
     name: CI / ${{ matrix.name }}
     needs: validate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:
         include:
           - name: "test · Linux"
             os: ubuntu-latest
-            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
-            command: cargo test --workspace --all-targets --locked
+            command: cargo test --workspace --locked
           - name: "test · macOS"
             os: macos-latest
-            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
-            command: cargo test --workspace --all-targets --locked
+            command: cargo test --workspace --locked
+          - name: "test · Windows"
+            os: windows-latest
+            command: cargo test --workspace --locked
           - name: "clippy"
             os: ubuntu-latest
-            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
-            components: clippy
             command: cargo clippy --workspace --all-targets --locked -- -D warnings
           - name: "fmt"
             os: ubuntu-latest
-            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
-            components: rustfmt
             command: cargo fmt --all -- --check
           - name: "doc"
             os: ubuntu-latest
-            toolchain: "1.97.0"   # keep in sync with env.RUST_TOOLCHAIN (env is unavailable in matrix)
             command: cargo doc --workspace --no-deps --locked
-          - name: "MSRV 1.88"
+          # The MSRV is `rust-version` in Cargo.toml; `cargo +<msrv>`
+          # overrides rust-toolchain.toml.
+          - name: "MSRV"
             os: ubuntu-latest
-            toolchain: "1.88"
-            command: cargo build --workspace --locked
+            command: >-
+              msrv=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml) &&
+              test -n "$msrv" &&
+              rustup toolchain install "$msrv" --profile minimal &&
+              cargo "+$msrv" check --workspace --all-targets --locked
     env:
       # Doc-warnings-as-errors only affects `cargo doc`; harmless for other steps.
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: ${{ matrix.toolchain }}
-          components: ${{ matrix.components || '' }}
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install
       - name: ${{ matrix.name }}
-        run: ${{ matrix.command }}
+        shell: bash
+        env:
+          COMMAND: ${{ matrix.command }}
+        run: bash -c "$COMMAND"
 
   # ── Job 3: Security audit ──────────────────────────────────────────────────
   security:
     name: Security audit (cargo-deny)
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           command: check licenses bans advisories sources
 
   # ── Job 4: Build release binaries for every supported target ──────────────
   binaries:
     name: Binary (${{ matrix.target }})
-    needs: [ci, security]
+    needs: [validate, ci, security]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     # Needed by the attestation step (id-token / attestations); contents: read
     # must be repeated because a job-level `permissions` replaces the default.
     permissions:
-      contents: read
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+      contents: read             # checkout
+      id-token: write            # sign the attestation
+      attestations: write        # store it
+      artifact-metadata: write   # storage record for the attested binary
     strategy:
       fail-fast: false
       matrix:
@@ -252,6 +297,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             artifact: github-backup-linux-aarch64
             docker_export: true
+          # macos-latest is Apple Silicon: the x86_64 build is a cross-compile.
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: github-backup-macos-x86_64
@@ -263,14 +309,16 @@ jobs:
             artifact: github-backup-windows-x86_64
             ext: .exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # ── Linux: Dockerfile export stage ──
       - name: Build static binary (Dockerfile export stage)
         if: matrix.docker_export
         run: docker build --target export --output type=local,dest=out .
 
-      - name: Verify the Linux binary is static and runs
+      - name: Verify the Linux binary is static
         if: matrix.docker_export
         shell: bash
         run: |
@@ -281,69 +329,105 @@ jobs:
           if ldd out/github-backup 2>&1 | grep -q 'not a dynamic executable\|statically linked'; then :; else
             echo "::error::binary is dynamically linked"; ldd out/github-backup || true; exit 1
           fi
-          ./out/github-backup --version
 
       # ── macOS / Windows: native cargo build ──
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the pinned toolchain and target
         if: "!matrix.docker_export"
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        if: "!matrix.docker_export"
-        with:
-          key: release-${{ matrix.target }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
 
       - name: Build (native)
         if: "!matrix.docker_export"
-        run: cargo build --release --locked --package github-backup --target ${{ matrix.target }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --package github-backup --target "$TARGET"
 
       - name: Stage binary and checksum
         shell: bash
+        env:
+          DOCKER_EXPORT: ${{ matrix.docker_export }}
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.artifact }}${{ matrix.ext }}
         run: |
+          set -euo pipefail
           mkdir -p staging
-          if [[ "${{ matrix.docker_export }}" == "true" ]]; then
+          if [[ "$DOCKER_EXPORT" == "true" ]]; then
             src="out/github-backup"
           else
-            src="target/${{ matrix.target }}/release/github-backup${{ matrix.ext }}"
+            src="target/$TARGET/release/github-backup"
+            [[ "$NAME" == *.exe ]] && src="$src.exe"
           fi
-          dst="staging/${{ matrix.artifact }}${{ matrix.ext }}"
-          cp "$src" "$dst"
+          cp "$src" "staging/$NAME"
           # Compute the SHA-256 next to the binary so users can verify downloads.
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd staging && sha256sum "$(basename "$dst")" > "$(basename "$dst").sha256")
+            (cd staging && sha256sum "$NAME" > "$NAME.sha256")
           else
-            (cd staging && shasum -a 256 "$(basename "$dst")" > "$(basename "$dst").sha256")
+            (cd staging && shasum -a 256 "$NAME" > "$NAME.sha256")
           fi
           ls -lh staging/
+
+      # Every binary must start and report the version being released.  The
+      # x86_64 macOS binary is cross-compiled on Apple Silicon and runs only
+      # where Rosetta 2 is installed; without it that one check is skipped.
+      - name: Smoke test (--version)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.artifact }}${{ matrix.ext }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == x86_64-apple-darwin ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "::warning::Rosetta 2 is not available on this runner; $NAME was not executed."
+            exit 0
+          fi
+          out=$("./staging/$NAME" --version)
+          echo "$out"
+          if [[ "$out" != *"$VERSION"* ]]; then
+            echo "::error::$NAME --version printed '$out', expected it to contain $VERSION"
+            exit 1
+          fi
 
       # Signed build-provenance attestation for the binary itself (not the
       # .sha256).  Verify with:
       #   gh attestation verify <file> --repo tomtom215/github-backup-rust
       - name: Attest build provenance
-        uses: actions/attest@v4
+        if: needs.validate.outputs.dry_run != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: staging/${{ matrix.artifact }}${{ matrix.ext }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: staging/*
           if-no-files-found: error
           retention-days: 7
 
-  # ── Job 5: Create the GitHub release with binaries and notes ──────────────
+  # ── Job 5: Create the GitHub release (as a draft) with binaries and notes ──
   github-release:
-    name: Create GitHub release
+    name: Create draft GitHub release
     needs: [validate, binaries]
+    if: needs.validate.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
-      contents: write  # create release, upload assets
+      contents: write          # create the draft release, upload assets
+      id-token: write          # sign the SHA256SUMS.txt attestation
+      attestations: write      # store it
+      artifact-metadata: write # storage record for SHA256SUMS.txt
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download all binary artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist/
           pattern: github-backup-*
@@ -361,17 +445,22 @@ jobs:
           done
           cat SHA256SUMS.txt
 
+      - name: Attest SHA256SUMS.txt
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/SHA256SUMS.txt
+
       - name: Extract release notes from CHANGELOG
-        id: notes
         shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
           echo "::group::Extracting release notes for v$VERSION"
-          awk "
-            /^## \[$VERSION\]/ { found=1; next }
-            found && /^## \[/  { exit }
-            found              { print }
-          " CHANGELOG.md > release_notes.md
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found=1; next }
+            found && /^## \[/             { exit }
+            found                         { print }
+          ' CHANGELOG.md > release_notes.md
 
           if [[ ! -s release_notes.md ]]; then
             echo "::error::empty release notes extracted for $VERSION"
@@ -385,35 +474,79 @@ jobs:
         shell: bash
         run: ls -lh dist/
 
-      - name: Create or update GitHub release
+      - name: Create or update the draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          IS_PRE: ${{ needs.validate.outputs.is_prerelease }}
         shell: bash
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
-          IS_PRE="${{ needs.validate.outputs.is_prerelease }}"
           TAG="v${VERSION}"
-
-          PRE_FLAG=""
-          [[ "$IS_PRE" == "true" ]] && PRE_FLAG="--prerelease"
-
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          PRE_FLAG=()
+          [[ "$IS_PRE" == "true" ]] && PRE_FLAG=(--prerelease)
 
           if gh release view "$TAG" &>/dev/null; then
             echo "::warning::release ${TAG} already exists — updating it in place."
             gh release edit "$TAG" \
-              $PRE_FLAG \
+              "${PRE_FLAG[@]}" \
               --title "github-backup ${TAG}" \
               --notes-file release_notes.md
             gh release upload "$TAG" --clobber dist/*
           else
             gh release create "$TAG" \
-              $PRE_FLAG \
+              --draft --verify-tag \
+              "${PRE_FLAG[@]}" \
               --title "github-backup ${TAG}" \
               --notes-file release_notes.md \
               dist/*
           fi
 
+  # ── Job 6: Container image (packaged from the attested Linux binaries) ─────
+  docker:
+    name: Container image
+    needs: [validate, binaries]
+    # What image.yml's job needs (a called workflow gets at most these).
+    permissions:
+      contents: read             # checkout
+      packages: write            # push to GHCR
+      id-token: write            # sign the image attestation
+      attestations: write        # store it
+      artifact-metadata: write   # storage record for the image
+    # A job-level reusable workflow is resolved from this same commit, not
+    # from a checkout, so the newer `$/` form adds nothing here (and
+    # actionlint does not accept it yet).
+    uses: ./.github/workflows/image.yml # zizmor: ignore[self-repository]
+    with:
+      push: ${{ needs.validate.outputs.dry_run != 'true' }}
+      # `latest` and `X.Y` move only for stable releases (metadata-action's
+      # semver `{{major}}.{{minor}}` rule skips pre-releases by itself).
+      tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=latest,enable=${{ needs.validate.outputs.is_prerelease == 'false' }}
+
+  # ── Job 7: Publish the release once everything above succeeded ────────────
+  publish:
+    name: Publish GitHub release
+    needs: [validate, github-release, docker]
+    if: needs.validate.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # publish the draft release
+    steps:
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          IS_PRE: ${{ needs.validate.outputs.is_prerelease }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          TAG="v${VERSION}"
+          gh release edit "$TAG" --draft=false
           {
             echo "## github-backup ${TAG}"
             echo ""
@@ -421,62 +554,10 @@ jobs:
             echo "|-------|-------|"
             echo "| Version | \`${VERSION}\` |"
             echo "| Pre-release | \`${IS_PRE}\` |"
-            echo "| Release | [${TAG}](${RELEASE_URL}) |"
-            echo ""
-            echo "### Artefacts"
-            echo "\`\`\`"
-            ls -lh dist/
-            echo "\`\`\`"
+            echo "| Release | [${TAG}](https://github.com/${REPOSITORY}/releases/tag/${TAG}) |"
             echo ""
             echo "### Install"
             echo "- Pre-built binary: download from the release page above"
-            echo "- Docker: \`docker pull ghcr.io/${{ github.repository }}:${VERSION}\`"
-            echo "- Source: \`cargo install --git https://github.com/${{ github.repository }} --tag ${TAG} github-backup\`"
+            echo "- Docker: \`docker pull ghcr.io/${REPOSITORY}:${VERSION}\`"
+            echo "- Source: \`cargo install --locked --git https://github.com/${REPOSITORY} --tag ${TAG} github-backup\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-  # ── Job 6: Publish container image to GHCR ─────────────────────────────────
-  docker:
-    name: Build and push image to GHCR
-    needs: [validate, binaries]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v6
-
-      # Required for multi-platform builds: QEMU emulates the foreign arch,
-      # and Buildx's docker-container driver is the only one that supports
-      # multi-platform output. The default `docker` driver fails with
-      # "Multi-platform build is not supported for the docker driver".
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ needs.validate.outputs.is_prerelease == 'false' }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64

@@ -300,6 +300,10 @@ pub enum S3Error {
     /// AES-256-GCM encryption or decryption failed.
     #[error("encryption error: {0}")]
     Encrypt(String),
+
+    /// The object exceeds what one S3 multipart upload can hold.
+    #[error("object too large for S3: {0}")]
+    TooLarge(String),
 }
 
 /// Renders an error and its `source()` chain as `outer: inner: innermost`.

@@ -110,7 +110,7 @@ workflow run history.
 | `--prefer-ssh` | | `false` | Clone over SSH instead of HTTPS (no token is used; git needs working SSH keys). |
 | `--clone-type <TYPE>` | | `mirror` | `mirror`, `bare`, `full` or `shallow:<depth>`; see [Clone types](../backup-categories.md#clone-types-explained). |
 | `--lfs` | | `false` | Also fetch Git LFS objects (`git lfs fetch --all`) after the mirror update.  Needs `git-lfs` installed; overrides `--clone-type`. |
-| `--prune` | | `false` | Delete branches and tags from the clone when they were deleted on GitHub.  Without it they are kept; force-pushed branches are overwritten either way. |
+| `--prune` | | `false` | Delete branches and tags from the clone, and from the `--mirror-to` destination, when they were deleted on GitHub.  Without it they are kept; force-pushed branches are overwritten either way. |
 
 ## Issue and Pull Request Options
 
@@ -377,7 +377,7 @@ network access.  Supported shells: `bash`, `zsh`, `fish`, `powershell`,
 | `2` | Usage error reported by the argument parser (unknown flag, missing value, conflicting flags). |
 | `3` | The run finished but something could not be backed up: a repository, an issue list, an S3 upload, a mirror push, the manifest.  The backup is **incomplete**.  Re-running retries only what failed.  `--restore` also exits `3` when some items could not be restored. |
 | `130` / `143` | Interrupted by `SIGINT` / `SIGTERM`, during the backup or the post-processing (mirror push, S3 sync, notification).  The history, `--report` and metrics are still written, marked unsuccessful, and the webhook is told `interrupted`.  With `--every`, a signal while waiting for the next run exits `0`. |
-| `64` | Container entrypoint only: refused a malformed `UMASK`, `BACKUP_MODE` or `BACKUP_FLAGS`. |
+| `64` | Container entrypoint only: refused a malformed `UMASK`, or a `BACKUP_MODE` that does not start with `--`. |
 
 Failures never stop the rest of the run: a repository that cannot be cloned
 does not prevent its issues or the other repositories from being backed up.

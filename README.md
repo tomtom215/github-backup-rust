@@ -3,7 +3,7 @@
 [![CI](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml)
 [![Book](https://github.com/tomtom215/github-backup-rust/actions/workflows/pages.yml/badge.svg)](https://tomtom215.github.io/github-backup-rust/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
+[![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-orange.svg)](Cargo.toml)
 
 A GitHub backup tool written in Rust.
 
@@ -31,7 +31,27 @@ also install from source with Cargo.
 
 ### 1. Pre-built binary
 
-Download the binary for your platform from the
+The install scripts pick the binary for your OS and CPU, check it against the
+release's `SHA256SUMS.txt` and install it without `sudo` (Linux and macOS:
+`~/.local/bin`; Windows: `%LOCALAPPDATA%\Programs\github-backup`):
+
+```bash
+# Linux, macOS
+curl -fsSL https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/tomtom215/github-backup-rust/main/install.ps1 | iex
+```
+
+To read a script first, download it and run `sh install.sh --version X.Y.Z
+--dir ~/bin` (or `.\install.ps1 -Version X.Y.Z -Dir ...`); see
+[Installation](https://tomtom215.github.io/github-backup-rust/getting-started/installation.html).
+`cargo binstall --git https://github.com/tomtom215/github-backup-rust github-backup`
+also downloads the release binary (without checking the checksums).
+
+Or download the binary for your platform from the
 [**Releases page**](https://github.com/tomtom215/github-backup-rust/releases),
 verify the SHA-256 checksum and put it on your `$PATH`:
 
@@ -63,16 +83,18 @@ gh attestation verify "github-backup-${TARGET}" \
 ### 2. Docker / Docker Compose
 
 Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR for every
-release (`latest`, `X.Y.Z`, `X.Y`).  `:latest` is the last *published release*;
-until the next release it lacks the behaviour described here, so build from
-source for now (`docker build -t github-backup .`).
+release (`latest`, `X.Y.Z`, `X.Y`) and as `edge` (plus `sha-<commit>`) from
+`main`.  `:latest` is the last *published release* and lacks the behaviour
+described here until the next release; use `:edge` (not a release: pin a
+release newer than v0.3.2 in production once one exists) or build the image
+yourself (`docker build -t github-backup .`).
 
 ```bash
 docker run --rm \
   -e GITHUB_TOKEN \
   -v "$PWD/backups:/backup" \
-  ghcr.io/tomtom215/github-backup-rust:latest \
-  octocat --output /backup --all
+  ghcr.io/tomtom215/github-backup-rust:edge \
+  octocat --output /backup
 ```
 
 (`-e GITHUB_TOKEN` forwards the variable from your shell without putting the
@@ -81,7 +103,7 @@ token on the command line.)  For a persistent setup use the bundled Compose file
 ```bash
 cp compose.example.env .env
 $EDITOR .env                                # set GITHUB_TOKEN etc.
-docker compose run --rm backup octocat --all
+docker compose run --rm backup octocat
 ```
 
 Compose profiles: `s3`, `b2`, `minio` (an S3 server you run), `codeberg`,
@@ -105,7 +127,7 @@ by URL as shown above.
 
 ### 4. Build from source
 
-Needs a Rust toolchain meeting the MSRV in `Cargo.toml` (**1.88**) and `git`:
+Needs a Rust toolchain meeting the MSRV in `Cargo.toml` (**1.89**) and `git`:
 
 ```bash
 # track main

@@ -275,7 +275,7 @@ fn missing_mirror_or_s3_credentials_fail_at_startup() {
         &[("GITHUB_TOKEN", "ghp_example")],
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("mirror token"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("MIRROR_TOKEN"), "{}", stderr(&out));
     let out = run(
         &["octocat", "--s3-bucket", "b"],
         &[("GITHUB_TOKEN", "ghp_example")],

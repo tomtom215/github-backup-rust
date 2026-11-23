@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: MIT
+# Copyright 2026 Tom F
+#
+# Publishes the `edge` container image from main:
+#
+#   ghcr.io/<repo>:edge          the latest commit on main that changed the image
+#   ghcr.io/<repo>:sha-<commit>  that exact commit
+#
+# Releases still publish `latest`, `X.Y.Z` and `X.Y` (release.yml).  `edge` is
+# for people who need what main has before it is released; it is not a
+# release and can break.
+#
+# Static musl binaries are compiled natively on an x86_64 and an arm64 runner
+# with the Dockerfile's `export` stage (no QEMU compile) and then packaged by
+# image.yml, the same way release.yml does it.
+
+name: Edge image
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker/**"
+      - ".github/workflows/edge.yml"
+      - ".github/workflows/image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to main supersedes an edge build that is still running.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  linux-binaries:
+    name: Linux binary (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build static binary (Dockerfile export stage)
+        run: docker build --target export --output type=local,dest=out .
+
+      - name: Check the binary is static and runs, and stage it
+        env:
+          ARTIFACT: github-backup-linux-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          file out/github-backup | grep -Eq 'statically linked|static-pie linked'
+          ./out/github-backup --version
+          mkdir staging
+          cp out/github-backup "staging/$ARTIFACT"
+          (cd staging && sha256sum "$ARTIFACT" > "$ARTIFACT.sha256")
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: github-backup-linux-${{ matrix.arch }}
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 3
+
+  image:
+    name: Edge image
+    needs: linux-binaries
+    # `edge` always means main, also for a manual run.
+    if: github.ref == 'refs/heads/main'
+    # What image.yml's job needs (a called workflow gets at most these).
+    permissions:
+      contents: read             # checkout
+      packages: write            # push to GHCR
+      id-token: write            # sign the image attestation
+      attestations: write        # store it
+      artifact-metadata: write   # storage record for the image
+    # A job-level reusable workflow is resolved from this same commit, not
+    # from a checkout, so the newer `$/` form adds nothing here (and
+    # actionlint does not accept it yet).
+    uses: ./.github/workflows/image.yml # zizmor: ignore[self-repository]
+    with:
+      push: true
+      tags: |
+        type=edge,branch=main
+        type=sha,format=long

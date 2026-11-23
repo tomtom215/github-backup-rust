@@ -237,10 +237,11 @@ github-backup --decrypt \
   --decrypt-input issues.json.enc --decrypt-output issues.json
 ```
 
-`--decrypt` needs no `OWNER` and no network.  The wire format is
-`[12-byte random nonce][ciphertext + 16-byte GCM tag]`.  `openssl enc` cannot
-decrypt it (it does not support AES-GCM); use the tool, or any AES-GCM library,
-as shown in [At-Rest Encryption](storage/encryption.md#decrypting).
+`--decrypt` needs no `OWNER` and no network, and reads objects written by this
+version and by earlier ones.  The wire format is described in
+[At-Rest Encryption](storage/encryption.md#wire-format).  `openssl enc` cannot
+decrypt it (it does not support AES-GCM); use the tool, or an AES-GCM and HKDF
+library, as shown in [At-Rest Encryption](storage/encryption.md#decrypting).
 
 ---
 

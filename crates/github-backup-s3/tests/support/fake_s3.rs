@@ -130,6 +130,9 @@ pub enum Action {
     Delay(Duration),
     /// `CompleteMultipartUpload` answers `200 OK` whose body is an `<Error>`.
     CompleteWithErrorBody { code: &'static str },
+    /// Carry the request out, then close the connection without answering
+    /// (a response lost on the way back).
+    LoseResponse,
 }
 
 /// A fault-injection rule.  All set predicates must match.
@@ -583,6 +586,7 @@ async fn handle(
 
     // Pre-authentication faults: dropped connections and delays.
     let early = take_fault(&shared, &method, &key, &query, false);
+    let lose_response = matches!(early, Some(Action::LoseResponse));
     if let Some(action) = early {
         match action {
             Action::Drop => {
@@ -663,11 +667,15 @@ async fn handle(
     let reply = dispatch(&shared, &cfg, &parsed, &body);
     record.status = reply.status;
     shared.state().records.push(record);
+    if lose_response {
+        return Err(std::io::Error::other("fake S3: response lost by rule"));
+    }
     Ok(to_response(reply, is_head))
 }
 
 /// Finds the first applicable rule.  `service_side` selects `Error` and
-/// `CompleteWithErrorBody` actions; otherwise `Drop` and `Delay`.
+/// `CompleteWithErrorBody` actions; otherwise `Drop`, `Delay` and
+/// `LoseResponse`.
 fn take_fault(
     shared: &Shared,
     method: &str,

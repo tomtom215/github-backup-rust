@@ -54,29 +54,28 @@ use crate::notify::NotifyFormat;
 ///
 /// # Examples
 ///
-/// Back up everything for a user:
+/// Back up everything the token's account owns (token from `GITHUB_TOKEN`,
+/// `GH_TOKEN` or `gh auth login`):
 /// ```text
-/// github-backup octocat --token ghp_xxx --output /backup --all
+/// github-backup --output /backup
 /// ```
 ///
 /// Back up only repositories and issues for an org, with 8 parallel workers:
 /// ```text
-/// github-backup my-org --token ghp_xxx --output /backup --org \
-///   --repositories --issues --concurrency 8
+/// github-backup my-org --output /backup --repositories --issues --concurrency 8
 /// ```
 ///
 /// Use the OAuth device flow:
 /// ```text
 /// github-backup octocat --device-auth --oauth-client-id YOUR_APP_ID \
-///   --output /backup --all
+///   --output /backup
 /// ```
 ///
-/// Shallow-clone repos and mirror to Codeberg:
+/// Back up repositories and mirror them to Codeberg (token in MIRROR_TOKEN;
+/// mirrors need full clones, so keep the default clone type):
 /// ```text
-/// github-backup octocat --token ghp_xxx --output /backup --repositories \
-///   --clone-type shallow:5 \
-///   --mirror-to https://codeberg.org \
-///   --mirror-token CODEBERG_TOKEN --mirror-owner your_username
+/// github-backup octocat --output /backup --repositories \
+///   --mirror-to https://codeberg.org --mirror-owner your_username
 /// ```
 ///
 /// Load settings from a config file:
@@ -406,13 +405,14 @@ pub struct Args {
     #[arg(help_heading = "Repositories and git", long)]
     pub lfs: bool,
 
-    /// Delete branches and tags from the local clone when they were deleted
-    /// on GitHub.
+    /// Delete branches and tags from the local clone, and from the
+    /// `--mirror-to` destination, when they were deleted on GitHub.
     ///
     /// Off by default: a backup keeps what GitHub no longer has, so a deleted
     /// branch or tag stays recoverable.  Branches that were force-pushed are
     /// overwritten either way (their old commits are not kept).  Turn this on
-    /// to make each clone an exact mirror of GitHub's current refs.
+    /// to make each clone and each mirror an exact copy of GitHub's current
+    /// refs.
     #[arg(
         help_heading = "Repositories and git",
         long,

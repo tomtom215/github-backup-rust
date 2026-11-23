@@ -57,40 +57,74 @@ pub(crate) fn derive_subkey(key: &[u8; 32], info: &[u8]) -> Zeroizing<[u8; 32]> 
     out
 }
 
+/// The running hash behind a digest.
+enum Hasher {
+    Plain(Sha256),
+    Keyed(HmacSha256),
+}
+
+/// A [`Read`] adapter that computes the digest (see [`digest_reader`]) of
+/// everything read through it, so a file can be hashed while it is uploaded.
+pub struct DigestingReader<R> {
+    inner: R,
+    hasher: Hasher,
+}
+
+impl<R> std::fmt::Debug for DigestingReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DigestingReader").finish_non_exhaustive()
+    }
+}
+
+impl<R: Read> DigestingReader<R> {
+    /// Hashes what `inner` yields: SHA-256, or — with an encryption key —
+    /// HMAC-SHA256 under the derived digest subkey.
+    pub fn new(inner: R, key: Option<&[u8; 32]>) -> Self {
+        let hasher = match key {
+            None => Hasher::Plain(Sha256::new()),
+            Some(key) => {
+                let subkey = derive_subkey(key, DIGEST_KEY_INFO);
+                Hasher::Keyed(
+                    <HmacSha256 as KeyInit>::new_from_slice(&*subkey)
+                        .expect("HMAC accepts any key length"),
+                )
+            }
+        };
+        Self { inner, hasher }
+    }
+
+    /// The hex digest of everything read so far.
+    #[must_use]
+    pub fn finish(self) -> String {
+        match self.hasher {
+            Hasher::Plain(hasher) => hex_encode(&hasher.finalize()),
+            Hasher::Keyed(mac) => hex_encode(&mac.finalize().into_bytes()),
+        }
+    }
+}
+
+impl<R: Read> Read for DigestingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        match &mut self.hasher {
+            Hasher::Plain(hasher) => hasher.update(&buf[..n]),
+            Hasher::Keyed(mac) => mac.update(&buf[..n]),
+        }
+        Ok(n)
+    }
+}
+
 /// Computes the digest of everything `reader` yields: SHA-256 hex, or — with
 /// an encryption key — HMAC-SHA256 hex under the derived digest subkey.
 ///
 /// # Errors
 ///
 /// Returns the I/O error of the reader.
-pub fn digest_reader<R: Read>(mut reader: R, key: Option<&[u8; 32]>) -> std::io::Result<String> {
+pub fn digest_reader<R: Read>(reader: R, key: Option<&[u8; 32]>) -> std::io::Result<String> {
+    let mut reader = DigestingReader::new(reader, key);
     let mut buffer = vec![0u8; READ_BUFFER_BYTES];
-    match key {
-        None => {
-            let mut hasher = Sha256::new();
-            loop {
-                let n = reader.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..n]);
-            }
-            Ok(hex_encode(&hasher.finalize()))
-        }
-        Some(key) => {
-            let subkey = derive_subkey(key, DIGEST_KEY_INFO);
-            let mut mac =
-                HmacSha256::new_from_slice(&*subkey).expect("HMAC accepts any key length");
-            loop {
-                let n = reader.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                mac.update(&buffer[..n]);
-            }
-            Ok(hex_encode(&mac.finalize().into_bytes()))
-        }
-    }
+    while reader.read(&mut buffer)? > 0 {}
+    Ok(reader.finish())
 }
 
 /// Digest of the file at `path` (see [`digest_reader`]).
