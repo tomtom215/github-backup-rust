@@ -45,8 +45,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::OsRng;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
@@ -139,7 +137,9 @@ impl RetryPolicy {
         let jitter = if half_ms == 0 {
             Duration::ZERO
         } else {
-            Duration::from_millis(OsRng.next_u64() % (half_ms + 1))
+            // Jitter only needs to be unpredictable enough to de-synchronise
+            // retries; if the OS RNG is unavailable, fall back to no jitter.
+            Duration::from_millis(getrandom::u64().unwrap_or(0) % (half_ms + 1))
         };
         half + jitter
     }

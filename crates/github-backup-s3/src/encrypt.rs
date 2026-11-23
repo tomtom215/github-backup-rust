@@ -15,7 +15,7 @@
 //! The payload is the STREAM construction of Hoang, Reyhanitabar, Rogaway and
 //! Vizár ("Online Authenticated-Encryption and its Nonce-Reuse
 //! Misuse-Resistance", CRYPTO 2015), as implemented by RustCrypto's
-//! `aead::stream::EncryptorBE32`, over AES-256-GCM:
+//! `aead_stream::EncryptorBE32`, over AES-256-GCM:
 //!
 //! * The plaintext is cut into 64 KiB segments; each is sealed separately and
 //!   carries its own 16-byte tag.  The last segment may be shorter (and is
@@ -65,10 +65,9 @@
 
 use std::io::{self, Read};
 
-use aead::stream::{DecryptorBE32, EncryptorBE32};
-use aes_gcm::aead::rand_core::RngCore;
+use aead_stream::{DecryptorBE32, EncryptorBE32, StreamBE32};
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use hmac::{Hmac, Mac};
@@ -114,16 +113,16 @@ pub fn encrypted_len(plaintext_len: u64) -> u64 {
 /// HKDF-Expand of one block is [`derive_subkey`].
 fn payload_cipher(key: &[u8; 32], salt: &[u8]) -> Aes256Gcm {
     let mut extract =
-        <Hmac<Sha256> as Mac>::new_from_slice(salt).expect("HMAC accepts any key length");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(salt).expect("HMAC accepts any key length");
     extract.update(key);
     let mut prk = Zeroizing::new([0u8; 32]);
     prk.copy_from_slice(&extract.finalize().into_bytes());
     let okm = derive_subkey(&prk, PAYLOAD_KEY_INFO);
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*okm))
+    Aes256Gcm::new(&Key::<Aes256Gcm>::from(*okm))
 }
 
 /// The STREAM nonce prefix: zero, because every object has its own key.
-fn stream_nonce() -> aead::stream::Nonce<Aes256Gcm, aead::stream::StreamBE32<Aes256Gcm>> {
+fn stream_nonce() -> aead_stream::Nonce<Aes256Gcm, StreamBE32<Aes256Gcm>> {
     Default::default()
 }
 
@@ -152,20 +151,25 @@ impl<R> std::fmt::Debug for EncryptingReader<R> {
 
 impl<R: Read> EncryptingReader<R> {
     /// Encrypts what `inner` yields under `key`, with a fresh random salt.
-    pub fn new(key: &[u8; 32], inner: R) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Fails only if the operating-system random number generator does.
+    pub fn new(key: &[u8; 32], inner: R) -> io::Result<Self> {
         let mut salt = [0u8; SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
+        getrandom::fill(&mut salt)
+            .map_err(|e| io::Error::other(format!("operating-system RNG failed: {e}")))?;
         let encryptor = EncryptorBE32::from_aead(payload_cipher(key, &salt), &stream_nonce());
         let mut out = Vec::with_capacity(SEGMENT_LEN + TAG_LEN);
         out.extend_from_slice(&MAGIC);
         out.extend_from_slice(&salt);
-        Self {
+        Ok(Self {
             inner,
             encryptor: Some(encryptor),
             pending: Vec::with_capacity(SEGMENT_LEN + 1),
             out,
             pos: 0,
-        }
+        })
     }
 
     /// The inner reader (for example to finish a digest computed over the
@@ -242,7 +246,7 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, S3Error> {
     let mut out =
         Vec::with_capacity(usize::try_from(encrypted_len(plaintext.len() as u64)).unwrap_or(0));
     EncryptingReader::new(key, plaintext)
-        .read_to_end(&mut out)
+        .and_then(|mut reader| reader.read_to_end(&mut out))
         .map_err(|e| S3Error::Encrypt(e.to_string()))?;
     Ok(out)
 }
@@ -289,8 +293,9 @@ fn decrypt_v1(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
 /// Decrypts the legacy single-message format.
 fn decrypt_legacy(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
     let (nonce, ciphertext) = blob.split_at(LEGACY_NONCE_LEN);
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+    let nonce = Nonce::try_from(nonce).expect("split_at(LEGACY_NONCE_LEN)");
+    Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key))
+        .decrypt(&nonce, ciphertext)
         .ok()
 }
 
@@ -306,8 +311,8 @@ mod tests {
     fn encrypt_legacy(key: &[u8; 32], nonce: [u8; 12], plaintext: &[u8]) -> Vec<u8> {
         let mut out = nonce.to_vec();
         out.extend(
-            Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
-                .encrypt(Nonce::from_slice(&nonce), plaintext)
+            Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key))
+                .encrypt(&Nonce::from(nonce), plaintext)
                 .unwrap(),
         );
         out
@@ -365,7 +370,7 @@ mod tests {
             }
         }
         let pt: Vec<u8> = (0..(2 * SEGMENT_LEN + 11)).map(|i| (i % 7) as u8).collect();
-        let mut reader = EncryptingReader::new(&KEY, Trickle(&pt));
+        let mut reader = EncryptingReader::new(&KEY, Trickle(&pt)).unwrap();
         let mut blob = Vec::new();
         let mut buf = [0u8; 5];
         loop {

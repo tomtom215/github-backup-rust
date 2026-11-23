@@ -74,7 +74,7 @@ Objects written by this version:
 ```
 
 * This is the **STREAM** construction (Hoang, Reyhanitabar, Rogaway and Vizár,
-  CRYPTO 2015) as implemented by RustCrypto's `aead::stream`, laid out like
+  CRYPTO 2015) as implemented by RustCrypto's `aead-stream` crate, laid out like
   the payload of the [age](https://age-encryption.org/v1) file format, with
   AES-256-GCM in place of ChaCha20-Poly1305.
 * The salt is random (operating-system CSPRNG) for every object. The object's
@@ -205,8 +205,9 @@ repeated 32 times): `{"hello":"world"}\n` (a 74-byte object) and a
 
 * **AES-256-GCM** gives 256-bit key strength and authenticated encryption; any
   change to the ciphertext or tag makes decryption fail.
-* **Random salts** come from `OsRng`. With a fresh 256-bit salt per object,
-  two objects end up with the same key (and so reuse GCM nonces) with
-  negligible probability, which is why the nonce prefix can be fixed.
+* **Random salts** come from the operating system (`getrandom`). With a fresh
+  256-bit salt per object, two objects end up with the same key (and so reuse
+  GCM nonces) with negligible probability, which is why the nonce prefix can
+  be fixed.
 * You can combine this with server-side encryption (SSE-S3 / SSE-KMS) for
   defence in depth; that protects the disks, not the names.

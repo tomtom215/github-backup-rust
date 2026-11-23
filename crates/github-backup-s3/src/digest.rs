@@ -23,7 +23,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -85,7 +85,7 @@ impl<R: Read> DigestingReader<R> {
             Some(key) => {
                 let subkey = derive_subkey(key, DIGEST_KEY_INFO);
                 Hasher::Keyed(
-                    <HmacSha256 as Mac>::new_from_slice(&*subkey)
+                    <HmacSha256 as KeyInit>::new_from_slice(&*subkey)
                         .expect("HMAC accepts any key length"),
                 )
             }

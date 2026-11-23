@@ -648,7 +648,7 @@ impl UploadBody {
     fn open(path: &Path, key: Option<&[u8; 32]>) -> std::io::Result<Self> {
         let plain = DigestingReader::new(File::open(path)?, key);
         Ok(match key {
-            Some(key) => Self::Encrypted(Box::new(EncryptingReader::new(key, plain))),
+            Some(key) => Self::Encrypted(Box::new(EncryptingReader::new(key, plain)?)),
             None => Self::Plain(plain),
         })
     }
