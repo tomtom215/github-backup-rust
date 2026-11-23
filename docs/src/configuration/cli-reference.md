@@ -158,6 +158,7 @@ workflow run history.
 | `--projects` | The owner's Projects (v2): projects, fields and items with their field values (needs `read:project`). |
 | `--packages` | Package metadata of the target user or organisation (needs `read:packages`). |
 | `--commit-comments` | Comments made on the commits of each repository (`commit_comments.json`). |
+| `--attachments` | Files and images attached to issues, pull requests, comments, reviews, commit comments and release notes, found in the stored bodies, under `attachments/` (see [Attachments](../backup-categories.md#attachments)).  Private repositories need a classic token. |
 
 ## Organisation Data
 

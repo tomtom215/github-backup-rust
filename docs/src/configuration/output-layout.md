@@ -43,7 +43,7 @@ removed deploy key or collaborator must not look as if it were still there.
 
 | Kind | Files (key) |
 |------|-------------|
-| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`) |
+| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`); `attachments/index.json` (the URL) |
 | Snapshot | `info.json`, `topics.json`, `branches.json`, `branch_protections.json`, `rulesets.json`, `hooks.json`, `deploy_keys.json`, `collaborators.json`, `environments.json`, `starred.json`, `watched.json`, `followers.json`, `following.json`, `org_members.json`, `org_teams.json`, `gists/starred_index.json`, `gists/<id>.json`, `gists/<id>.starred.json` |
 
 Within an accumulating file the objects are ordered by their key when it is a
@@ -126,6 +126,9 @@ labels and milestones that were deleted on GitHub after they were backed up.
                 ├── deploy_keys.json
                 ├── collaborators.json
                 ├── commit_comments.json    ← --all
+                ├── attachments/            ← --attachments
+                │   ├── <sha256>.<ext>      ← one attached file, named by its content
+                │   └── index.json          ← URL → file, size, type, digest, first seen
                 ├── workflows.json
                 ├── workflow_runs_<id>.json ← one per workflow (--action-runs)
                 └── environments.json
@@ -236,9 +239,43 @@ mirror clone plus the LFS objects in the same directory.
 | `repos/<name>/deploy_keys.json` | `--deploy-keys` |
 | `repos/<name>/collaborators.json` | `--collaborators` |
 | `repos/<name>/commit_comments.json` | `--all` |
+| `repos/<name>/attachments/<sha256>.<ext>`, `attachments/index.json` | `--attachments` |
 | `repos/<name>/workflows.json` | `--actions` |
 | `repos/<name>/workflow_runs_<id>.json` | `--action-runs` |
 | `repos/<name>/environments.json` | `--environments` |
+
+### Attachments
+
+Files attached to issues, pull requests, comments, reviews, commit comments and
+release notes (see [Attachments](../backup-categories.md#attachments)).  The
+stored JSON keeps the original links; `index.json` is an object keyed by the
+link as it appears in the body (`&amp;` read as `&`, without a `#fragment`):
+
+```json
+{
+  "https://github.com/user-attachments/assets/0b1f6c2e-...": {
+    "file": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef.png",
+    "size": 48213,
+    "content_type": "image/png",
+    "sha256": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+    "first_seen": "2026-11-23T10:00:00Z"
+  },
+  "https://github.com/user-attachments/files/17/deleted.log": {
+    "first_seen": "2026-11-23T10:00:00Z",
+    "missing": 404,
+    "checked_at": "2026-11-23T10:00:00Z"
+  }
+}
+```
+
+`file` is relative to `attachments/`; a file attached under several links is
+stored once.  `missing` and `checked_at` mark a link GitHub answered 404 or 410
+(or, for an expired signed link, another client error); an earlier download of
+that link keeps its `file`.  A download is streamed to `attachments/.incoming`
+and renamed once its digest is known; the index is written every 25 downloads
+and at the end, so an interrupted run keeps most of its work.  The S3 sync
+uploads `attachments/` like the JSON files (only `release_assets/` is held back
+without `--s3-include-assets`).
 
 ### Release assets
 

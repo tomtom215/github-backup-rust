@@ -45,7 +45,8 @@ AWS SDK), and an optional full-screen TUI is available with `--tui`.
 - **Discussions and Projects**: GitHub's REST API has no endpoints for them
   (`--discussions` and `--projects` are accepted but do nothing).
 - Actions secrets and variables, code-scanning and Dependabot alerts, rulesets,
-  issue attachments, commit comments and statuses.
+  commit comments and statuses.  Issue attachments only with `--attachments`
+  (part of `--all`).
 - **Git LFS objects** unless you pass `--lfs` (requires `git-lfs`).
 - Repository **clones are not uploaded to S3**, only the JSON metadata.
 - It cannot see what the token cannot see: other users' private data, or

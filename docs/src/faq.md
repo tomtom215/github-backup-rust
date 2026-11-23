@@ -43,7 +43,8 @@ interval until it is stopped; see
 See [What Is Not Restored, or Not Backed Up](restore.md#what-is-not-restored-or-not-backed-up).
 In short: Discussions and Projects (GitHub's REST API has no endpoints for them),
 Actions secrets and variables, code-scanning and Dependabot alerts, issue
-attachments, LFS objects unless `--lfs`, and the contents of starred gists.
+attachments unless `--attachments` (or `--all`), LFS objects unless `--lfs`, and
+the contents of starred gists.
 
 ### Does a second run overwrite the first?
 

@@ -71,8 +71,10 @@ machine and ends up in the shell history, so the tool warns whenever a secret
 `--encrypt-key`, `--notify-webhook`) is given on the command line.
 
 The token is only ever sent to the GitHub API host you configured, as
-`Authorization: Bearer ...`, and to `git` through a credential helper limited to
-the clone URL's host.  It is not written to disk by the tool and is removed from
+`Authorization: Bearer ...`, to `git` through a credential helper limited to
+the clone URL's host, and, with `--attachments` against github.com, to
+`https://github.com` as HTTP Basic authentication (see
+[Attachments of private repositories](#attachments-of-private-repositories)).  It is not written to disk by the tool and is removed from
 error messages.
 
 ---
@@ -103,6 +105,7 @@ failures it reports.
 | `--projects` | `read:project` | Projects: read (organisation permission) |
 | `--discussions` | n/a | n/a: nothing is backed up yet (GraphQL only) |
 | commit comments (`--all`) | `repo` (private) | Contents: read |
+| `--attachments` | `repo` (private) | reported not to work for private repositories, see below |
 | `--restore` | `repo` (write) | Issues: read and write |
 
 Notes:
@@ -119,9 +122,34 @@ Notes:
   does not exist for a repository (404/410) is skipped without a failure; see
   [When GitHub answers 403, 404 or 410](../backup-categories.md#when-github-answers-403-404-or-410).  A repository
   that cannot be listed or cloned at all is a failure (exit status `3`).
+* **Attachments** have their own rules, see the next section.
 * `github-backup --list-scopes <flags>` prints the classic scopes for the
   categories the flags select (with none selected, or `--all`: `admin:repo_hook
   gist read:org read:packages read:project repo`).
+
+### Attachments of private repositories
+
+Files attached to issues, comments and release notes (`--attachments`) are not
+served by the API but by `github.com` itself, which redirects to a signed
+storage URL.  Since
+[May 2023](https://github.blog/changelog/2023-05-08-more-secure-private-attachments)
+new attachments of private repositories need a signed-in user; older ones and
+those of public repositories are reachable by their unguessable URL.
+
+The project has not tested this against live accounts.  What is known comes
+from [python-github-backup](https://github.com/josegonzalez/python-github-backup)
+([issue #477](https://github.com/josegonzalez/python-github-backup/issues/477)):
+a **classic token with the `repo` scope**, sent as HTTP Basic authentication
+(`<token>:x-oauth-basic`), downloads them; **fine-grained and GitHub App
+tokens** are answered `404 Not Found` for many attachments of private
+repositories.  `github-backup` sends the token in that same form, to
+`https://github.com` only, and only when it talks to github.com's API (a GitHub
+Enterprise Server token never goes to github.com); the storage host gets no
+credential.  A 404 cannot be told apart from a deleted attachment, so it is
+recorded as missing, with a warning, rather than as a failure; after switching
+to a classic token, run once with `--full` to ask for those again.  A 401, 403
+or a sign-in page is a refusal: a failure with `--attachments`, one warning
+per run under `--all`.
 
 ---
 

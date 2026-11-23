@@ -77,6 +77,8 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
 - **Release assets** are streamed to disk through an `AssetSink`, with the
   same rate-limit and retry handling until the body starts; the
   `Authorization` header is dropped on any redirect that leaves the origin.
+  **Attachments** are streamed the same way; the credential (HTTP Basic) goes
+  only to `https://github.com`, and only from a client for github.com's API.
 - `proxy`: HTTP `CONNECT` proxy support from `HTTPS_PROXY`, `HTTP_PROXY`,
   `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook, `--doctor` and
   the device flow.  HTTP/1.1 only.
@@ -108,7 +110,8 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (`GET /repos/{o}/{r}`), repository clone,
   wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
   advisories, branches and rulesets, deploy keys, collaborators, actions,
-  environments, commit comments.  Inside a category an item that fails (one
+  environments, commit comments, attachments (read from the bodies stored
+  by the steps before).  Inside a category an item that fails (one
   issue's comments) is recorded and the category carries on; a category that
   answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
   warning per category per run).
