@@ -210,6 +210,33 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// The `safe.directory` value that names the canonical path `real` the way
+/// git compares it.
+///
+/// On Windows `canonicalize` returns a verbatim path (`\\?\C:\backup\r.git`,
+/// `\\?\UNC\server\share\r.git`), which git never matches; the prefix is
+/// dropped and the separators become `/`, the form git uses internally.
+fn safe_directory_value(real: &Path) -> String {
+    let text = strip_verbatim_prefix(&real.display().to_string());
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
+}
+
+/// `\\?\C:\x` becomes `C:\x` and `\\?\UNC\server\share` becomes
+/// `\\server\share`; any other text is returned unchanged.
+fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 /// `true` for the URL forms git hands to `ssh`: `ssh://`, `git+ssh://`,
 /// `ssh+git://` and the scp-like `[user@]host:path`.
 fn is_ssh_url(url: &str) -> bool {
@@ -272,7 +299,7 @@ pub(super) fn run_git(
     if cwd != Path::new(".") {
         if let Ok(real) = cwd.canonicalize() {
             global.push("-c".into());
-            global.push(format!("safe.directory={}", real.display()));
+            global.push(format!("safe.directory={}", safe_directory_value(&real)));
         }
     }
     if token.is_some() {
@@ -377,6 +404,31 @@ mod tests {
     fn summarise_tolerates_invalid_utf8() {
         let out = summarise_stderr(b"fatal: bad \xff\xfe bytes\n");
         assert!(out.starts_with("fatal: bad"));
+    }
+
+    /// Regression (Windows): `canonicalize` returns `\\?\` paths, which git's
+    /// `safe.directory` never matches, so the trust it was meant to give was
+    /// not given.
+    #[test]
+    fn verbatim_windows_prefixes_are_dropped() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\backup\o\git\r.git"),
+            r"C:\backup\o\git\r.git"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\nas\share\r.git"),
+            r"\\nas\share\r.git"
+        );
+        // A verbatim path that is not a disk or UNC path has no other form.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\Volume{x}\r.git"),
+            r"\\?\Volume{x}\r.git"
+        );
+        assert_eq!(strip_verbatim_prefix("/backup/r.git"), "/backup/r.git");
+        assert_eq!(
+            safe_directory_value(Path::new("/backup/o/r.git")),
+            "/backup/o/r.git"
+        );
     }
 
     #[test]

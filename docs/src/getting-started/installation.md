@@ -241,7 +241,7 @@ Then add `use github-backup` to `~/.config/elvish/rc.elv`.
 
 | Requirement | Details |
 |---|---|
-| **OS** | Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64).  Linux and macOS are tested in CI; Windows is built but not tested there. |
+| **OS** | Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64).  Linux and macOS are tested in CI; Windows is built but not tested there.  On Windows a name that is a reserved device name (`con`, `aux`, `nul`, `com1`, `lpt1`, ..., also with an extension) cannot be stored: such a repository or gist is reported as a failure of the run, and such a release tag or asset file name is stored as `_`. |
 | **git** | `git` on the `PATH`; `--doctor` warns below 2.20.  The container image includes it. |
 | **git-lfs** | Only for `--lfs`.  The container image includes it. |
 | **Rust** | MSRV 1.88, only for building from source |
