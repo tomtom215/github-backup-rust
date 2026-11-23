@@ -32,7 +32,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{Child, ChildStderr, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 
 use super::credential;
-use super::CloneOptions;
+use super::{CloneOptions, GitCommand};
 use crate::error::CoreError;
 
 /// How much of a child's stderr is retained for error messages.
@@ -175,7 +175,7 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Runs `program` with `args` in `cwd` and waits for it, applying the
+/// Runs `git` with `args` in `cwd` and waits for it, applying the
 /// supervision rules described in the [module documentation](self).
 ///
 /// If `token` is `Some` and `url` is an HTTP(S) URL, the token is supplied to
@@ -183,7 +183,7 @@ fn kill_tree(child: &mut Child) {
 /// that URL's origin (see [`credential`]): no file is created and the token is
 /// never part of an argument list.  `url` is the remote the command talks to.
 pub(super) fn run_git(
-    program: &Path,
+    git: &GitCommand,
     args: &[&str],
     cwd: &Path,
     url: &str,
@@ -210,7 +210,7 @@ pub(super) fn run_git(
         global.extend(credential::config_args(url));
     }
 
-    let mut cmd = Command::new(program);
+    let mut cmd = git.command();
     cmd.args(&global)
         .args(args)
         .current_dir(cwd)

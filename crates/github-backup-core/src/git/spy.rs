@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! [`SpyGitRunner`] — a test-only [`GitRunner`] stub.
+//! [`SpyGitRunner`] — a [`GitRunner`] stub for the crate's own tests (the
+//! module is compiled only under `cfg(test)`).
 //!
 //! Records every call made to it without executing any git processes.
 //! Useful for unit-testing code that calls the [`GitRunner`] trait without
@@ -43,11 +44,11 @@ pub enum SpyFailure {
 /// A recorded call to a [`GitRunner`] method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitCall {
-    /// Method name, e.g. `"mirror_clone"`, `"full_clone"`, `"push_mirror"`.
+    /// Method name, e.g. `"mirror_clone"`, `"full_clone"`.
     pub method: String,
-    /// The URL or remote argument.
+    /// The URL argument.
     pub url: String,
-    /// The destination or source path argument.
+    /// The destination path argument.
     pub dest: PathBuf,
 }
 
@@ -101,16 +102,6 @@ impl GitRunner for SpyGitRunner {
     ) -> Result<(), CoreError> {
         self.record("lfs_clone", url, dest);
         self.outcome(url)
-    }
-
-    async fn push_mirror(
-        &self,
-        src: &Path,
-        remote_url: &str,
-        _opts: &CloneOptions,
-    ) -> Result<(), CoreError> {
-        self.record("push_mirror", remote_url, src);
-        self.outcome(remote_url)
     }
 }
 
@@ -243,20 +234,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_mirror_records_call() {
-        let runner = SpyGitRunner::default();
-        let src = PathBuf::from("/tmp/local.git");
-        runner
-            .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
-            .await
-            .expect("push mirror");
-
-        let calls = runner.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].method, "push_mirror");
-    }
-
-    #[tokio::test]
     async fn multiple_calls_all_recorded() {
         let runner = SpyGitRunner::default();
         let dest = PathBuf::from("/tmp/repo.git");
@@ -303,7 +280,7 @@ mod tests {
             SpyGitRunner::default().failing_when_url_contains("", SpyFailure::Interrupted);
         assert!(matches!(
             cancelled
-                .push_mirror(&dest, "https://h/any.git", &opts())
+                .bare_clone("https://h/any.git", &dest, &opts())
                 .await,
             Err(CoreError::Interrupted)
         ));

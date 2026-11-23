@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Git subprocess abstraction: clone, mirror, push, and fetch.
+//! Git subprocess abstraction: clone and update repositories.
 //!
 //! The production implementation ([`ProcessGitRunner`]) shells out to the
 //! system `git` binary.  Credentials for HTTPS cloning are handed to git
@@ -38,11 +38,12 @@
 //!
 //! - `credential` — the host-scoped credential helper and its configuration
 //! - `process` — spawns and supervises one git subprocess
-//! - `spy` — test-only `SpyGitRunner` stub (available under `test_support` in tests)
+//! - `spy` — the `SpyGitRunner` stub used by the crate's tests (`cfg(test)` only)
 
 mod credential;
 mod process;
-pub mod spy;
+#[cfg(test)]
+pub(crate) mod spy;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -56,13 +57,10 @@ use process::run_git;
 
 // ── Public test-support re-export ─────────────────────────────────────────────
 
-/// Test-support module: re-exported from [`spy`] for use by sibling tests.
-///
-/// Importing this module from outside the crate requires `#[cfg(test)]`
-/// guards; the symbols are intentionally only `pub(crate)` at runtime.
+/// The `SpyGitRunner` stub, for the crate's own tests.
 #[cfg(test)]
-pub mod test_support {
-    pub use super::spy::{GitCall, SpyGitRunner};
+pub(crate) mod test_support {
+    pub use super::spy::SpyGitRunner;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -211,22 +209,6 @@ pub trait GitRunner: Send + Sync {
         dest: &Path,
         opts: &CloneOptions,
     ) -> impl Future<Output = Result<(), CoreError>> + Send;
-
-    /// Pushes all refs from the local repository at `src` to `remote_url`.
-    ///
-    /// Equivalent to `git -C <src> push --mirror <remote_url>`.  Used to push
-    /// a local bare/mirror clone to a secondary Git host (Gitea, Codeberg,
-    /// GitLab, etc.) after the primary backup has completed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::GitFailed`] or [`CoreError::GitSpawn`].
-    fn push_mirror(
-        &self,
-        src: &Path,
-        remote_url: &str,
-        opts: &CloneOptions,
-    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 }
 
 // ── Production implementation ─────────────────────────────────────────────────
@@ -234,8 +216,25 @@ pub trait GitRunner: Send + Sync {
 /// Production [`GitRunner`] that shells out to the system `git` binary.
 #[derive(Debug, Clone)]
 pub struct ProcessGitRunner {
-    /// The program to execute; `git` (resolved through `PATH`) by default.
+    git: GitCommand,
+}
+
+/// What is executed in place of `git`: a program, and arguments placed before
+/// git's own (empty except in tests, which run a stand-in script through
+/// `sh`).
+#[derive(Debug, Clone)]
+pub(crate) struct GitCommand {
     program: PathBuf,
+    leading_args: Vec<PathBuf>,
+}
+
+impl GitCommand {
+    /// A [`Command`] for this program, with its leading arguments.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.leading_args);
+        cmd
+    }
 }
 
 impl Default for ProcessGitRunner {
@@ -258,14 +257,34 @@ impl ProcessGitRunner {
     #[must_use]
     pub fn with_program(program: impl Into<PathBuf>) -> Self {
         Self {
-            program: program.into(),
+            git: GitCommand {
+                program: program.into(),
+                leading_args: Vec::new(),
+            },
+        }
+    }
+
+    /// Creates a runner that runs the shell script `script` (through `sh`)
+    /// instead of `git`.
+    ///
+    /// Executing a script the test has just written races with other tests
+    /// forking at the same moment: a forked child briefly holds the still-open
+    /// file descriptor, and `exec` then fails with "Text file busy".  Reading
+    /// the script with `sh` needs no `exec` of the file at all.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_shell_script(script: impl Into<PathBuf>) -> Self {
+        Self {
+            git: GitCommand {
+                program: PathBuf::from("sh"),
+                leading_args: vec![script.into()],
+            },
         }
     }
 
     /// Captures everything a blocking git job needs, by value.
     fn job(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Job {
         Job {
-            program: self.program.clone(),
+            git: self.git.clone(),
             url: url.to_owned(),
             dest: dest.to_owned(),
             opts: opts.clone(),
@@ -334,23 +353,12 @@ impl GitRunner for ProcessGitRunner {
         let job = self.job(url, dest, opts);
         async move { blocking(move || job.lfs_clone()).await }
     }
-
-    fn push_mirror(
-        &self,
-        src: &Path,
-        remote_url: &str,
-        opts: &CloneOptions,
-    ) -> impl Future<Output = Result<(), CoreError>> + Send {
-        // For a push, `dest` is the local repository and `url` the remote.
-        let job = self.job(remote_url, src, opts);
-        async move { blocking(move || job.push_mirror()).await }
-    }
 }
 
 /// One owned, blocking git operation.  Holds no borrows so it can move onto
 /// the blocking pool.
 struct Job {
-    program: PathBuf,
+    git: GitCommand,
     url: String,
     dest: PathBuf,
     opts: CloneOptions,
@@ -430,22 +438,6 @@ impl Job {
         self.update(&["lfs", "fetch", "--all", "origin"])
     }
 
-    fn push_mirror(&self) -> Result<(), CoreError> {
-        info!(
-            src = %self.dest.display(),
-            remote = %self.url,
-            "pushing mirror to remote"
-        );
-        run_git(
-            &self.program,
-            &["push", "--progress", "--mirror", &self.url],
-            &self.dest,
-            &self.url,
-            self.opts.token.as_deref(),
-            &self.opts,
-        )
-    }
-
     /// Arguments that bring an existing clone up to date with its remote.
     ///
     /// `git fetch --all` is used rather than `git remote update` because it
@@ -487,7 +479,7 @@ impl Job {
 
     fn run_update(&self, args: &[&str]) -> Result<(), CoreError> {
         run_git(
-            &self.program,
+            &self.git,
             args,
             &self.dest,
             &self.url,
@@ -528,7 +520,7 @@ impl Job {
             .collect();
 
         let result = run_git(
-            &self.program,
+            &self.git,
             &args,
             Path::new("."),
             &self.url,
@@ -537,7 +529,7 @@ impl Job {
         )
         .and_then(|()| {
             if self.opts.run_fsck {
-                run_fsck(&self.program, &staging);
+                run_fsck(&self.git, &staging);
             }
             std::fs::rename(&staging, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
         });
@@ -596,9 +588,10 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
 /// Corruption is not treated as a fatal error — the backup has already
 /// completed — but the issues are logged at `warn` level so operators can
 /// investigate.
-fn run_fsck(program: &Path, repo_dir: &Path) {
+fn run_fsck(git: &GitCommand, repo_dir: &Path) {
     debug!(repo = %repo_dir.display(), "running git fsck");
-    let output = Command::new(program)
+    let output = git
+        .command()
         .args(["fsck", "--no-dangling"])
         .current_dir(repo_dir)
         .output();
@@ -698,35 +691,20 @@ mod tests {
         assert_eq!(calls[0].method, "mirror_clone");
     }
 
-    #[tokio::test]
-    async fn spy_runner_push_mirror() {
-        let runner = SpyGitRunner::default();
-        let src = PathBuf::from("/tmp/local.git");
-        runner
-            .push_mirror(&src, "https://gitea.example.com/user/repo.git", &opts())
-            .await
-            .expect("push mirror");
-        let calls = runner.recorded_calls();
-        assert_eq!(calls[0].method, "push_mirror");
-    }
-
     // ── Process handling (stand-in `git` scripts, Unix only) ─────────────
     //
     // Cancellation (`CloneOptions::cancel`) is covered by the integration test
     // `tests/git_cancel.rs`.
 
-    /// Writes an executable shell script into `dir` and returns a runner that
-    /// executes it instead of the real `git`.
+    /// Writes a shell script into `dir` and returns a runner that runs it
+    /// instead of the real `git`.
     #[cfg(unix)]
     fn runner_with_script(dir: &Path, body: &str) -> ProcessGitRunner {
-        use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-git");
         // Like real git, a `clone` creates its destination (the last argument).
         let prelude = r#"if [ "$1" = clone ] || [ "$1" = lfs ]; then for d in "$@"; do :; done; mkdir -p "$d"; fi"#;
-        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\n{body}\n")).expect("write script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-        ProcessGitRunner::with_program(script)
+        std::fs::write(&script, format!("{prelude}\n{body}\n")).expect("write script");
+        ProcessGitRunner::with_shell_script(script)
     }
 
     /// Drops the global `-c key=value` options git is run with, leaving the
@@ -1166,20 +1144,18 @@ mod credential_tests {
     /// the child's environment, and the helper list is reset first.
     #[tokio::test]
     async fn token_is_never_in_argv_and_no_file_is_created() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let seen = dir.path().join("seen.txt");
         let script = dir.path().join("fake-git");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\n{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
+                "{{ printf '%s ' \"$@\"; echo; echo \"env=$GH_BACKUP_GIT_TOKEN\"; echo \"askpass=$GIT_ASKPASS\"; }} > '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
                 seen.display()
             ),
         )
         .expect("write");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let runner = ProcessGitRunner::with_program(&script);
+        let runner = ProcessGitRunner::with_shell_script(&script);
         runner
             .mirror_clone(
                 "https://ghes.example.com/o/r.git",
@@ -1298,12 +1274,15 @@ mod credential_tests {
         assert!(server.auth_headers().is_empty());
     }
 
+    /// A runner whose `git` is the shell script `body`, run through `sh`.
+    ///
+    /// Regression (CI flake): the script used to be written, made executable
+    /// and `exec`ed, which fails with "Text file busy" when another test forks
+    /// while the file is still open for writing.
     fn fake_git(dir: &Path, body: &str) -> ProcessGitRunner {
-        use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-git-2");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        ProcessGitRunner::with_program(script)
+        std::fs::write(&script, format!("{body}\n")).expect("write");
+        ProcessGitRunner::with_shell_script(script)
     }
 
     /// Updating a repository we manage trusts exactly that path (never `*`),
