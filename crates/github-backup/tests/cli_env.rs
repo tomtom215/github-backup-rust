@@ -335,3 +335,27 @@ fn secrets_on_the_command_line_are_warned_about() {
     );
     assert!(!text.contains("ghp_x"), "the value is never echoed: {text}");
 }
+
+/// Windows gives a program's main thread a 1 MiB stack (Linux 8 MiB), and a
+/// debug build of this binary needs more than that to start: every test above
+/// failed on Windows with "thread 'main' has overflowed its stack".  The
+/// program therefore runs on a thread with its own 8 MiB stack.  On Unix the
+/// main thread's stack is the `ulimit -s` of the shell, which reproduces the
+/// Windows limit.
+#[test]
+#[cfg(unix)]
+fn the_binary_starts_with_a_one_megabyte_main_thread_stack() {
+    let out = Command::new("/bin/sh")
+        .env_clear()
+        .arg("-c")
+        .arg("ulimit -s 1024 && exec \"$0\" --help")
+        .arg(env!("CARGO_BIN_EXE_github-backup"))
+        .output()
+        .expect("failed to spawn sh");
+    assert!(
+        out.status.success(),
+        "status {:?}: {}",
+        out.status,
+        stderr(&out)
+    );
+}

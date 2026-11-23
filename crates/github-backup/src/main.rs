@@ -35,9 +35,31 @@ use cli::Args;
 use post_process::decode_encrypt_key;
 use run::EXIT_FAILURE;
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    run().await
+/// Stack of the thread the program runs on.
+///
+/// Windows gives a program's main thread 1 MiB (Linux 8 MiB); a debug build
+/// keeps large `async` state machines on the stack and overflows that before
+/// the arguments are even parsed.  8 MiB matches the usual Linux default.
+const MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    let program = std::thread::Builder::new()
+        .name("github-backup".into())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("cannot start the async runtime")
+                .block_on(run())
+        })
+        .expect("cannot start the main thread");
+    match program.join() {
+        Ok(code) => code,
+        // The panic was already printed; re-raise it so the process ends as a
+        // panicking `main` would (exit status 101).
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 async fn run() -> ExitCode {
