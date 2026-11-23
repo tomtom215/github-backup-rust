@@ -356,6 +356,9 @@ impl ConfigState {
 
         let opts = BackupOptions {
             target,
+            // No form control yet: commit comments off, refusals are failures.
+            commit_comments: false,
+            tolerate_forbidden: false,
             full: *full,
             repositories: *repositories,
             forks: *forks,
@@ -422,6 +425,9 @@ impl ConfigState {
     pub fn from_backup_options(opts: &BackupOptions) -> Self {
         let BackupOptions {
             target,
+            // No form control yet; the TUI leaves these at their defaults.
+            commit_comments: _,
+            tolerate_forbidden: _,
             full,
             repositories,
             issues,

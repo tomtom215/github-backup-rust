@@ -39,7 +39,13 @@ pub async fn backup_wiki(
         return Ok(());
     }
 
-    let raw_wiki_url = format!("{}.wiki.git", repo.clone_url.trim_end_matches(".git"));
+    // Same transport as the repository clone: `--prefer-ssh` applies here too.
+    let base_url = if opts.prefer_ssh {
+        &repo.ssh_url
+    } else {
+        &repo.clone_url
+    };
+    let raw_wiki_url = format!("{}.wiki.git", base_url.trim_end_matches(".git"));
     let rewritten;
     let wiki_url: &str = if let Some(ref host) = opts.clone_host {
         rewritten = rewrite_host(&raw_wiki_url, host);
@@ -110,6 +116,30 @@ mod tests {
             updated_at: Some("2024-01-01T00:00:00Z".to_string()),
             html_url: "https://github.com/octocat/Hello-World".to_string(),
         }
+    }
+
+    /// The wiki used to be cloned over HTTPS even with `--prefer-ssh`.
+    #[tokio::test]
+    async fn prefer_ssh_clones_the_wiki_over_ssh() {
+        let opts = BackupOptions {
+            wikis: true,
+            prefer_ssh: true,
+            ..Default::default()
+        };
+        let git = SpyGitRunner::default();
+        backup_wiki(
+            &make_repo(true),
+            &opts,
+            &PathBuf::from("/backup/git/wikis"),
+            &git,
+            &CloneOptions::unauthenticated(),
+        )
+        .await
+        .expect("wiki backup");
+        assert_eq!(
+            git.recorded_calls()[0].url,
+            "git@github.com:octocat/Hello-World.wiki.git"
+        );
     }
 
     #[tokio::test]

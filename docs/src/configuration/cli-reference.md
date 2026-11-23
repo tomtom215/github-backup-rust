@@ -34,7 +34,7 @@ one another.
 | `-t, --token <TOKEN>` | `GITHUB_TOKEN`, `GH_TOKEN` | see below | Personal access token (classic or fine-grained).  Prefer a variable: a command-line value is visible in `ps`, and the tool warns about it. |
 | `--device-auth` | none | `false` | Use the GitHub OAuth device flow (interactive).  Needs `--oauth-client-id`. |
 | `--oauth-client-id <CLIENT_ID>` | `GITHUB_OAUTH_CLIENT_ID` | none | OAuth App client ID.  The variable is ignored unless `--device-auth` is given; the flag without `--device-auth` is an error. |
-| `--oauth-scopes <SCOPES>` | none | `repo gist read:org` | Scopes requested by the device flow (space-separated).  These do **not** cover every category (for example `--packages` needs `read:packages`); see [Authentication](../getting-started/authentication.md). |
+| `--oauth-scopes <SCOPES>` | none | `repo gist read:org read:packages read:project` | Scopes requested by the device flow (space-separated).  They cover every category of the default backup except webhooks (`admin:repo_hook`; without it webhooks are skipped with a warning); see [Authentication](../getting-started/authentication.md). |
 
 The token is taken from the first of: `--token`, `GITHUB_TOKEN`, `GH_TOKEN`,
 `token` in the config file, and the GitHub CLI's login (`gh auth token
@@ -150,13 +150,14 @@ workflow run history.
 | `--action-runs` | Run history per workflow.  Has an effect only while `--actions` is on (it is by default and with `--all`); can be very large; not part of `--all`. |
 | `--environments` | Deployment environments with protection rules. |
 
-## Discussions, Classic Projects, Packages
+## Discussions, Projects, Packages
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | **Not functional.**  GitHub has no REST endpoint for Discussions; nothing is saved and a warning is logged.  Still part of `--all`. |
-| `--projects` | **Not functional.**  Classic Projects are gone from GitHub's REST API; nothing is saved and a warning is logged.  Still part of `--all`. |
-| `--packages` | Package metadata of the target user (needs `read:packages`). |
+| `--discussions` | **Nothing is backed up yet.**  GitHub serves Discussions through GraphQL only; one warning per run says so.  Not part of `--all`. |
+| `--projects` | The owner's Projects (v2): projects, fields and items with their field values (needs `read:project`). |
+| `--packages` | Package metadata of the target user or organisation (needs `read:packages`). |
+| `--commit-comments` | Comments made on the commits of each repository (`commit_comments.json`). |
 
 ## Organisation Data
 
@@ -348,8 +349,8 @@ otherwise.
 
 `--list-scopes` maps the categories that would be backed up (after the default,
 `--all`, the config file and `--skip`) to the classic scopes they need; with no
-category selected, or with `--all`, that is `admin:repo_hook gist read:packages
-repo`, plus `read:org` for an organisation (`--org`).  Followers and following
+category selected, or with `--all`, that is `admin:repo_hook gist read:org
+read:packages read:project repo`.  Followers and following
 need no scope.  See also
 [Authentication](../getting-started/authentication.md#what-each-category-needs).
 

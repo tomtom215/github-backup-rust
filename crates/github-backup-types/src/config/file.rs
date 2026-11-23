@@ -32,8 +32,9 @@ use super::CloneType;
 /// Storing tokens in config files is convenient but less secure than providing
 /// them via the `GITHUB_TOKEN` environment variable.  Prefer environment
 /// variables in automated environments; restrict config file permissions to
-/// `0600` when a token must be stored.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `0600` when a token must be stored.  The `Debug` output shows `token`,
+/// `mirror_token` and `s3_secret_key` as `<redacted>`.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// GitHub username or organisation name to back up.
@@ -131,24 +132,34 @@ pub struct ConfigFile {
     pub action_runs: Option<bool>,
     /// Back up repository deployment environment configurations.
     pub environments: Option<bool>,
-    /// Back up GitHub Discussions threads and comments.
+    /// Request GitHub Discussions.  Nothing is backed up yet (GitHub serves
+    /// them through GraphQL only); the run logs a warning saying so.
     pub discussions: Option<bool>,
-    /// Back up Classic Projects (v1) and their columns.
+    /// Back up the owner's Projects (v2), their fields and items.
     pub projects: Option<bool>,
-    /// Back up GitHub Packages metadata for the target user.
+    /// Back up the comments on commits of each repository.
+    pub commit_comments: Option<bool>,
+    /// Back up GitHub Packages metadata for the target user or organisation.
     pub packages: Option<bool>,
 
     /// Categories to leave out of the backup (names as for `--skip`, e.g.
     /// `["hooks", "packages"]`).
     pub skip: Option<Vec<String>>,
 
-    /// Only back up repositories matching these glob patterns (comma-separated
-    /// or as a TOML array).
+    /// Only back up repositories whose name (not `owner/name`) matches one of
+    /// these glob patterns.  A TOML array of strings, e.g.
+    /// `include_repos = ["rust-*", "docs"]`.
     pub include_repos: Option<Vec<String>>,
-    /// Exclude repositories matching these glob patterns.
+    /// Exclude repositories whose name matches one of these glob patterns (a
+    /// TOML array of strings).
     pub exclude_repos: Option<Vec<String>>,
 
-    /// Only fetch issues/PRs updated at or after this ISO 8601 timestamp.
+    /// Expert override, like `--since`: treat items last updated before this
+    /// date (`2026-01-01`) or ISO 8601 timestamp as already backed up, for
+    /// every repository, instead of the per-repository watermarks.  Issue and
+    /// pull request lists are still fetched in full and merged; only the
+    /// comments, events, commits and reviews of items not changed since then
+    /// (whose files exist) are not fetched again.  Never stored.
     pub since: Option<String>,
 
     /// Override the hostname used in git clone URLs.
@@ -261,6 +272,27 @@ impl std::str::FromStr for MirrorType {
             other => Err(format!(
                 "unknown mirror type '{other}' (expected 'gitea' or 'gitlab')"
             )),
+        }
+    }
+}
+
+impl std::fmt::Debug for ConfigFile {
+    /// Every key, with the values of the three secret keys replaced by
+    /// `<redacted>`: a configuration logged while debugging must not leak them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut shown = self.clone();
+        for secret in [
+            &mut shown.token,
+            &mut shown.mirror_token,
+            &mut shown.s3_secret_key,
+        ] {
+            if secret.is_some() {
+                *secret = Some("<redacted>".to_string());
+            }
+        }
+        match serde_json::to_value(&shown) {
+            Ok(value) => write!(f, "ConfigFile {value}"),
+            Err(_) => f.write_str("ConfigFile { .. }"),
         }
     }
 }

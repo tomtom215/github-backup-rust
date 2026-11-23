@@ -376,7 +376,7 @@ async fn restore_repo(
                 let already: std::collections::HashSet<String> = if dry_run {
                     Default::default()
                 } else {
-                    match client.list_issues(target_org, repo_name, None).await {
+                    match client.list_issues(target_org, repo_name).await {
                         Ok(page) => {
                             let items = page.into_items();
                             markers_in(items.iter().filter_map(|i| i.typed().body.as_deref()))

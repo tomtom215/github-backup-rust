@@ -106,19 +106,23 @@ pub struct BackupOptions {
     pub starred_gists: bool,
 
     // ── Additional repository metadata ────────────────────────────────────
-    /// Backup the list of repository topics (tags).
+    /// Backup the list of repository topics (tags), taken from the repository
+    /// object.
     pub topics: bool,
-    /// Backup the list of repository branches and their protection status.
+    /// Backup the repository branches, the protection rules of protected
+    /// branches and the repository rulesets.
     pub branches: bool,
     /// Backup the deploy keys configured on each repository.
     ///
-    /// Requires admin access to the repository; non-admin repos are skipped
-    /// with an informational log message (not an error).
+    /// Requires admin access to the repository; see
+    /// [`tolerate_forbidden`](BackupOptions::tolerate_forbidden) for what a
+    /// refusal means.
     pub deploy_keys: bool,
     /// Backup the list of repository collaborators and their permissions.
     ///
-    /// Requires admin access to the repository; non-admin repos are skipped
-    /// with an informational log message.
+    /// Requires push access to the repository; see
+    /// [`tolerate_forbidden`](BackupOptions::tolerate_forbidden) for what a
+    /// refusal means.
     pub collaborators: bool,
 
     // ── Organisation data ─────────────────────────────────────────────────
@@ -162,23 +166,29 @@ pub struct BackupOptions {
     pub environments: bool,
 
     // ── GitHub Discussions ────────────────────────────────────────────────
-    /// Backup GitHub Discussions threads and their comments.
+    /// Requested backup of GitHub Discussions.
     ///
-    /// Requires the Discussions feature to be enabled on the repository.
-    /// Saves `discussions.json` and per-discussion `discussion_comments_<n>.json`
-    /// to each repository's metadata directory.
+    /// GitHub serves Discussions through GraphQL only and the backup does not
+    /// speak GraphQL yet, so **nothing is backed up**: the run logs one
+    /// warning saying so.  Not included in [`BackupOptions::all`].
     pub discussions: bool,
 
-    // ── Classic Projects ──────────────────────────────────────────────────
-    /// Backup Classic Projects (v1) and their column structure.
+    // ── Projects ──────────────────────────────────────────────────────────
+    /// Backup the owner's Projects (v2): each project, its fields and its
+    /// items with their field values.
     ///
-    /// Requires Classic Projects to be enabled on the repository.
-    /// Saves `projects.json` and per-project `project_columns_<id>.json`
-    /// to each repository's metadata directory.
+    /// Saves `projects/projects.json` and per-project `fields` / `items` files
+    /// in the owner's JSON directory.  Classic projects (v1) were sunset by
+    /// GitHub and are not backed up.
     pub projects: bool,
 
+    // ── Commit comments ───────────────────────────────────────────────────
+    /// Backup the comments made on commits of each repository
+    /// (`commit_comments.json`).
+    pub commit_comments: bool,
+
     // ── GitHub Packages ───────────────────────────────────────────────────
-    /// Backup GitHub Packages metadata for the target user.
+    /// Backup GitHub Packages metadata for the target user or organisation.
     ///
     /// Requires the `read:packages` OAuth scope.  Iterates over all supported
     /// package ecosystems (container, npm, maven, etc.) and saves
@@ -234,12 +244,30 @@ pub struct BackupOptions {
     /// Useful for GitHub Enterprise Server deployments where the API host
     /// and the git clone host differ (e.g. behind separate load balancers).
     ///
-    /// When set, the hostname component of every `clone_url` and `ssh_url`
-    /// from the API is rewritten to this value before it is passed to git.
+    /// When set, the host of every clone URL from the API (repositories,
+    /// wikis, gists, starred repositories) is rewritten to this value before
+    /// it is passed to git.  A `host:port` value also sets the port; an SSH
+    /// URL in the `git@host:path` form is then written as
+    /// `ssh://git@host:port/path`, the only SSH form that carries a port.
     ///
     /// Example: `--api-url https://github-api.example.com/api/v3
     ///            --clone-host github-git.example.com`
     pub clone_host: Option<String>,
+
+    // ── Permission refusals ───────────────────────────────────────────────
+    /// What a category the token is not permitted to read (HTTP 403, for
+    /// example webhooks without admin access) means for the run.
+    ///
+    /// `false` (an explicitly requested category): the refusal is a recorded
+    /// failure, naming the permission the token lacks, so the run exits with
+    /// status 3.  `true` (set by [`BackupOptions::all`], i.e. `--all`, which
+    /// asks for everything that is available rather than for that category):
+    /// the category is skipped with one warning per category per run.
+    ///
+    /// A category that does not exist for a repository (HTTP 404 or 410,
+    /// for example Issues switched off) is never a failure.
+    #[serde(default)]
+    pub tolerate_forbidden: bool,
 
     // ── Execution options ─────────────────────────────────────────────────
     /// When `true`, log what would be done without writing any files or
@@ -272,13 +300,13 @@ impl BackupOptions {
 
     /// Returns a configuration that enables every available backup category.
     ///
-    /// Equivalent to the `--all` flag in the Python reference implementation,
-    /// but also enables `starred_gists`, `pull_reviews`, `topics`, and
-    /// `branches`.  Repository name filters and `since` are left at their
-    /// defaults (no filtering).
+    /// Repository name filters and `since` are left at their defaults (no
+    /// filtering), and [`tolerate_forbidden`](Self::tolerate_forbidden) is set:
+    /// a category the token may not read is a warning, not a failure.
     ///
-    /// Note that `clone_starred` and `action_runs` are **not** enabled because
-    /// they can generate very large outputs and are considered opt-in.
+    /// Not enabled: `clone_starred` and `action_runs`, which can generate very
+    /// large outputs and are opt-in, and `discussions`, which are not backed
+    /// up (GitHub serves them through GraphQL only).
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -320,14 +348,17 @@ impl BackupOptions {
             actions: true,
             action_runs: false, // opt-in only; can generate very large files
             environments: true,
-            discussions: true,
+            // Not backed up yet (GraphQL only); `--all` must not claim it.
+            discussions: false,
             projects: true,
+            commit_comments: true,
             packages: true,
             include_repos: vec![],
             exclude_repos: vec![],
             since: None,
             full: false,
             clone_host: None,
+            tolerate_forbidden: true,
             dry_run: false,
             concurrency: 4,
         }

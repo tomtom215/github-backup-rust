@@ -8,11 +8,12 @@
 
 use tracing::info;
 
-use github_backup_types::{Gist, Page, Repository, User};
+use github_backup_types::{Gist, GistComment, Page, Repository, User};
 
 use crate::error::ClientError;
 
 use super::super::{GitHubClient, PER_PAGE};
+use super::{encode_segment, without_clone_tokens};
 
 impl GitHubClient {
     // ── User social graph ─────────────────────────────────────────────────
@@ -47,7 +48,7 @@ impl GitHubClient {
     pub async fn list_starred(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/starred?per_page={PER_PAGE}");
-        self.get_all_pages(&url).await
+        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
     }
 
     /// Returns repositories watched by `username`.
@@ -58,7 +59,7 @@ impl GitHubClient {
     pub async fn list_watched(&self, username: &str) -> Result<Page<Repository>, ClientError> {
         let api = self.api();
         let url = format!("{api}/users/{username}/subscriptions?per_page={PER_PAGE}");
-        self.get_all_pages(&url).await
+        Ok(without_clone_tokens(self.get_all_pages(&url).await?))
     }
 
     // ── Gists ─────────────────────────────────────────────────────────────
@@ -96,6 +97,21 @@ impl GitHubClient {
     pub async fn list_starred_gists(&self) -> Result<Page<Gist>, ClientError> {
         let api = self.api();
         let url = format!("{api}/gists/starred?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
+    }
+
+    /// Lists the comments on a gist (`GET /gists/{gist_id}/comments`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_gist_comments(
+        &self,
+        gist_id: &str,
+    ) -> Result<Page<GistComment>, ClientError> {
+        let api = self.api();
+        let id = encode_segment(gist_id);
+        let url = format!("{api}/gists/{id}/comments?per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 }

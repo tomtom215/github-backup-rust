@@ -26,7 +26,10 @@ github-backup-rust/
 
 ### `github-backup-types`
 
-Pure data, no I/O.
+Data types, with no network access.  Its only file I/O: reading the
+configuration file (`ConfigFile::from_path`) and loading and saving the
+persisted state (`backup_state`: watermarks, checkpoint, run history) through
+an atomic file write (`atomic_file`).
 
 - GitHub models (`Repository`, `Issue`, `PullRequest`, ...).  Fields GitHub can
   send as `null` are `Option`s.
@@ -99,12 +102,16 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (also when `git` reports it), cancellation) or
   when the repository list cannot be fetched.  Callers read
   `BackupStats::failures()` and decide the exit status.
-- **Run order**: owner-level data, packages, starred clones, gists, then the
+- **Run order**: owner-level data, packages, projects (v2), starred clones, gists, then the
   repository list (written to `repos.json`), then repositories concurrently
-  (bounded by `--concurrency`); per repository the steps are repository clone,
-  wiki, issues, pull requests, releases, labels, milestones, hooks, security
-  advisories, topics, branches, deploy keys, collaborators, actions,
-  environments (plus the inert discussions and projects steps).
+  (bounded by `--concurrency`); per repository the steps are repository details
+  (`GET /repos/{o}/{r}`), repository clone,
+  wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
+  advisories, branches and rulesets, deploy keys, collaborators, actions,
+  environments, commit comments.  Inside a category an item that fails (one
+  issue's comments) is recorded and the category carries on; a category that
+  answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
+  warning per category per run).
 - **Incremental state** (`engine/incremental.rs`): a watermark per repository in
   `backup_state.json`, advanced only for repositories whose every step
   succeeded, trusted only for the categories it was recorded with, set 15

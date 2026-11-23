@@ -3,40 +3,31 @@
 
 //! Issue listing endpoints.
 //!
-//! Covers issue lists, per-issue comments, and per-issue timeline events.
+//! Covers issue lists, per-issue comments and events, and the
+//! repository-wide comment listing used to find edited comments.
 
 use github_backup_types::{Issue, IssueComment, IssueEvent, Page};
 
 use crate::error::ClientError;
 
 use super::super::{GitHubClient, PER_PAGE};
+use super::encode_segment;
 
 impl GitHubClient {
     // ── Issues ────────────────────────────────────────────────────────────
 
-    /// Lists all issues for a repository, **including pull requests**.
+    /// Lists all issues for a repository, **including pull requests**, in
+    /// every state.
     ///
     /// GitHub's issues endpoint returns every pull request as an issue too
     /// (with a `pull_request` stub; see [`Issue::is_pull_request`]).
     ///
-    /// `since` — when `Some`, only returns issues updated at or after the
-    /// given ISO 8601 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
-    ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_issues(
-        &self,
-        owner: &str,
-        repo: &str,
-        since: Option<&str>,
-    ) -> Result<Page<Issue>, ClientError> {
+    pub async fn list_issues(&self, owner: &str, repo: &str) -> Result<Page<Issue>, ClientError> {
         let api = self.api();
-        let mut url = format!("{api}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
-        if let Some(s) = since {
-            url.push_str("&since=");
-            url.push_str(s);
-        }
+        let url = format!("{api}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 
@@ -77,6 +68,26 @@ impl GitHubClient {
         let api = self.api();
         let url =
             format!("{api}/repos/{owner}/{repo}/issues/{issue_number}/events?per_page={PER_PAGE}");
+        self.get_all_pages(&url).await
+    }
+
+    /// Lists the issue and pull-request conversation comments of a whole
+    /// repository that were created or edited at or after `since` (ISO 8601),
+    /// `GET /repos/{owner}/{repo}/issues/comments?since=`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ClientError`] on network, TLS, or API errors.
+    pub async fn list_repo_issue_comments_since(
+        &self,
+        owner: &str,
+        repo: &str,
+        since: &str,
+    ) -> Result<Page<IssueComment>, ClientError> {
+        let api = self.api();
+        let since = encode_segment(since);
+        let url =
+            format!("{api}/repos/{owner}/{repo}/issues/comments?since={since}&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 }

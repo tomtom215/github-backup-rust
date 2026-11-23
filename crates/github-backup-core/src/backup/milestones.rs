@@ -4,7 +4,8 @@
 //! Repository milestone backup.
 //!
 //! Saves `milestones.json` containing all milestones (open and closed) defined
-//! on the repository.
+//! on the repository, merged by `id` with what earlier runs stored, so a
+//! milestone deleted on GitHub stays in the backup.
 
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use tracing::info;
 use github_backup_client::BackupClient;
 use github_backup_types::config::BackupOptions;
 
-use crate::{error::CoreError, storage::Storage};
+use crate::{backup::merge::merge_and_write, error::CoreError, storage::Storage};
 
 /// Backs up repository milestones to `meta_dir/milestones.json`.
 ///
@@ -36,7 +37,12 @@ pub async fn backup_milestones(
 
     info!(owner, repo, "fetching milestones");
     let milestones = client.list_milestones(owner, repo).await?;
-    storage.write_json(&meta_dir.join("milestones.json"), &milestones)?;
+    merge_and_write(
+        storage,
+        &meta_dir.join("milestones.json"),
+        &milestones,
+        "id",
+    )?;
     Ok(())
 }
 

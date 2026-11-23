@@ -22,7 +22,8 @@
 //! (as [`Raw`], which derefs to the model and serialises as the original JSON)
 //! plus, verbatim, the elements that did not.  One unexpected object therefore
 //! never fails a list, and writing a page to disk writes everything the API
-//! returned.
+//! returned.  Objects the backup only stores (branch protection, a ruleset)
+//! are returned as plain [`Value`]s.
 //!
 //! # Object safety
 //!
@@ -38,12 +39,14 @@ mod impl_github;
 use std::future::Future;
 use std::pin::Pin;
 
+use serde_json::Value;
+
 use github_backup_types::{
-    Branch, BranchProtection, ClassicProject, Collaborator, DeployKey, Discussion,
-    DiscussionComment, Environment, Gist, Hook, Issue, IssueComment, IssueEvent, Label, Milestone,
-    Package, PackageVersion, Page, ProjectColumn, PullRequest, PullRequestComment,
-    PullRequestCommit, PullRequestReview, Raw, Release, Repository, SecurityAdvisory, Team, User,
-    Workflow, WorkflowRun,
+    Branch, Collaborator, CommitComment, DeployKey, Environment, Gist, GistComment, Hook, Issue,
+    IssueComment, IssueEvent, Label, Milestone, Package, PackageVersion, Page, ProjectV2,
+    ProjectV2Field, ProjectV2Item, PullRequest, PullRequestComment, PullRequestCommit,
+    PullRequestReview, Raw, Release, Repository, Ruleset, SecurityAdvisory, Team, User, Workflow,
+    WorkflowRun,
 };
 
 use crate::error::ClientError;
@@ -67,9 +70,12 @@ pub trait AssetSink: Send {
 
 /// All GitHub API operations required by the backup engine.
 ///
-/// The production implementation is [`crate::GitHubClient`]. Tests substitute a
-/// `MockClient` (available in the `test_support` module) that returns
-/// pre-configured data.
+/// The production implementation is [`crate::GitHubClient`]. Tests substitute
+/// a mock that returns pre-configured data.
+///
+/// Repository objects (listings and [`get_repository`](Self::get_repository))
+/// never carry `temp_clone_token`, a short-lived credential GitHub may
+/// include: the backup must not write a credential to a file.
 pub trait BackupClient: Send + Sync {
     // ── Repositories ──────────────────────────────────────────────────────
 
@@ -89,6 +95,14 @@ pub trait BackupClient: Send + Sync {
         &'a self,
         org: &'a str,
     ) -> BoxFuture<'a, Result<Page<Repository>, ClientError>>;
+
+    /// Returns one repository in full (`GET /repos/{owner}/{repo}`), with the
+    /// properties the listings leave out (`parent`, `source`, merge settings).
+    fn get_repository<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Raw<Repository>, ClientError>>;
 
     // ── User social graph ─────────────────────────────────────────────────
 
@@ -131,20 +145,23 @@ pub trait BackupClient: Send + Sync {
     /// Returns gists starred by the authenticated user.
     fn list_starred_gists<'a>(&'a self) -> BoxFuture<'a, Result<Page<Gist>, ClientError>>;
 
+    /// Lists the comments on a gist.
+    fn list_gist_comments<'a>(
+        &'a self,
+        gist_id: &'a str,
+    ) -> BoxFuture<'a, Result<Page<GistComment>, ClientError>>;
+
     // ── Issues ────────────────────────────────────────────────────────────
 
-    /// Lists all issues for a repository, **including pull requests**.
+    /// Lists all issues for a repository, in every state, **including pull
+    /// requests**.
     ///
     /// GitHub's issues API returns every pull request as an issue too (with a
     /// `pull_request` stub); `Issue::is_pull_request` tells them apart.
-    ///
-    /// `since` — if `Some`, only returns issues updated at or after the given
-    /// ISO 8601 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
     fn list_issues<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
-        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Page<Issue>, ClientError>>;
 
     /// Lists comments on a specific issue.
@@ -169,19 +186,22 @@ pub trait BackupClient: Send + Sync {
         issue_number: u64,
     ) -> BoxFuture<'a, Result<Page<IssueEvent>, ClientError>>;
 
+    /// Lists the issue and pull-request conversation comments of a whole
+    /// repository created or edited at or after `since` (ISO 8601).
+    fn list_repo_issue_comments_since<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        since: &'a str,
+    ) -> BoxFuture<'a, Result<Page<IssueComment>, ClientError>>;
+
     // ── Pull Requests ─────────────────────────────────────────────────────
 
-    /// Lists all pull requests for a repository.
-    ///
-    /// `since` — when `Some`, the list is requested sorted by `updated`
-    /// ascending.  The GitHub pulls API has no `since` filter, so the list is
-    /// always complete and callers that need a cutoff compare `updated_at`
-    /// themselves.
+    /// Lists all pull requests for a repository, in every state.
     fn list_pull_requests<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
-        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Page<PullRequest>, ClientError>>;
 
     /// Lists review comments on a specific pull request.
@@ -192,12 +212,23 @@ pub trait BackupClient: Send + Sync {
         pr_number: u64,
     ) -> BoxFuture<'a, Result<Page<PullRequestComment>, ClientError>>;
 
-    /// Lists commits included in a specific pull request.
+    /// Lists commits included in a specific pull request; GitHub returns at
+    /// most 250 here.
     fn list_pull_commits<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
         pr_number: u64,
+    ) -> BoxFuture<'a, Result<Page<PullRequestCommit>, ClientError>>;
+
+    /// Lists every commit reachable from `head` but not from `base`, without
+    /// the 250-commit cap of [`list_pull_commits`](Self::list_pull_commits).
+    fn compare_commits<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        base: &'a str,
+        head: &'a str,
     ) -> BoxFuture<'a, Result<Page<PullRequestCommit>, ClientError>>;
 
     /// Lists reviews submitted on a specific pull request.
@@ -207,6 +238,15 @@ pub trait BackupClient: Send + Sync {
         repo: &'a str,
         pr_number: u64,
     ) -> BoxFuture<'a, Result<Page<PullRequestReview>, ClientError>>;
+
+    /// Lists the review comments of a whole repository created or edited at
+    /// or after `since` (ISO 8601).
+    fn list_repo_pull_comments_since<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        since: &'a str,
+    ) -> BoxFuture<'a, Result<Page<PullRequestComment>, ClientError>>;
 
     // ── Repository metadata ───────────────────────────────────────────────
 
@@ -231,7 +271,7 @@ pub trait BackupClient: Send + Sync {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Page<Release>, ClientError>>;
 
-    /// Lists webhooks configured on a repository.
+    /// Lists webhooks configured on a repository (needs admin access).
     fn list_hooks<'a>(
         &'a self,
         owner: &'a str,
@@ -245,13 +285,6 @@ pub trait BackupClient: Send + Sync {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Page<SecurityAdvisory>, ClientError>>;
 
-    /// Returns the topics (tags) configured on a repository.
-    fn list_repo_topics<'a>(
-        &'a self,
-        owner: &'a str,
-        repo: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<String>, ClientError>>;
-
     /// Lists all branches for a repository.
     fn list_branches<'a>(
         &'a self,
@@ -259,16 +292,38 @@ pub trait BackupClient: Send + Sync {
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Page<Branch>, ClientError>>;
 
-    /// Returns the detailed branch-protection rules for a single branch.
+    /// Returns the protection rules of a single branch, as the API sent them.
     ///
-    /// Callers should handle [`ClientError::ApiError`] with status 403 (no
-    /// admin access) or 404 (branch has no protection rules) gracefully.
+    /// GitHub answers 403 without admin access and 404 for a branch without
+    /// protection rules.
     fn get_branch_protection<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
         branch: &'a str,
-    ) -> BoxFuture<'a, Result<Raw<BranchProtection>, ClientError>>;
+    ) -> BoxFuture<'a, Result<Value, ClientError>>;
+
+    /// Lists the rulesets that apply to a repository (its own and inherited).
+    fn list_rulesets<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Page<Ruleset>, ClientError>>;
+
+    /// Returns one ruleset with its rules, as the API sent it.
+    fn get_ruleset<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        ruleset_id: u64,
+    ) -> BoxFuture<'a, Result<Value, ClientError>>;
+
+    /// Lists the comments on commits of a repository.
+    fn list_commit_comments<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> BoxFuture<'a, Result<Page<CommitComment>, ClientError>>;
 
     // ── Assets ────────────────────────────────────────────────────────────
 
@@ -285,24 +340,16 @@ pub trait BackupClient: Send + Sync {
         sink: &'a mut dyn AssetSink,
     ) -> BoxFuture<'a, Result<u64, ClientError>>;
 
-    // ── Deploy keys ───────────────────────────────────────────────────────
+    // ── Deploy keys and collaborators ─────────────────────────────────────
 
-    /// Lists deploy keys configured on a repository.
-    ///
-    /// Callers should handle [`ClientError::ApiError`] with status 403/404
-    /// gracefully (insufficient permissions).
+    /// Lists deploy keys configured on a repository (needs admin access).
     fn list_deploy_keys<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Page<DeployKey>, ClientError>>;
 
-    // ── Collaborators ─────────────────────────────────────────────────────
-
-    /// Lists collaborators on a repository.
-    ///
-    /// Callers should handle [`ClientError::ApiError`] with status 403/404
-    /// gracefully (insufficient permissions).
+    /// Lists collaborators on a repository (needs push access).
     fn list_collaborators<'a>(
         &'a self,
         owner: &'a str,
@@ -324,10 +371,6 @@ pub trait BackupClient: Send + Sync {
     // ── GitHub Actions ────────────────────────────────────────────────────
 
     /// Lists GitHub Actions workflows defined in a repository.
-    ///
-    /// Callers should handle [`ClientError::ApiError`] with status 403/404
-    /// gracefully (Actions may be disabled or the token lacks the `actions`
-    /// scope).
     fn list_workflows<'a>(
         &'a self,
         owner: &'a str,
@@ -335,8 +378,6 @@ pub trait BackupClient: Send + Sync {
     ) -> BoxFuture<'a, Result<Page<Workflow>, ClientError>>;
 
     /// Lists the runs of a specific workflow, following every page.
-    ///
-    /// Callers should handle 403/404 gracefully.
     fn list_workflow_runs<'a>(
         &'a self,
         owner: &'a str,
@@ -347,67 +388,56 @@ pub trait BackupClient: Send + Sync {
     // ── Deployment environments ───────────────────────────────────────────
 
     /// Lists deployment environments configured on a repository.
-    ///
-    /// Callers should handle 403/404 gracefully.
     fn list_environments<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
     ) -> BoxFuture<'a, Result<Page<Environment>, ClientError>>;
 
-    // ── Discussions ───────────────────────────────────────────────────────
+    // ── Projects (v2) ─────────────────────────────────────────────────────
 
-    /// Lists discussions for a repository.
-    ///
-    /// GitHub Discussions are only available for repositories that have the
-    /// feature enabled.  Callers should handle 404 gracefully.
-    fn list_discussions<'a>(
+    /// Lists the Projects (v2) of a user (`org == false`) or an organisation.
+    fn list_projects<'a>(
         &'a self,
         owner: &'a str,
-        repo: &'a str,
-    ) -> BoxFuture<'a, Result<Page<Discussion>, ClientError>>;
+        org: bool,
+    ) -> BoxFuture<'a, Result<Page<ProjectV2>, ClientError>>;
 
-    /// Lists comments on a specific discussion.
-    fn list_discussion_comments<'a>(
+    /// Lists the fields of one project.
+    fn list_project_fields<'a>(
         &'a self,
         owner: &'a str,
-        repo: &'a str,
-        discussion_number: u64,
-    ) -> BoxFuture<'a, Result<Page<DiscussionComment>, ClientError>>;
+        org: bool,
+        project_number: u64,
+    ) -> BoxFuture<'a, Result<Page<ProjectV2Field>, ClientError>>;
 
-    // ── Classic Projects ──────────────────────────────────────────────────
-
-    /// Lists classic (v1) projects for a repository.
-    ///
-    /// Callers should handle 404 gracefully (project feature may be disabled).
-    fn list_repo_projects<'a>(
+    /// Lists the items of one project with the values of `field_ids` (GitHub
+    /// accepts at most 50; without any it returns only the title).
+    fn list_project_items<'a>(
         &'a self,
         owner: &'a str,
-        repo: &'a str,
-    ) -> BoxFuture<'a, Result<Page<ClassicProject>, ClientError>>;
-
-    /// Lists columns in a classic project.
-    fn list_project_columns<'a>(
-        &'a self,
-        project_id: u64,
-    ) -> BoxFuture<'a, Result<Page<ProjectColumn>, ClientError>>;
+        org: bool,
+        project_number: u64,
+        field_ids: &'a [u64],
+    ) -> BoxFuture<'a, Result<Page<ProjectV2Item>, ClientError>>;
 
     // ── GitHub Packages ───────────────────────────────────────────────────
 
-    /// Lists packages published by a user.
-    ///
-    /// Requires the `read:packages` scope.  Callers should handle 403/404
-    /// gracefully.
-    fn list_user_packages<'a>(
+    /// Lists the packages of one ecosystem owned by a user (`org == false`;
+    /// the token owner's own listing includes private packages) or an
+    /// organisation.  Requires the `read:packages` scope.
+    fn list_packages<'a>(
         &'a self,
-        username: &'a str,
+        owner: &'a str,
+        org: bool,
         package_type: &'a str,
     ) -> BoxFuture<'a, Result<Page<Package>, ClientError>>;
 
     /// Lists versions of a specific package.
     fn list_package_versions<'a>(
         &'a self,
-        username: &'a str,
+        owner: &'a str,
+        org: bool,
         package_type: &'a str,
         package_name: &'a str,
     ) -> BoxFuture<'a, Result<Page<PackageVersion>, ClientError>>;

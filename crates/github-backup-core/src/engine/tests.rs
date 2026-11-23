@@ -546,13 +546,15 @@ async fn the_second_run_skips_unchanged_items_and_full_fetches_everything_again(
     assert!(storage.get(&comments).is_some(), "run 1 fetches everything");
 
     // Mark the stored file so a refetch is visible.
-    storage.write_bytes(&comments, b"sentinel").expect("mark");
+    storage
+        .write_bytes(&comments, br#"["sentinel"]"#)
+        .expect("mark");
 
     // Run 2: the issue is older than the watermark and its file exists → skipped.
     make(with_comments.clone()).run(OWNER).await.expect("run 2");
     assert_eq!(
         storage.get(&comments).as_deref(),
-        Some(b"sentinel".as_slice()),
+        Some(br#"["sentinel"]"#.as_slice()),
         "an unchanged issue must not be fetched again"
     );
 
@@ -564,7 +566,7 @@ async fn the_second_run_skips_unchanged_items_and_full_fetches_everything_again(
     make(full).run(OWNER).await.expect("run 3");
     assert_ne!(
         storage.get(&comments).as_deref(),
-        Some(b"sentinel".as_slice()),
+        Some(br#"["sentinel"]"#.as_slice()),
         "--full must refetch"
     );
 }

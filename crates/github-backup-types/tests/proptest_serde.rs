@@ -643,6 +643,8 @@ proptest! {
         collaborators in any::<bool>(),
         org_members in any::<bool>(),
         org_teams in any::<bool>(),
+        commit_comments in any::<bool>(),
+        tolerate_forbidden in any::<bool>(),
         dry_run in any::<bool>(),
         concurrency in 1usize..16usize,
         is_org in any::<bool>(),
@@ -670,6 +672,8 @@ proptest! {
             environments: false,
             discussions: false,
             projects: false,
+            commit_comments,
+            tolerate_forbidden,
             packages: false,
             include_repos: vec![],
             exclude_repos: vec![],
@@ -714,6 +718,8 @@ proptest! {
         prop_assert_eq!(decoded.collaborators, opts.collaborators);
         prop_assert_eq!(decoded.org_members, opts.org_members);
         prop_assert_eq!(decoded.org_teams, opts.org_teams);
+        prop_assert_eq!(decoded.commit_comments, opts.commit_comments);
+        prop_assert_eq!(decoded.tolerate_forbidden, opts.tolerate_forbidden);
         prop_assert_eq!(decoded.dry_run, opts.dry_run);
         prop_assert_eq!(decoded.concurrency, opts.concurrency);
     }

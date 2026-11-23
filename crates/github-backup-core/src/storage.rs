@@ -67,6 +67,40 @@ pub trait Storage: Send + Sync {
         Ok(None)
     }
 
+    /// Removes the file at `path`; a file that does not exist is not an error.
+    ///
+    /// Used to retire files the backup itself wrote at an old location
+    /// (release checksum sidecars).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if the file exists but cannot be removed, or if
+    /// the store does not support removal (the default).
+    fn remove_file(&self, path: &Path) -> Result<(), CoreError> {
+        Err(unsupported(
+            path,
+            "this storage does not support removing files",
+        ))
+    }
+
+    /// Moves the file or directory `from` to `to` (which must not exist).
+    /// Returns `false`, changing nothing, if `from` does not exist.
+    ///
+    /// Used to set aside the backup of a repository that was deleted and
+    /// recreated under the same name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] if `to` exists or the move fails, or if the store
+    /// does not support moving (the default).
+    fn rename(&self, from: &Path, to: &Path) -> Result<bool, CoreError> {
+        let _ = to;
+        Err(unsupported(
+            from,
+            "this storage does not support moving files",
+        ))
+    }
+
     /// Starts writing a file of unknown size at `path` chunk by chunk.
     ///
     /// Nothing appears at `path` until [`PendingFile::finish`] succeeds, and
@@ -88,6 +122,13 @@ pub trait Storage: Send + Sync {
             ),
         ))
     }
+}
+
+fn unsupported(path: &Path, what: &str) -> CoreError {
+    CoreError::io(
+        path.display(),
+        std::io::Error::new(std::io::ErrorKind::Unsupported, what.to_string()),
+    )
 }
 
 /// A file being written incrementally; see [`Storage::begin_write`].
@@ -161,6 +202,33 @@ impl Storage for FsStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(CoreError::io(path.display(), e)),
         }
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), CoreError> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(CoreError::io(path.display(), e))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<bool, CoreError> {
+        if std::fs::symlink_metadata(from).is_err() {
+            return Ok(false);
+        }
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(CoreError::io(
+                to.display(),
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("cannot move {} here: it already exists", from.display()),
+                ),
+            ));
+        }
+        ensure_parent(to)?;
+        std::fs::rename(from, to).map_err(|e| CoreError::io(from.display(), e))?;
+        Ok(true)
     }
 
     fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
@@ -337,6 +405,38 @@ pub(crate) mod test_support {
                 .map(|data| Box::new(std::io::Cursor::new(data)) as Box<dyn Read + Send>))
         }
 
+        fn remove_file(&self, path: &Path) -> Result<(), CoreError> {
+            self.inner.lock().unwrap().remove(path);
+            Ok(())
+        }
+
+        /// Moves `from` and, as a directory would, every path below it.
+        fn rename(&self, from: &Path, to: &Path) -> Result<bool, CoreError> {
+            let mut files = self.inner.lock().unwrap();
+            if files.keys().any(|p| p.starts_with(to)) {
+                return Err(CoreError::io(
+                    to.display(),
+                    std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+                ));
+            }
+            let moved: Vec<PathBuf> = files
+                .keys()
+                .filter(|p| p.starts_with(from))
+                .cloned()
+                .collect();
+            for path in &moved {
+                let data = files.remove(path).expect("listed");
+                let rest = path.strip_prefix(from).expect("prefix");
+                let target = if rest.as_os_str().is_empty() {
+                    to.to_path_buf()
+                } else {
+                    to.join(rest)
+                };
+                files.insert(target, data);
+            }
+            Ok(!moved.is_empty())
+        }
+
         fn begin_write(&self, path: &Path) -> Result<Box<dyn PendingFile>, CoreError> {
             Ok(Box::new(MemPendingFile {
                 store: self.clone(),
@@ -452,6 +552,30 @@ mod tests {
 
         assert!(!path.exists());
         assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
+    }
+
+    #[test]
+    fn remove_and_rename_on_the_filesystem() {
+        let dir = tempdir().expect("tempdir");
+        let storage = FsStorage::new();
+        let file = dir.path().join("a").join("x.json");
+        storage.write_bytes(&file, b"1").expect("write");
+
+        let moved = dir.path().join("b@1");
+        assert!(storage.rename(&dir.path().join("a"), &moved).expect("move"));
+        assert_eq!(std::fs::read(moved.join("x.json")).expect("read"), b"1");
+        assert!(!storage
+            .rename(&dir.path().join("a"), &moved)
+            .expect("absent"));
+        storage.write_bytes(&file, b"2").expect("write");
+        assert!(
+            storage.rename(&dir.path().join("a"), &moved).is_err(),
+            "never onto an existing path"
+        );
+
+        storage.remove_file(&file).expect("remove");
+        assert!(!file.exists());
+        storage.remove_file(&file).expect("absent is fine");
     }
 
     #[test]

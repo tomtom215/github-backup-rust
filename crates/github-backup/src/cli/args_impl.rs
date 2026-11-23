@@ -374,6 +374,7 @@ impl Args {
         self.environments |= cfg.environments.unwrap_or(false);
         self.discussions |= cfg.discussions.unwrap_or(false);
         self.projects |= cfg.projects.unwrap_or(false);
+        self.commit_comments |= cfg.commit_comments.unwrap_or(false);
         self.packages |= cfg.packages.unwrap_or(false);
         // Skipped categories: the union of both lists.
         if let Some(ref names) = cfg.skip {
@@ -448,6 +449,10 @@ impl Args {
             environments: self.environments,
             discussions: self.discussions,
             projects: self.projects,
+            commit_comments: self.commit_comments,
+            // An explicitly chosen category treats a refusal (403) as a
+            // failure; `--all` and the default selection tolerate it.
+            tolerate_forbidden: false,
             packages: self.packages,
             include_repos: self.include_repos.clone(),
             exclude_repos: self.exclude_repos.clone(),

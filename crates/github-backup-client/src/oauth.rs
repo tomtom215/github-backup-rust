@@ -23,7 +23,7 @@
 //! # Scopes
 //!
 //! For a full backup (including private repos and gists), request:
-//! `repo gist read:org`.
+//! `repo gist read:org read:packages read:project`.
 //!
 //! [Device Authorization Flow]: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
 

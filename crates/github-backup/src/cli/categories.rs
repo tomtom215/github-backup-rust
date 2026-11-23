@@ -53,6 +53,7 @@ const CATEGORIES: &[(&str, Switch)] = &[
     ("discussions", |o| &mut o.discussions),
     ("projects", |o| &mut o.projects),
     ("packages", |o| &mut o.packages),
+    ("commit-comments", |o| &mut o.commit_comments),
 ];
 
 /// Names that modify the selection instead of making one: `forks` and
@@ -104,9 +105,10 @@ mod tests {
     fn every_category_of_all_is_named_and_none_twice() {
         let all = BackupOptions::all();
         let on = enabled(&all);
-        // `--all` leaves exactly the two opt-in categories off.
+        // `--all` leaves the two opt-in categories and the not-yet-implemented
+        // discussions off.
         let off: Vec<_> = names().filter(|n| !on.contains(n)).collect();
-        assert_eq!(off, ["clone-starred", "action-runs"]);
+        assert_eq!(off, ["clone-starred", "action-runs", "discussions"]);
         let mut sorted: Vec<_> = names().collect();
         sorted.sort_unstable();
         sorted.dedup();

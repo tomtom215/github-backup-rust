@@ -36,6 +36,18 @@ conversation thread under the description; inline review comments are
 renamed, locked, merged, ...  (GitHub's separate `/timeline`, with
 cross-references and commits, is not fetched.)
 
+When Issues are switched off for a repository, GitHub answers the issue
+listing with `410 Gone`: there is no `issues.json`, which is not a failure,
+and the conversation and events of every pull request are still fetched.
+
+`issues.json` and every per-issue file **accumulate**: they are merged with
+what earlier runs stored (issues by `number`, comments and events by `id`),
+so an issue or comment deleted on GitHub stays in the backup.  An issue that
+the tool's model cannot read is still written as received and still gets its
+comments and events by its `number`; an element without a `number` is
+reported as a failure.  An issue whose comments or events cannot be fetched is
+reported and the remaining issues are still backed up.
+
 ### Output structure
 
 ```
@@ -92,12 +104,19 @@ written.
 
 **`--pull-comments`** saves review comments (inline code comments attached to specific lines, with their diff hunk and reply threading).
 
-**`--pull-commits`** saves the list of commits included in each PR (GitHub returns at most 250).
+**`--pull-commits`** saves the list of commits included in each PR.  GitHub's
+list stops at 250 commits; when it returns 250, the commits come from the
+comparison of the PR's base and head commits instead (paginated, no limit), and
+if that fails the PR is reported as a failure rather than stored truncated.
 
 **`--pull-reviews`** saves review decisions (approved, changes requested, dismissed) and review bodies.
 
 The conversation thread and the events of a pull request are written by
 `--issue-comments` and `--issue-events` (see above).
+
+Like the issue files, `pulls.json` and the per-PR files accumulate (pull
+requests by `number`, comments and reviews by `id`, commits by `sha`, so a
+commit force-pushed away stays listed).
 
 ### Output structure
 
@@ -118,5 +137,7 @@ json/repos/<repo>/
 | `--pull-commits` | 1 per PR |
 | `--pull-reviews` | 1 per PR |
 | `--issue-comments`, `--issue-events` | 1 per issue **and PR** each |
+| `--pull-commits` on a PR with 250+ commits | 1 per 100 commits (comparison) |
+| `--issue-comments` / `--pull-comments` on a later run | 1 paginated list of the comments created or edited since the watermark |
 
-The per-item calls are made on the first run and, on later runs, only for issues and pull requests that changed since the repository's watermark (see [Incremental runs](monitoring.md#incremental-runs-and-the-state-file); `--full` repeats all of them).  The listing calls cost one request per 100 items on **every** run.  Consider the rate-limit budget (5 000 requests per hour per token) for large organisations; [Rate limit](ops-runbook.md#rate-limit) explains what happens when it is exhausted.
+The per-item calls are made on the first run and, on later runs, only for issues and pull requests that changed since the repository's watermark, or that have a conversation comment (`GET .../issues/comments?since=`) or review comment (`GET .../pulls/comments?since=`) created or edited since then (editing a comment does not change its issue's `updated_at`); if that list cannot be fetched, the failure is reported and every item's files are fetched.  Edits to a review's own text are not detected this way (see [Incremental runs](monitoring.md#incremental-runs-and-the-state-file); `--full` repeats all of them).  The listing calls cost one request per 100 items on **every** run.  Consider the rate-limit budget (5 000 requests per hour per token) for large organisations; [Rate limit](ops-runbook.md#rate-limit) explains what happens when it is exhausted.

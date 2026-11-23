@@ -56,8 +56,8 @@ readable by group or others but does not refuse to use it.
 
 The scopes and fine-grained permissions per category are in
 [Authentication](../getting-started/authentication.md#what-each-category-needs).
-In short: a classic token with `repo`, `gist`, `read:org` and `read:packages`
-covers every category of `--all`; a fine-grained token is preferable when you do
+In short: a classic token with `repo`, `gist`, `read:org`, `read:packages`,
+`read:project` and `admin:repo_hook` covers every category of `--all`; a fine-grained token is preferable when you do
 not need gists or packages.  Fine-grained tokens **can** access an organisation's
 data when the organisation is the token's resource owner (and approves it), so
 organisation backups do not require a classic token.

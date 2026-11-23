@@ -97,6 +97,9 @@ fn scopes_for(opts: &BackupOptions) -> BTreeSet<&'static str> {
         set.insert("gist");
     }
 
+    if opts.projects {
+        set.insert("read:project");
+    }
     if opts.packages {
         set.insert("read:packages");
     }
@@ -195,6 +198,12 @@ mod tests {
     fn followers_need_no_scope() {
         let s = recommended_scopes(&args(&["--followers", "--following"]));
         assert!(s.is_empty(), "{s:?}");
+    }
+
+    #[test]
+    fn projects_require_read_project() {
+        let a = args(&["--projects"]);
+        assert!(recommended_scopes(&a).contains(&"read:project"));
     }
 
     #[test]

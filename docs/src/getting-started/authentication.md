@@ -21,8 +21,8 @@ The first of these that is set is used:
 of them the run is anonymous.
 
 The simplest setup is therefore `gh auth login` once; its token has the `repo`,
-`read:org` and `gist` scopes, enough for everything but packages
-(`gh auth refresh -s read:packages` adds that).
+`read:org` and `gist` scopes, enough for everything but packages and projects
+(`gh auth refresh -s read:packages,read:project` adds those).
 
 ---
 
@@ -38,7 +38,8 @@ The simplest and most reliable method for scheduled backups.
 2. **Generate new token (classic)**.
 3. Select the scopes from [What each category needs](#what-each-category-needs).
    For a complete backup (the default, or `--all`; organisation or personal)
-   select `repo`, `gist`, `read:org` and `read:packages`.
+   select `repo`, `gist`, `read:org`, `read:packages`, `read:project` and
+   `admin:repo_hook` (webhooks; leave it out with `--skip hooks`).
 4. Copy the token.
 
 #### Fine-grained PAT
@@ -99,7 +100,9 @@ failures it reports.
 | `--followers`, `--following` | none (public data) | none |
 | `--gists`, `--starred-gists` | `gist` | not available to fine-grained tokens |
 | `--packages` | `read:packages` | not available to fine-grained tokens |
-| `--discussions`, `--projects` | n/a | n/a: nothing is backed up (no REST endpoint) |
+| `--projects` | `read:project` | Projects: read (organisation permission) |
+| `--discussions` | n/a | n/a: nothing is backed up yet (GraphQL only) |
+| commit comments (`--all`) | `repo` (private) | Contents: read |
 | `--restore` | `repo` (write) | Issues: read and write |
 
 Notes:
@@ -110,13 +113,15 @@ Notes:
 * For organisation targets (`--org`) the token's owner must be able to see the
   repositories.  If the organisation enforces SAML single sign-on, authorise the
   token for it (Settings → token → *Configure SSO*), otherwise GitHub answers 403.
-* When a category is not permitted (HTTP 403 or 404) the tool skips that item
-  with an `INFO` line instead of failing; see
-  [Repository Metadata](../backup-categories.md#repository-metadata).  A repository
+* When GitHub refuses a category (HTTP 403), a category you asked for with its
+  own flag is a failure naming the missing permission (exit status `3`); under
+  `--all` it is skipped with one warning per category per run.  A category that
+  does not exist for a repository (404/410) is skipped without a failure; see
+  [When GitHub answers 403, 404 or 410](../backup-categories.md#when-github-answers-403-404-or-410).  A repository
   that cannot be listed or cloned at all is a failure (exit status `3`).
 * `github-backup --list-scopes <flags>` prints the classic scopes for the
   categories the flags select (with none selected, or `--all`: `admin:repo_hook
-  gist read:packages repo`, plus `read:org` with `--org`).
+  gist read:org read:packages read:project repo`).
 
 ---
 
@@ -171,9 +176,11 @@ github.com (see [GitHub Enterprise](../configuration/github-enterprise.md#authen
 
 ### Scopes
 
-The default `--oauth-scopes` is `"repo gist read:org"`.  It does **not** cover
-`--packages` (add `read:packages`).  Narrow it if you back up fewer categories;
-see the table above.
+The default `--oauth-scopes` is `"repo gist read:org read:packages
+read:project"`: every category of the default backup except webhooks, which
+need the administrative `admin:repo_hook` scope (without it, webhooks are
+skipped with a warning).  Add that scope when you want webhooks; narrow the list
+if you back up fewer categories (see the table above).
 
 ---
 

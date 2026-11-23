@@ -300,7 +300,7 @@ async fn a_permission_403_is_not_mistaken_for_a_rate_limit() {
 }
 
 #[tokio::test]
-async fn topics_wait_out_a_rate_limit_instead_of_reporting_a_403() {
+async fn single_object_gets_wait_out_a_rate_limit_instead_of_reporting_a_403() {
     let server = Server::start(|_, n| {
         if n == 0 {
             reply_with(403, &[("Retry-After", "1")], "{}")
@@ -309,12 +309,12 @@ async fn topics_wait_out_a_rate_limit_instead_of_reporting_a_403() {
         }
     })
     .await;
-    let topics = server
+    let body = server
         .client()
-        .list_repo_topics("o", "r")
+        .get_branch_protection("o", "r", "main")
         .await
         .expect("retried");
-    assert_eq!(topics, vec!["rust".to_string()]);
+    assert_eq!(body, json!({"names": ["rust"]}));
 }
 
 #[tokio::test]

@@ -210,3 +210,10 @@ When using `--org`, all flags are available but some apply only to organisation 
 | `--following` | User's following | Org's following |
 | `--org-members` | *Silently skipped* | Organisation member list |
 | `--org-teams` | *Silently skipped* | Organisation team list |
+| `--packages` | `/users/<user>/packages` (`/user/packages`, with private ones, when the token is the user's) | `/orgs/<org>/packages` |
+| `--projects` | `/users/<user>/projectsV2` | `/orgs/<org>/projectsV2` |
+
+Each of these lists is fetched on its own: one that fails is recorded as a
+failure and the others are still written.  They are snapshots of the current
+state, replaced on every run, except packages and projects, which accumulate
+(see [Output Directory Layout](configuration/output-layout.md#snapshots-and-accumulating-history)).

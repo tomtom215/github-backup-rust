@@ -174,6 +174,45 @@ fn backup_options_all_enables_new_categories() {
     assert!(opts.include_repos.is_empty());
     assert!(opts.exclude_repos.is_empty());
     assert!(opts.since.is_none());
+    assert!(opts.commit_comments);
+    assert!(opts.projects);
+    assert!(opts.tolerate_forbidden, "--all asks for what is available");
+    assert!(
+        !opts.discussions,
+        "discussions are not backed up, so --all must not claim them"
+    );
+}
+
+#[test]
+fn config_file_debug_redacts_every_secret() {
+    let cfg = ConfigFile {
+        owner: Some("octocat".into()),
+        token: Some("ghp_secret_token_value".into()),
+        mirror_token: Some("mirror_secret_value".into()),
+        s3_secret_key: Some("s3_secret_value".into()),
+        ..ConfigFile::default()
+    };
+    let shown = format!("{cfg:?}");
+    for secret in [
+        "ghp_secret_token_value",
+        "mirror_secret_value",
+        "s3_secret_value",
+    ] {
+        assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+    }
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(shown.contains("octocat"), "non-secret values stay visible");
+}
+
+#[test]
+fn include_repos_is_a_toml_array_not_a_comma_separated_string() {
+    let cfg = ConfigFile::from_toml_str(r#"include_repos = ["a-*", "b"]"#).expect("array");
+    assert_eq!(
+        cfg.include_repos,
+        Some(vec!["a-*".to_string(), "b".to_string()])
+    );
+    // What the documentation used to promise does not parse.
+    assert!(ConfigFile::from_toml_str(r#"include_repos = "a-*,b""#).is_err());
 }
 
 #[test]

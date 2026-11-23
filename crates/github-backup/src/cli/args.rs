@@ -266,15 +266,16 @@ pub struct Args {
 
     /// OAuth scopes to request (space-separated).
     ///
-    /// Default: `"repo gist read:org"` — enough for repositories, issues,
-    /// pull requests and gists.  Some categories need more (for example
-    /// `read:packages` for `--packages`); `--list-scopes` shows what the
-    /// categories you enabled need.
+    /// Default: `"repo gist read:org read:packages read:project"` — every
+    /// category of the default backup except webhooks, which need the
+    /// administrative `admin:repo_hook` (without it, webhooks are skipped
+    /// with a warning).  `--list-scopes` shows what the categories you enabled
+    /// need.
     #[arg(
         help_heading = "Authentication",
         long,
         value_name = "SCOPES",
-        default_value = "repo gist read:org",
+        default_value = "repo gist read:org read:packages read:project",
         requires = "device_auth"
     )]
     pub oauth_scopes: String,
@@ -330,12 +331,14 @@ pub struct Args {
     /// GitHub Actions & environments:
     ///   `--actions` `--environments`
     ///
-    /// Discussions, classic projects, and packages:
-    ///   `--discussions` `--projects` `--packages`
+    /// Projects, packages and commit comments:
+    ///   `--projects` `--packages` `--commit-comments`
     ///
-    /// **Not included** (opt-in only, can generate very large output):
-    ///   `--action-runs`  — full workflow run history
-    ///   `--clone-starred` — clone every starred repository
+    /// **Not included**:
+    ///   `--action-runs`  — full workflow run history (can be very large)
+    ///   `--clone-starred` — clone every starred repository (can be very large)
+    ///   `--discussions`  — not backed up yet (GitHub serves them through
+    ///   GraphQL only)
     ///
     /// **Not controlled by `--all`** (output/behaviour flags):
     ///   `--lfs` `--prefer-ssh` `--prune` `--clone-type` `--concurrency`
@@ -348,6 +351,7 @@ pub struct Args {
         "gists", "starred_gists", "topics", "branches",
         "deploy_keys", "collaborators", "org_members", "org_teams",
         "actions", "environments", "discussions", "projects", "packages",
+        "commit_comments",
     ])]
     pub all: bool,
 
@@ -602,20 +606,25 @@ pub struct Args {
     pub environments: bool,
 
     // ── GitHub Discussions ─────────────────────────────────────────────────
-    /// Back up GitHub Discussions threads and their comments.
-    ///
-    /// Requires the Discussions feature to be enabled on the repository.
-    /// Saves `discussions.json` and per-discussion comment files.
+    /// Request GitHub Discussions.  Not backed up yet: GitHub serves them
+    /// through GraphQL only, and the run logs a warning saying so.
     #[arg(help_heading = "What to back up", long)]
     pub discussions: bool,
 
-    // ── Classic Projects ───────────────────────────────────────────────────
-    /// Back up Classic Projects (v1) and their column structure.
+    // ── Projects ───────────────────────────────────────────────────────────
+    /// Back up the owner's Projects: each project, its fields, and its items
+    /// with every field value, under `json/projects/`.
     ///
-    /// Requires Classic Projects to be enabled on the repository.
-    /// Saves `projects.json` and per-project column files.
+    /// Needs the `read:project` scope (classic token) or Projects read access
+    /// (fine-grained token).
     #[arg(help_heading = "What to back up", long)]
     pub projects: bool,
+
+    // ── Commit comments ────────────────────────────────────────────────────
+    /// Back up the comments made on commits of each repository
+    /// (`commit_comments.json`).
+    #[arg(help_heading = "What to back up", long)]
+    pub commit_comments: bool,
 
     // ── GitHub Packages ────────────────────────────────────────────────────
     /// Back up GitHub Packages metadata for the target user.

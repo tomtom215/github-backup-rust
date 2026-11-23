@@ -38,12 +38,12 @@ use github_backup_types::config::{BackupOptions, BackupTarget, OutputConfig};
 use github_backup_types::{Page, Raw, Repository};
 
 use self::incremental::{Incremental, RunSummary};
-use self::repo::{backup_one_repo, RepoContext, RepoResult};
+use self::repo::{backup_one_repo, Refusals, RepoContext, RepoResult};
 use self::steps::{RunControl, Steps};
 use crate::{
     backup::{
-        gist::backup_gists, merge::merge_list, package::backup_packages,
-        repository::should_include, starred_repos::backup_starred_repos,
+        discussion, gist::backup_gists, merge::merge_list, package::backup_packages,
+        project::backup_projects, repository::should_include, starred_repos::backup_starred_repos,
         user_data::backup_user_data,
     },
     cancel::CancelFlag,
@@ -238,18 +238,58 @@ where
         // ── Owner-level data ───────────────────────────────────────────────
         {
             let mut steps = Steps::new(owner, &stats, &control, &secrets);
-            steps
-                .run(
+            discussion::warn_if_requested(&self.opts);
+            for (step, outcome) in [
+                (
                     "owner data",
-                    backup_user_data(&self.client, owner, &self.opts, &json_dir, &self.storage),
-                )
-                .await;
-            steps
-                .run(
+                    steps
+                        .run(
+                            "owner data",
+                            backup_user_data(
+                                &self.client,
+                                owner,
+                                &self.opts,
+                                &json_dir,
+                                &self.storage,
+                            ),
+                        )
+                        .await,
+                ),
+                (
                     "packages",
-                    backup_packages(&self.client, owner, &self.opts, &json_dir, &self.storage),
-                )
-                .await;
+                    steps
+                        .run(
+                            "packages",
+                            backup_packages(
+                                &self.client,
+                                owner,
+                                &self.opts,
+                                &json_dir,
+                                &self.storage,
+                            ),
+                        )
+                        .await,
+                ),
+                (
+                    "projects",
+                    steps
+                        .run(
+                            "projects",
+                            backup_projects(
+                                &self.client,
+                                owner,
+                                &self.opts,
+                                &json_dir,
+                                &self.storage,
+                            ),
+                        )
+                        .await,
+                ),
+            ] {
+                for (what, message) in outcome.map(|o| o.failed).unwrap_or_default() {
+                    steps.record(step, &format!("{what}: {message}"));
+                }
+            }
 
             let starred = steps
                 .run(
@@ -539,6 +579,8 @@ where
         };
 
         let concurrency = self.opts.concurrency.max(1);
+        // Under `--all`, each refused category is reported once per run.
+        let refusals = Arc::new(Refusals::default());
         let sem = Arc::new(Semaphore::new(concurrency));
         let completed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -582,6 +624,7 @@ where
             let done_count = Arc::clone(&completed_count);
             let task_control = control.clone();
             let task_secrets = Arc::clone(secrets);
+            let task_refusals = Arc::clone(&refusals);
             let since = incremental.since_for(&repo.full_name);
             // Clone the event sender so the task can emit per-repo events.
             let event_tx = self.engine_events.clone();
@@ -614,6 +657,7 @@ where
                     control: &task_control,
                     secrets: &task_secrets,
                     since: since.as_deref(),
+                    refusals: &task_refusals,
                 };
                 let result = backup_one_repo(&ctx, &repo).await;
 
