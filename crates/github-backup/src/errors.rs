@@ -78,6 +78,7 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
 
     // Network failures.
     if r.contains("connection refused")
+        || r.contains("client error (connect)")
         || r.contains("dns error")
         || r.contains("tcp connect")
         || r.contains("network is unreachable")
@@ -138,6 +139,13 @@ mod tests {
     #[test]
     fn explain_error_recognises_git_missing() {
         assert!(explain_error("could not start git: ENOENT").is_some());
+    }
+
+    /// hyper reports an unreachable host as "client error (Connect)".
+    #[test]
+    fn explain_error_recognises_hyper_connect_errors() {
+        let hint = explain_error("HTTP error: client error (Connect)").expect("hint");
+        assert!(hint.contains("Could not reach"), "{hint}");
     }
 
     #[test]

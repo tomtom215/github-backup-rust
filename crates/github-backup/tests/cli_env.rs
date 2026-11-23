@@ -199,3 +199,139 @@ fn decrypt_needs_no_owner() {
         "the error should be about the missing input: {stderr}"
     );
 }
+
+// ── First contact and usability ──────────────────────────────────────────────
+
+/// A scratch directory used as `HOME` (so no real config file is read).
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gbk-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// U6: `--help` printed the value of `BACKUP_NOTIFY_WEBHOOK`, whose path is
+/// the secret of a Slack or Discord webhook.
+#[test]
+fn help_never_prints_the_webhook_url() {
+    let out = run(
+        &["--help"],
+        &[(
+            "BACKUP_NOTIFY_WEBHOOK",
+            "https://hooks.slack.com/services/T0/B0/SECRETPART",
+        )],
+    );
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--notify-webhook"), "{help}");
+    assert!(!help.contains("SECRETPART"), "{help}");
+}
+
+/// U10: writing to a closed stdout panicked (exit 101).
+#[test]
+fn a_closed_stdout_does_not_panic() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_github-backup"))
+        .env_clear()
+        .args(["--print-config-template"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("wait");
+    assert_ne!(out.status.code(), Some(101), "stderr: {}", stderr(&out));
+    assert!(!stderr(&out).contains("panicked"), "{}", stderr(&out));
+}
+
+#[test]
+fn no_token_and_no_owner_prints_the_quickstart() {
+    let home = scratch("quickstart");
+    let out = run(&[], &[("HOME", home.to_str().unwrap())]);
+    assert_eq!(out.status.code(), Some(1));
+    let text = stderr(&out);
+    assert!(
+        text.contains("gh auth login") && text.contains("Quickstart"),
+        "{text}"
+    );
+}
+
+/// U5: `--doctor` ran before the validation a backup makes, and called a
+/// configuration "ready" that the run then rejected.
+#[test]
+fn doctor_rejects_what_a_run_would_reject() {
+    let out = run(&["octocat", "--doctor", "--since", "yesterday"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--since"), "{}", stderr(&out));
+    let out = run(&["octocat", "--doctor", "--encrypt-key", "short"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+}
+
+/// U5: a mirror or S3 upload without credentials failed only after the whole
+/// backup; it is now refused before anything is fetched.
+#[test]
+fn missing_mirror_or_s3_credentials_fail_at_startup() {
+    let out = run(
+        &["octocat", "--mirror-to", "https://codeberg.org"],
+        &[("GITHUB_TOKEN", "ghp_example")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("mirror token"), "{}", stderr(&out));
+    let out = run(
+        &["octocat", "--s3-bucket", "b"],
+        &[("GITHUB_TOKEN", "ghp_example")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("access key"), "{}", stderr(&out));
+}
+
+/// U12: `--tui` ignored the config file and silently dropped flags it cannot
+/// honour; they are now an error.
+#[test]
+fn tui_rejects_flags_it_cannot_honour() {
+    let out = run(&["octocat", "--tui", "--report", "r.json"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--report"), "{}", stderr(&out));
+}
+
+/// U8: the default config file is read without `--config`, and its settings
+/// combine with the command line (U4: `--mirror-type` with `mirror_to` from
+/// the file used to exit 2).
+#[test]
+fn the_default_config_file_is_loaded_and_combines_with_the_command_line() {
+    let home = scratch("config");
+    let dir = home.join(".config").join("github-backup");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        "owner = \"octocat\"\nmirror_to = \"https://gitlab.com\"\nskip = [\"hooks\"]\n",
+    )
+    .unwrap();
+    let out = run(
+        &["--mirror-type", "gitlab", "--list-scopes"],
+        &[("HOME", home.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("loaded config file"),
+        "{}",
+        stderr(&out)
+    );
+    // `skip = ["hooks"]` was applied: no admin:repo_hook.
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("admin:repo_hook"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn secrets_on_the_command_line_are_warned_about() {
+    let out = run(&["octocat", "--list-scopes", "--token", "ghp_x"], &[]);
+    assert!(out.status.success());
+    let text = stderr(&out);
+    assert!(
+        text.contains("--token was given on the command line"),
+        "{text}"
+    );
+    assert!(!text.contains("ghp_x"), "the value is never echoed: {text}");
+}

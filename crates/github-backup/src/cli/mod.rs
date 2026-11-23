@@ -7,10 +7,12 @@
 //!
 //! - [`args`] — the top-level [`Args`] struct
 //! - [`args_impl`] — `merge_config` and `into_backup_options` implementations
+//! - [`categories`] — the backup categories by name (`--skip`, the default)
 //! - [`clone_type`] — the `--clone-type` flag parser (`CliCloneType`)
 
 pub mod args;
 mod args_impl;
+pub(crate) mod categories;
 pub mod clone_type;
 
 pub use args::Args;

@@ -40,6 +40,7 @@ fn render(
     owner: &str,
     stats: &BackupStats,
     started_at_unix: u64,
+    elapsed_secs: f64,
     carried_last_success: Option<u64>,
 ) -> String {
     let label = format!("owner=\"{}\"", escape_label(owner));
@@ -91,7 +92,7 @@ fn render(
         "github_backup_duration_seconds",
         "gauge",
         "Duration of the last backup run in seconds",
-        format!("{:.3}", stats.elapsed_secs()),
+        format!("{elapsed_secs:.3}"),
     );
     metric(
         "github_backup_last_run_timestamp_seconds",
@@ -134,12 +135,13 @@ pub(crate) fn write_prometheus_metrics(
     owner: &str,
     stats: &BackupStats,
     started_at_unix: u64,
+    elapsed_secs: f64,
 ) -> Result<(), String> {
     let label = format!("owner=\"{}\"", escape_label(owner));
     let carried = std::fs::read_to_string(path)
         .ok()
         .and_then(|existing| previous_last_success(&existing, &label));
-    let text = render(owner, stats, started_at_unix, carried);
+    let text = render(owner, stats, started_at_unix, elapsed_secs, carried);
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -176,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_clean_run_reports_success_and_stamps_last_success() {
-        let text = render("octocat", &BackupStats::new(), 1_700_000_000, Some(5));
+        let text = render("octocat", &BackupStats::new(), 1_700_000_000, 1.0, Some(5));
         assert_eq!(value(&text, "github_backup_success").as_deref(), Some("1"));
         assert_eq!(value(&text, "github_backup_failures").as_deref(), Some("0"));
         assert_eq!(
@@ -194,6 +196,7 @@ mod tests {
             "octocat",
             &failing_stats(),
             1_700_000_500,
+            1.0,
             Some(1_700_000_000),
         );
         assert_eq!(value(&text, "github_backup_success").as_deref(), Some("0"));
@@ -211,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_failed_first_run_has_no_last_success_metric_at_all() {
-        let text = render("octocat", &failing_stats(), 1_700_000_500, None);
+        let text = render("octocat", &failing_stats(), 1_700_000_500, 1.0, None);
         assert!(
             !text.contains(LAST_SUCCESS),
             "never succeeded: the series must be absent so absent() alerts fire"
@@ -229,7 +232,7 @@ mod tests {
 
     #[test]
     fn label_values_are_escaped() {
-        let text = render("a\"b\\c", &BackupStats::new(), 1, None);
+        let text = render("a\"b\\c", &BackupStats::new(), 1, 1.0, None);
         assert!(text.contains(r#"owner="a\"b\\c""#), "{text}");
     }
 
@@ -238,8 +241,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("metrics").join("github_backup.prom");
 
-        write_prometheus_metrics(&path, "octocat", &BackupStats::new(), 1_000).expect("run 1");
-        write_prometheus_metrics(&path, "octocat", &failing_stats(), 2_000).expect("run 2");
+        write_prometheus_metrics(&path, "octocat", &BackupStats::new(), 1_000, 1.0).expect("run 1");
+        write_prometheus_metrics(&path, "octocat", &failing_stats(), 2_000, 1.0).expect("run 2");
 
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(value(&text, LAST_SUCCESS).as_deref(), Some("1000"));

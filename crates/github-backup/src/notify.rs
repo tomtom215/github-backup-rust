@@ -8,6 +8,15 @@
 //! are logged as warnings and never cause the backup process to exit with
 //! a non-zero code.
 //!
+//! # Formats ([`NotifyFormat`])
+//!
+//! - `json`: this tool's own object (see `WebhookPayload`).
+//! - `slack`: `{"text": "..."}`, what a Slack incoming webhook requires.
+//! - `discord`: `{"content": "..."}` (at most 2000 characters), what a Discord
+//!   webhook requires.
+//! - `healthchecks`: a POST to the URL on success and to `<URL>/fail`
+//!   otherwise, with the same text as body (healthchecks.io stores it).
+//!
 //! # Security
 //!
 //! The webhook payload contains the backup owner name, counters, and any
@@ -29,6 +38,23 @@ const NOTIFY_TIMEOUT_SECS: u64 = 15;
 /// so a run with thousands of failures cannot produce an unbounded request.
 const MAX_LISTED_FAILURES: usize = 20;
 
+/// Longest Discord message `content`.
+const DISCORD_MAX_CHARS: usize = 2000;
+
+/// The body format of the notification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum NotifyFormat {
+    /// This tool's JSON object.
+    #[default]
+    Json,
+    /// A Slack incoming-webhook message.
+    Slack,
+    /// A Discord webhook message.
+    Discord,
+    /// A healthchecks.io-style success / `/fail` ping.
+    Healthchecks,
+}
+
 /// How a run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -38,6 +64,8 @@ pub enum Status {
     Partial,
     /// The run could not be completed.
     Failure,
+    /// The run was stopped by SIGINT / SIGTERM.
+    Interrupted,
 }
 
 impl Status {
@@ -46,6 +74,7 @@ impl Status {
             Self::Success => "success",
             Self::Partial => "partial",
             Self::Failure => "failure",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -119,6 +148,95 @@ impl<'a> WebhookPayload<'a> {
     }
 }
 
+/// A short, human-readable account of the run for chat messages and pings.
+/// Like the JSON payload it names failed items but not their messages.
+fn summary_text(n: &Notification<'_>) -> String {
+    use std::fmt::Write as _;
+    let mut text = match n.status {
+        Status::Success => format!(
+            "github-backup: backup of {} succeeded ({} repositories).",
+            n.owner, n.repos_backed_up
+        ),
+        Status::Partial => format!(
+            "github-backup: backup of {} is INCOMPLETE: {} item(s) could not be backed up \
+             ({} repositories complete, {} incomplete).",
+            n.owner,
+            n.failures.len(),
+            n.repos_backed_up,
+            n.repos_errored
+        ),
+        Status::Failure => format!(
+            "github-backup: backup of {} FAILED: {}",
+            n.owner,
+            n.error.unwrap_or("the run could not be carried out")
+        ),
+        Status::Interrupted => format!(
+            "github-backup: backup of {} was INTERRUPTED before it finished.",
+            n.owner
+        ),
+    };
+    for f in n.failures.iter().take(MAX_LISTED_FAILURES) {
+        let _ = write!(text, "\n- {}: {}", f.scope, f.step);
+    }
+    if n.failures.len() > MAX_LISTED_FAILURES {
+        let _ = write!(
+            text,
+            "\n- ... and {} more",
+            n.failures.len() - MAX_LISTED_FAILURES
+        );
+    }
+    text
+}
+
+/// The URL to send to, the body and its content type, for `format`.
+fn request_for(
+    format: NotifyFormat,
+    url: &str,
+    n: &Notification<'_>,
+    timestamp: String,
+) -> Result<(String, Vec<u8>, &'static str), serde_json::Error> {
+    const JSON: &str = "application/json";
+    Ok(match format {
+        NotifyFormat::Json => (
+            url.to_string(),
+            serde_json::to_vec(&WebhookPayload::new(n, timestamp))?,
+            JSON,
+        ),
+        NotifyFormat::Slack => (
+            url.to_string(),
+            serde_json::to_vec(&serde_json::json!({ "text": summary_text(n) }))?,
+            JSON,
+        ),
+        NotifyFormat::Discord => {
+            let text = summary_text(n);
+            let content = if text.chars().count() > DISCORD_MAX_CHARS {
+                let cut: String = text.chars().take(DISCORD_MAX_CHARS - 1).collect();
+                format!("{cut}…")
+            } else {
+                text
+            };
+            (
+                url.to_string(),
+                serde_json::to_vec(&serde_json::json!({ "content": content }))?,
+                JSON,
+            )
+        }
+        NotifyFormat::Healthchecks => {
+            let base = url.trim_end_matches('/');
+            let target = if n.status == Status::Success {
+                base.to_string()
+            } else {
+                format!("{base}/fail")
+            };
+            (
+                target,
+                summary_text(n).into_bytes(),
+                "text/plain; charset=utf-8",
+            )
+        }
+    })
+}
+
 /// `scheme://host` of `url`: all that may appear in logs, because the path (and
 /// any userinfo) of a Slack, Discord or Teams webhook is a bearer secret.
 fn display_host(url: &str) -> String {
@@ -139,7 +257,7 @@ fn display_host(url: &str) -> String {
 ///
 /// A warning is emitted when `url` uses plain HTTP so operators are aware
 /// that backup metadata will be transmitted unencrypted.
-pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
+pub async fn send_webhook(url: &str, format: NotifyFormat, notification: &Notification<'_>) {
     // Warn when the URL is plain HTTP — the payload contains owner name and
     // error messages that should not travel over an unencrypted connection.
     let shown = display_host(url);
@@ -151,17 +269,16 @@ pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
         );
     }
 
-    let payload = WebhookPayload::new(notification, utc_now_iso8601());
+    let (target, body_bytes, content_type) =
+        match request_for(format, url, notification, utc_now_iso8601()) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "failed to serialise webhook payload");
+                return;
+            }
+        };
 
-    let body_bytes = match serde_json::to_vec(&payload) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "failed to serialise webhook payload");
-            return;
-        }
-    };
-
-    match send_post(url, body_bytes).await {
+    match send_post(&target, body_bytes, content_type).await {
         Ok(status_code) if status_code.is_success() => {
             debug!(url = %shown, http_status = %status_code, "webhook notification sent");
         }
@@ -175,14 +292,14 @@ pub async fn send_webhook(url: &str, notification: &Notification<'_>) {
 }
 
 /// Sends an HTTP POST request with a JSON body to `url`.
-async fn send_post(url: &str, body: Vec<u8>) -> Result<StatusCode, String> {
+async fn send_post(url: &str, body: Vec<u8>, content_type: &str) -> Result<StatusCode, String> {
     // Same proxy handling (HTTP(S)_PROXY, ALL_PROXY, NO_PROXY) as the API client.
     let http = ProxyClient::from_env(true).map_err(|e| e.to_string())?;
 
     let req = Request::builder()
         .method(Method::POST)
         .uri(url)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", content_type)
         .header(
             "User-Agent",
             concat!("github-backup-rust/", env!("CARGO_PKG_VERSION")),
@@ -314,6 +431,86 @@ mod tests {
             v["failed"].as_array().expect("array").len(),
             MAX_LISTED_FAILURES
         );
+    }
+
+    fn notification(status: Status, failures: &[Failure]) -> Notification<'_> {
+        Notification {
+            status,
+            owner: "octocat",
+            error: None,
+            repos_backed_up: 8,
+            repos_errored: 2,
+            failures,
+        }
+    }
+
+    fn body_json(format: NotifyFormat, n: &Notification<'_>) -> (String, serde_json::Value) {
+        let (url, body, ctype) =
+            request_for(format, "https://hooks.example/x", n, "t".into()).expect("request");
+        assert_eq!(ctype, "application/json");
+        (url, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    /// Slack rejects a payload without `text` (`no_text`); the plain JSON
+    /// payload has none, which is why a Slack URL never worked.
+    #[test]
+    fn slack_gets_a_text_field_naming_the_outcome_and_failures() {
+        let failures = vec![failure("octocat/a", "wiki"), failure("octocat/b", "issues")];
+        let n = notification(Status::Partial, &failures);
+        let (url, v) = body_json(NotifyFormat::Slack, &n);
+        assert_eq!(url, "https://hooks.example/x");
+        let text = v["text"].as_str().expect("text");
+        assert!(
+            text.contains("octocat") && text.contains("INCOMPLETE"),
+            "{text}"
+        );
+        assert!(text.contains("octocat/a: wiki"), "{text}");
+        assert!(!text.contains("sensitive stderr"), "{text}");
+        assert!(body_json(NotifyFormat::Json, &n).1["text"].is_null());
+    }
+
+    /// Discord needs `content`, at most 2000 characters.
+    #[test]
+    fn discord_gets_content_capped_at_2000_characters() {
+        let failures: Vec<Failure> = (0..MAX_LISTED_FAILURES)
+            .map(|i| failure(&format!("octocat/{}", "x".repeat(200 + i)), "clone"))
+            .collect();
+        let n = notification(Status::Partial, &failures);
+        let (_, v) = body_json(NotifyFormat::Discord, &n);
+        let content = v["content"].as_str().expect("content");
+        assert_eq!(content.chars().count(), DISCORD_MAX_CHARS);
+        assert!(content.ends_with('…'));
+    }
+
+    #[test]
+    fn healthchecks_pings_the_url_on_success_and_url_fail_otherwise() {
+        let ok = notification(Status::Success, &[]);
+        let (url, body, ctype) = request_for(
+            NotifyFormat::Healthchecks,
+            "https://hc-ping.com/uuid/",
+            &ok,
+            "t".into(),
+        )
+        .expect("request");
+        assert_eq!(url, "https://hc-ping.com/uuid");
+        assert!(ctype.starts_with("text/plain"));
+        assert!(String::from_utf8(body).expect("utf8").contains("succeeded"));
+        for status in [Status::Partial, Status::Failure, Status::Interrupted] {
+            let (url, _, _) = request_for(
+                NotifyFormat::Healthchecks,
+                "https://hc-ping.com/uuid",
+                &notification(status, &[]),
+                "t".into(),
+            )
+            .expect("request");
+            assert_eq!(url, "https://hc-ping.com/uuid/fail", "{status:?}");
+        }
+    }
+
+    #[test]
+    fn an_interrupted_run_is_reported_as_interrupted() {
+        let (_, v) = body_json(NotifyFormat::Json, &notification(Status::Interrupted, &[]));
+        assert_eq!(v["status"], "interrupted");
     }
 
     #[test]

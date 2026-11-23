@@ -138,6 +138,10 @@ pub struct ConfigFile {
     /// Back up GitHub Packages metadata for the target user.
     pub packages: Option<bool>,
 
+    /// Categories to leave out of the backup (names as for `--skip`, e.g.
+    /// `["hooks", "packages"]`).
+    pub skip: Option<Vec<String>>,
+
     /// Only back up repositories matching these glob patterns (comma-separated
     /// or as a TOML array).
     pub include_repos: Option<Vec<String>>,
@@ -190,6 +194,9 @@ pub struct ConfigFile {
     /// Owner name at the mirror destination (username or org).
     pub mirror_owner: Option<String>,
 
+    /// Mirror destination type (default: `gitea`).
+    pub mirror_type: Option<MirrorType>,
+
     /// Create every repository as private at the mirror destination (this is
     /// the default; the key exists to say so explicitly).
     pub mirror_private: Option<bool>,
@@ -225,6 +232,31 @@ pub struct ConfigFile {
 
     /// Also upload binary release assets to S3 (can be very large).
     pub s3_include_assets: Option<bool>,
+}
+
+/// Kind of server a push mirror goes to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MirrorType {
+    /// Gitea, Forgejo or Codeberg (Gitea REST API v1).
+    #[default]
+    Gitea,
+    /// GitLab.com or self-hosted GitLab (REST API v4).
+    Gitlab,
+}
+
+impl std::str::FromStr for MirrorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "gitea" => Ok(Self::Gitea),
+            "gitlab" => Ok(Self::Gitlab),
+            other => Err(format!(
+                "unknown mirror type '{other}' (expected 'gitea' or 'gitlab')"
+            )),
+        }
+    }
 }
 
 impl ConfigFile {

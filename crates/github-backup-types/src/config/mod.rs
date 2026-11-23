@@ -20,7 +20,7 @@ mod output;
 
 pub use clone_type::CloneType;
 pub use credential::Credential;
-pub use file::ConfigFile;
+pub use file::{ConfigFile, MirrorType};
 pub use options::{BackupOptions, BackupTarget};
 pub use output::OutputConfig;
 

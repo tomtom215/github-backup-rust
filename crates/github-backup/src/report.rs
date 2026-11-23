@@ -42,10 +42,17 @@ use github_backup_core::BackupStats;
 /// The schema is **append-only stable**: existing keys keep the same name and
 /// type across releases.  Monitoring jobs may pin to the set of keys
 /// currently documented in the module-level doc-comment.
+///
+/// `elapsed_secs` is the whole run, post-processing included.
 #[must_use]
-pub fn build_report(owner: &str, stats: &BackupStats, started_at_unix: u64) -> serde_json::Value {
+pub fn build_report(
+    owner: &str,
+    stats: &BackupStats,
+    started_at_unix: u64,
+    elapsed_secs: f64,
+) -> serde_json::Value {
     let started_iso = unix_secs_to_iso8601(started_at_unix);
-    let elapsed = stats.elapsed_secs();
+    let elapsed = elapsed_secs;
     let finished_iso = unix_secs_to_iso8601(started_at_unix.saturating_add(elapsed as u64));
 
     serde_json::json!({
@@ -83,8 +90,9 @@ pub fn write_report(
     owner: &str,
     stats: &BackupStats,
     started_at_unix: u64,
+    elapsed_secs: f64,
 ) -> Result<(), String> {
-    let report = build_report(owner, stats, started_at_unix);
+    let report = build_report(owner, stats, started_at_unix, elapsed_secs);
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -339,7 +347,7 @@ mod tests {
         let stats = BackupStats::new();
         stats.add_discovered(3);
         stats.inc_backed_up();
-        let r = build_report("octocat", &stats, 1_705_305_600);
+        let r = build_report("octocat", &stats, 1_705_305_600, 1.0);
         assert_eq!(r["owner"], "octocat");
         assert_eq!(r["started_at"], "2024-01-15T08:00:00Z");
         assert_eq!(r["success"], true);
@@ -356,7 +364,7 @@ mod tests {
         let stats = BackupStats::new();
         stats.record_failure("octocat", "gist abc", "fatal: boom");
         assert_eq!(stats.repos_errored(), 0);
-        let r = build_report("octocat", &stats, 0);
+        let r = build_report("octocat", &stats, 0, 0.0);
         assert_eq!(r["success"], false);
         assert_eq!(r["failure_count"], 1);
         assert_eq!(r["failures"][0]["scope"], "octocat");
@@ -366,7 +374,7 @@ mod tests {
 
     #[test]
     fn every_documented_key_is_present() {
-        let r = build_report("o", &BackupStats::new(), 0);
+        let r = build_report("o", &BackupStats::new(), 0, 0.0);
         for key in [
             "tool_version",
             "schema_version",
@@ -395,7 +403,7 @@ mod tests {
         use tempfile::tempdir;
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("report.json");
-        write_report(&path, "octocat", &BackupStats::new(), 0).expect("write");
+        write_report(&path, "octocat", &BackupStats::new(), 0, 0.0).expect("write");
         let parsed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("valid JSON");
         assert_eq!(parsed["owner"], "octocat");

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Tom F
 
-//! Process start-up helpers: logging, the embedded config template, config-file
-//! permission checks, completion detection, owner validation and credentials.
+//! Process start-up helpers: logging, the embedded config template, the
+//! default config file, config-file permission checks, owner validation and
+//! credentials (including the GitHub CLI's token).
 
-use clap_complete::Shell;
-use tracing::{info, warn};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use tracing::{debug, info, warn};
 
 use github_backup_client::oauth::device_flow;
 use github_backup_types::config::Credential;
@@ -89,16 +92,79 @@ pub(crate) fn check_config_permissions(path: &std::path::Path) {
     }
 }
 
-/// Checks raw args for `--completions <shell>` before clap parses them,
-/// returning the requested [`Shell`] if found.
-pub(crate) fn detect_completions_request() -> Option<Shell> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--completions" {
-            return args.next().and_then(|s| s.parse().ok());
+/// Where the config file is looked for when `--config` is not given:
+/// `$XDG_CONFIG_HOME/github-backup/config.toml`, else
+/// `$HOME/.config/github-backup/config.toml` (also on macOS, matching the
+/// template's advice), and `%APPDATA%\github-backup\config.toml` on Windows.
+///
+/// `var` is the environment lookup (a parameter so tests need not touch the
+/// process environment).  Relative directories are ignored, as the XDG
+/// specification requires.
+pub(crate) fn default_config_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let dir = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = if cfg!(windows) {
+        dir("APPDATA")?
+    } else {
+        dir("XDG_CONFIG_HOME").or_else(|| dir("HOME").map(|h| h.join(".config")))?
+    };
+    Some(base.join("github-backup").join("config.toml"))
+}
+
+/// The host the GitHub CLI knows an API URL by: `github.com` for
+/// `https://api.github.com`, otherwise the URL's host (GitHub Enterprise
+/// Server: `https://ghe.example.com/api/v3` is `ghe.example.com`).
+pub(crate) fn gh_hostname(api_url: Option<&str>) -> String {
+    let Some(url) = api_url else {
+        return "github.com".to_string();
+    };
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.eq_ignore_ascii_case("api.github.com") {
+        "github.com".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// How long `gh auth token` may take.
+const GH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Asks the GitHub CLI for its token for `hostname` (`gh auth token
+/// --hostname <host>`).
+///
+/// `None` when `gh` is not installed, not logged in to that host, or does not
+/// answer within [`GH_TIMEOUT`].  The token is read from `gh`'s standard
+/// output and never logged; `gh`'s own messages are discarded.
+pub(crate) async fn token_from_gh_cli(program: &Path, hostname: &str) -> Option<String> {
+    let child = tokio::process::Command::new(program)
+        .args(["auth", "token", "--hostname", hostname])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("GitHub CLI not available ({e})");
+            return None;
+        }
+    };
+    match tokio::time::timeout(GH_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => {
+            let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
+            (!token.is_empty()).then_some(token)
+        }
+        Ok(_) => {
+            debug!(hostname, "the GitHub CLI has no token for this host");
+            None
+        }
+        Err(_) => {
+            warn!("`gh auth token` did not answer within {GH_TIMEOUT:?}; ignoring the GitHub CLI");
+            None
         }
     }
-    None
 }
 
 /// Validates a GitHub owner / organisation name as a safe path segment.
@@ -131,6 +197,39 @@ pub(crate) fn validate_owner_name(owner: &str) -> Result<(), &'static str> {
             _ if c.is_control() => return Err("name must not contain control characters"),
             _ => return Err("name contains an unsupported character"),
         }
+    }
+    Ok(())
+}
+
+/// Checks the mirror and S3 settings before anything else happens, so that a
+/// missing token or key fails the run at once instead of after the whole
+/// backup.
+///
+/// # Errors
+///
+/// A message naming the missing or malformed setting.
+pub(crate) fn check_destinations(args: &Args) -> Result<(), String> {
+    if let Some(url) = &args.mirror_to {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(format!(
+                "--mirror-to '{url}' is not a URL; give the base URL with its scheme, \
+                 e.g. https://codeberg.org"
+            ));
+        }
+        if args
+            .mirror_token
+            .as_deref()
+            .is_none_or(|t| t.trim().is_empty())
+        {
+            return Err(
+                "--mirror-to is set but there is no mirror token; set MIRROR_TOKEN \
+                        (preferred), --mirror-token or mirror_token in the config file"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(s3) = crate::post_process::build_s3_config(args) {
+        crate::post_process::check_s3_config(&s3)?;
     }
     Ok(())
 }
@@ -200,24 +299,86 @@ mod tests {
     }
 
     #[test]
-    fn config_template_documents_required_fields() {
+    fn config_template_documents_the_defaults_of_optional_keys() {
         let toml = config_template();
-        // Defensive: any key marked REQUIRED in the README + docs must
-        // still be present in the template, otherwise onboarding silently
-        // regresses.
+        // Nothing is required any more: OWNER defaults to the token's account
+        // (this test used to insist that owner was flagged REQUIRED).
+        assert!(!toml.contains("REQUIRED"), "no key is required");
         assert!(
-            toml.contains("REQUIRED — the GitHub user"),
-            "template must flag owner as REQUIRED"
+            toml.contains("default: the account the token"),
+            "template must state the default for owner"
         );
-        // `output` is optional (it defaults to the current directory), and the
-        // template must not claim otherwise.
         assert!(
-            !toml.contains("REQUIRED — root directory"),
-            "output is optional and must not be flagged REQUIRED"
+            toml.contains("everything is backed up"),
+            "template must state the default categories"
         );
         assert!(
             toml.contains("default: the current directory"),
             "template must state the default for output"
+        );
+    }
+
+    #[test]
+    fn the_default_config_file_follows_xdg_then_home() {
+        if cfg!(windows) {
+            return;
+        }
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            default_config_path(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])),
+            Some(PathBuf::from("/x/github-backup/config.toml"))
+        );
+        assert_eq!(
+            default_config_path(env(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/h")])),
+            Some(PathBuf::from("/h/.config/github-backup/config.toml"))
+        );
+        assert_eq!(default_config_path(env(&[])), None);
+    }
+
+    #[test]
+    fn gh_hostname_maps_the_api_url_to_the_web_host() {
+        assert_eq!(gh_hostname(None), "github.com");
+        assert_eq!(gh_hostname(Some("https://api.github.com")), "github.com");
+        assert_eq!(gh_hostname(Some("https://API.github.com/")), "github.com");
+        assert_eq!(
+            gh_hostname(Some("https://ghe.example.com/api/v3")),
+            "ghe.example.com"
+        );
+        assert_eq!(
+            gh_hostname(Some("https://ghe.example.com:8443/api/v3")),
+            "ghe.example.com:8443"
+        );
+    }
+
+    /// A fake `gh` that prints a token only for the expected host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_gh_cli_token_is_read_for_the_right_host() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$1 $2 $3 $4\" = \"auth token --hostname github.com\" ] || exit 1\n\
+             echo 'gho_fromgh'\necho 'some notice' >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            token_from_gh_cli(&gh, "github.com").await.as_deref(),
+            Some("gho_fromgh")
+        );
+        assert_eq!(token_from_gh_cli(&gh, "ghe.example.com").await, None);
+        assert_eq!(
+            token_from_gh_cli(&dir.path().join("missing"), "github.com").await,
+            None
         );
     }
 
