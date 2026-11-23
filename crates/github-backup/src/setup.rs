@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use github_backup_client::oauth::device_flow;
+use github_backup_client::oauth::device_flow_for;
 use github_backup_types::config::Credential;
 
 use crate::cli::Args;
@@ -252,7 +252,7 @@ pub(crate) async fn obtain_credential(args: &Args) -> Result<Credential, String>
         info!("starting OAuth device flow");
         let scope = args.oauth_scopes.as_str();
 
-        let token = device_flow(client_id, scope, |code, url| {
+        let token = device_flow_for(args.api_url.as_deref(), client_id, scope, |code, url| {
             eprintln!();
             eprintln!("──────────────────────────────────────────────────────");
             eprintln!("  GitHub OAuth device authorisation");

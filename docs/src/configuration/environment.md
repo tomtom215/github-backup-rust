@@ -64,7 +64,8 @@ credentials exported for other tools never affect a run that does not use S3.
 The lower-case spelling wins when both are set.  The proxy must be an
 **HTTP proxy** (`http://[user:pass@]host[:port]`, port 3128 if omitted;
 credentials are sent as `Proxy-Authorization: Basic`).  `https://` targets are
-reached through an HTTP `CONNECT` tunnel.  A value that is not a usable HTTP
+reached through an HTTP `CONNECT` tunnel (any `2xx` answer opens it; IPv6
+targets are written `[addr]:port`).  A value that is not a usable HTTP
 proxy URL (`socks5://...` for example) is ignored with a warning.  **SOCKS
 proxies are not supported.**
 
@@ -73,6 +74,7 @@ What the variables apply to:
 | Traffic | Uses the proxy settings? |
 |---------|--------------------------|
 | GitHub API calls, including release-asset downloads | yes |
+| OAuth device flow (`--device-auth`) | yes |
 | `--notify-webhook` | yes |
 | `--doctor` / `--check` | yes (the same client as the backup) |
 | `git clone`, `git fetch`, `git push` (the `git` binary) | by git's own rules: git reads the same variables (`https_proxy`, `no_proxy`, ...) or its `http.proxy` setting |

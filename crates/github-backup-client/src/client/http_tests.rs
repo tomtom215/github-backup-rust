@@ -90,8 +90,16 @@ impl FakeApi {
                         Some(r) => (r.status, r.link_next.clone(), r.body.to_string()),
                         None => (404, None, r#"{"message":"no route"}"#.to_string()),
                     };
+                    // A target that is already a URL is sent as it is.
                     let link = link
-                        .map(|t| format!("Link: <{next_base}{t}>; rel=\"next\"\r\n"))
+                        .map(|t| {
+                            let url = if t.starts_with("http") {
+                                t
+                            } else {
+                                format!("{next_base}{t}")
+                            };
+                            format!("Link: <{url}>; rel=\"next\"\r\n")
+                        })
                         .unwrap_or_default();
                     let response = format!(
                         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{link}\
@@ -494,4 +502,74 @@ async fn a_client_error_other_than_401_403_from_user_is_not_swallowed() {
         matches!(err, ClientError::ApiError { status: 404, .. }),
         "{err}"
     );
+}
+
+// ── Pagination guards ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_next_link_that_points_back_to_a_fetched_page_ends_with_an_error() {
+    let first = "/items?per_page=100";
+    let second = "/items?per_page=100&page=2";
+    let api = FakeApi::start(vec![
+        (first, Reply::ok(json!([1])).with_next(second)),
+        (second, Reply::ok(json!([2])).with_next(first)),
+    ])
+    .await;
+    let client = api.client(token());
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_all_pages::<Value>(&format!("{}{first}", api.base)),
+    )
+    .await
+    .expect("a pagination loop must not run forever");
+
+    assert!(
+        matches!(outcome, Err(ClientError::Pagination(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(api.targets(), [first, second]);
+}
+
+#[tokio::test]
+async fn a_next_link_to_another_origin_is_not_followed_with_the_token() {
+    let other = FakeApi::start(vec![("/steal", Reply::ok(json!([])))]).await;
+    let first = "/items?per_page=100";
+    let api = FakeApi::start(vec![(
+        first,
+        Reply::ok(json!([1])).with_next(&format!("{}/steal", other.base)),
+    )])
+    .await;
+
+    let err = api
+        .client(token())
+        .get_all_pages::<Value>(&format!("{}{first}", api.base))
+        .await
+        .expect_err("another origin");
+
+    assert!(matches!(err, ClientError::Pagination(_)), "{err}");
+    assert!(
+        other.targets().is_empty(),
+        "the other origin is never asked"
+    );
+}
+
+#[tokio::test]
+async fn a_next_link_whose_url_contains_a_comma_is_followed() {
+    let first = "/search?q=a,b&per_page=100";
+    let second = "/search?q=a,b&per_page=100&page=2";
+    let api = FakeApi::start(vec![
+        (first, Reply::ok(json!([1])).with_next(second)),
+        (second, Reply::ok(json!([2]))),
+    ])
+    .await;
+
+    let page = api
+        .client(token())
+        .get_all_pages::<Value>(&format!("{}{first}", api.base))
+        .await
+        .expect("both pages");
+
+    assert_eq!(page.len(), 2);
+    assert_eq!(api.targets(), [first, second]);
 }

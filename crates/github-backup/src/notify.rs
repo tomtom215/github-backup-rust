@@ -25,7 +25,6 @@
 //! URL is supplied.
 
 use bytes::Bytes;
-use chrono::Utc;
 use github_backup_client::ProxyClient;
 use github_backup_core::Failure;
 use http_body_util::Full;
@@ -326,7 +325,7 @@ async fn send_post(url: &str, body: Vec<u8>, content_type: &str) -> Result<Statu
 
 /// Returns the current UTC time as an ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
 fn utc_now_iso8601() -> String {
-    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    github_backup_core::time::now_utc()
 }
 
 #[cfg(test)]

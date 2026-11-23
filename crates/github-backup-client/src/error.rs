@@ -40,6 +40,39 @@ pub enum ClientError {
         body: String,
     },
 
+    /// A response body was larger than the client accepts for an API
+    /// response.
+    #[error("response body exceeds the {} MiB cap", limit_bytes / (1024 * 1024))]
+    BodyTooLarge {
+        /// The cap, in bytes.
+        limit_bytes: usize,
+    },
+
+    /// The `Link` header of a paginated list cannot be followed safely: it
+    /// points back to a page already fetched, or to another origin.
+    #[error("pagination error: {0}")]
+    Pagination(String),
+
+    /// A GraphQL response carried an `errors` array.
+    #[error("GraphQL error: {message}")]
+    GraphQl {
+        /// The `message` of every error, joined with `; `.
+        message: String,
+        /// The `type` of every error that has one (for example `NOT_FOUND`
+        /// or `FORBIDDEN`), so that callers can tell "absent" from "failed".
+        kinds: Vec<String>,
+    },
+
+    /// The OAuth server answered with an error the device flow cannot
+    /// recover from (RFC 8628 section 3.5 or RFC 6749 section 5.2).
+    #[error("OAuth error {error}{}", description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
+    OAuth {
+        /// The `error` code, for example `incorrect_client_credentials`.
+        error: String,
+        /// The server's `error_description`, if any.
+        description: Option<String>,
+    },
+
     /// A URL could not be parsed.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),

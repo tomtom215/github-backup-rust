@@ -33,9 +33,8 @@
 //! blob[12:], None)`).  The `openssl enc` command cannot decrypt GCM: it
 //! rejects AEAD ciphers.
 
-use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 
@@ -63,14 +62,15 @@ pub fn encrypted_len(plaintext_len: u64) -> u64 {
 /// Returns [`S3Error::Encrypt`] if the AEAD operation fails (should not happen
 /// with valid key material).
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, S3Error> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    getrandom::fill(&mut nonce_bytes)
+        .map_err(|e| S3Error::Encrypt(format!("operating-system RNG failed: {e}")))?;
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| S3Error::Encrypt(e.to_string()))?;
 
     // Prepend the nonce so the blob is self-contained.
@@ -95,10 +95,10 @@ pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, S3Error> {
         ));
     }
     let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::try_from(nonce_bytes).expect("split_at(NONCE_LEN) yields NONCE_LEN bytes");
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
 
-    cipher.decrypt(nonce, ciphertext).map_err(|e| {
+    cipher.decrypt(&nonce, ciphertext).map_err(|e| {
         S3Error::Encrypt(format!(
             "decryption failed (wrong key or corrupt data): {e}"
         ))
