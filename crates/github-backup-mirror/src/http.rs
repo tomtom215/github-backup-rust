@@ -2,8 +2,9 @@
 // Copyright 2026 Tom F
 
 //! The HTTPS client shared by the Gitea and GitLab API clients: HTTPS only,
-//! a per-request timeout, a cap on response bodies, and retries of transient
-//! failures.
+//! the proxy environment honoured (the GitHub client's
+//! [`ProxyClient`](github_backup_client::ProxyClient)), a per-request
+//! timeout, a cap on response bodies, and retries of transient failures.
 //!
 //! The API token travels in a request header, so the client refuses plain
 //! `http://`: a self-hosted instance must be reachable over HTTPS (a private
@@ -12,10 +13,9 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use github_backup_client::{ClientError, ProxyClient};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Method, Request};
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use tracing::warn;
 
 use crate::error::MirrorError;
@@ -33,11 +33,6 @@ const MAX_ATTEMPTS: u32 = 3;
 
 /// Back-off before the first retry; doubles each time.
 const BASE_DELAY: Duration = Duration::from_millis(500);
-
-type HyperClient = Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
->;
 
 /// A response: status and (capped) body.
 #[derive(Debug)]
@@ -59,52 +54,40 @@ impl Response {
 /// The HTTP client of one API client.
 #[derive(Clone)]
 pub(crate) struct ApiHttp {
-    http: HyperClient,
+    http: ProxyClient,
     retry_delay: Duration,
 }
 
 impl ApiHttp {
-    /// An HTTPS-only client trusting the system certificate store.
+    /// An HTTPS-only client trusting the system certificate store, through
+    /// the proxy the environment names (`HTTPS_PROXY`, `NO_PROXY`, ...).
     pub(crate) fn new() -> Result<Self, MirrorError> {
-        Self::build(true)
+        Ok(Self {
+            http: ProxyClient::from_env(false).map_err(|e| match e {
+                ClientError::Tls(why) => MirrorError::Tls(why),
+                other => MirrorError::Tls(other.to_string()),
+            })?,
+            retry_delay: BASE_DELAY,
+        })
     }
 
     /// A client that also speaks plain HTTP, for the in-process fake servers
-    /// of the tests, with no back-off between retries.
+    /// of the tests, with no back-off between retries and no proxy.
     #[cfg(test)]
     pub(crate) fn for_tests() -> Self {
-        let mut http = Self::build(false).expect("test client");
-        http.retry_delay = Duration::ZERO;
-        http
+        Self::for_tests_via(github_backup_client::ProxySettings::default())
     }
 
-    fn build(https_only: bool) -> Result<Self, MirrorError> {
-        let mut root_store = rustls::RootCertStore::empty();
-        let cert_result = rustls_native_certs::load_native_certs();
-        if cert_result.certs.is_empty() {
-            let msg = cert_result
-                .errors
-                .first()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "no CA certificates found".to_string());
-            return Err(MirrorError::Tls(msg));
-        }
-        root_store.add_parsable_certificates(cert_result.certs);
-        let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
+    /// Like [`for_tests`](Self::for_tests) with explicit proxy settings.
+    #[cfg(test)]
+    pub(crate) fn for_tests_via(proxy: github_backup_client::ProxySettings) -> Self {
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls_config);
-        let https = if https_only {
-            builder.https_only()
-        } else {
-            builder.https_or_http()
+        Self {
+            http: ProxyClient::new(proxy, tls, true),
+            retry_delay: Duration::ZERO,
         }
-        .enable_http1()
-        .build();
-        Ok(Self {
-            http: Client::builder(TokioExecutor::new()).build(https),
-            retry_delay: BASE_DELAY,
-        })
     }
 
     /// Sends a request with the given authentication header and optional
@@ -345,5 +328,133 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, MirrorError::Transport(_)), "{err:?}");
         assert!(api.seen().is_empty(), "nothing reached the server");
+    }
+
+    // ── Proxy ─────────────────────────────────────────────────────────────
+
+    fn proxy(vars: &[(&str, String)]) -> github_backup_client::ProxySettings {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        github_backup_client::ProxySettings::from_lookup(|n| vars.get(n).cloned())
+    }
+
+    /// A proxy that records the first request head of every connection and
+    /// refuses every `CONNECT` with `407`.
+    async fn refusing_proxy() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&heads);
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = s
+                    .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                    .await;
+            }
+        });
+        (port, heads)
+    }
+
+    #[tokio::test]
+    async fn https_api_requests_tunnel_through_the_proxy_without_leaking_its_credentials() {
+        let (port, heads) = refusing_proxy().await;
+        let http = ApiHttp::for_tests_via(proxy(&[(
+            "HTTPS_PROXY",
+            format!("http://alice:pr0xy-s3cret@127.0.0.1:{port}"),
+        )]));
+        let err = http
+            .send(
+                Method::GET,
+                "https://gitea.example.invalid/api/v1/version",
+                ("Authorization", "token t"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let head = heads.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(
+            head.starts_with("connect gitea.example.invalid:443 http/1.1"),
+            "{head}"
+        );
+        // base64("alice:pr0xy-s3cret")
+        assert!(
+            head.contains("proxy-authorization: basic ywxpy2u6chiwehktcznjcmv0"),
+            "{head}"
+        );
+        assert!(
+            !head.contains("token t"),
+            "the API token stays inside the tunnel"
+        );
+        for text in [
+            err.to_string(),
+            format!("{err:?}"),
+            format!("{:?}", http.http),
+        ] {
+            assert!(!text.contains("pr0xy-s3cret"), "{text}");
+            assert!(!text.contains("YWxpY2U6cHIweHktczNjcmV0"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_http_api_requests_go_to_the_proxy_in_absolute_form() {
+        // The fake API plays the proxy: it records the absolute request target.
+        let proxy_api = fake::FakeApi::start(|_| (200, "{\"ok\":true}".into())).await;
+        let http = ApiHttp::for_tests_via(proxy(&[(
+            "HTTP_PROXY",
+            proxy_api.base_url.replace("http://", "http://u:p@"),
+        )]));
+        let response = http
+            .send(
+                Method::GET,
+                "http://gitlab.example.invalid/api/v4/version",
+                ("PRIVATE-TOKEN", "t"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        let seen = proxy_api.seen();
+        assert_eq!(
+            seen[0].target,
+            "http://gitlab.example.invalid/api/v4/version"
+        );
+        assert!(
+            seen[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "proxy-authorization" && v == "Basic dTpw"),
+            "{:?}",
+            seen[0].headers
+        );
+    }
+
+    #[tokio::test]
+    async fn no_proxy_hosts_are_reached_directly() {
+        let (port, heads) = refusing_proxy().await;
+        let api = fake::FakeApi::start(|_| (200, "{}".into())).await;
+        let http = ApiHttp::for_tests_via(proxy(&[
+            ("HTTP_PROXY", format!("http://127.0.0.1:{port}")),
+            ("NO_PROXY", "localhost,127.0.0.1".to_string()),
+        ]));
+        let response = http
+            .send(
+                Method::GET,
+                &format!("{}/x", api.base_url),
+                ("X", "y"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(api.seen()[0].target, "/x");
+        assert!(heads.lock().unwrap().is_empty(), "the proxy was bypassed");
     }
 }

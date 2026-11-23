@@ -392,13 +392,19 @@ fn configure_left_right_cycle_clone_type() {
 
 // ── ConfigState validation ────────────────────────────────────────────────────
 
+/// No Owner means the token's account, as on the command line; only an
+/// organisation must be named.
 #[test]
-fn validate_fails_without_owner() {
-    let app = App::new(InitialConfig {
+fn validate_without_owner_backs_up_the_token_account_but_not_an_org() {
+    let mut app = App::new(InitialConfig {
         token: Some("ghp_x".into()),
         ..Default::default()
     });
-    assert!(app.config.validate().is_some());
+    assert!(app.config.owner.is_empty());
+    assert_eq!(app.config.validate(), None);
+    app.config.org_mode = true;
+    let err = app.config.validate().expect("an organisation needs a name");
+    assert!(err.contains("Organisation mode needs Owner"), "{err}");
 }
 
 #[test]

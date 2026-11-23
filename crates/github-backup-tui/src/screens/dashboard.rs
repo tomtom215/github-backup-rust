@@ -65,7 +65,9 @@ fn last_run_result(dash: &DashboardState) -> Span<'static> {
 }
 
 fn owner_span(cfg: &ConfigState, width: usize) -> Span<'static> {
-    if cfg.owner.trim().is_empty() {
+    if cfg.owner.trim().is_empty() && !cfg.token.trim().is_empty() {
+        Span::styled(fit("(the token's account)", width), theme::DIM)
+    } else if cfg.owner.trim().is_empty() {
         Span::styled("(not configured)", theme::WARN_STYLE)
     } else {
         Span::styled(fit(cfg.owner.trim(), width), theme::ACCENT_BOLD)

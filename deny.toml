@@ -35,7 +35,7 @@ highlight = "all"
 deny = [
     { crate = "openssl-sys", reason = "use rustls instead" },
     { crate = "openssl",     reason = "use rustls instead" },
-    { crate = "reqwest",     reason = "use hyper + hyper-rustls directly" },
+    { crate = "reqwest",     reason = "use hyper + rustls directly" },
     { crate = "native-tls",  reason = "use rustls instead" },
 ]
 

@@ -157,8 +157,10 @@ is logged per repository and **recorded as a failure** of the run (step
 mirrored.  An error answer from the API is quoted in the message (for example
 Forgejo's `422` for a repository name it rejects).  API calls that fail with a
 `5xx` status, a dropped connection or a timeout are tried up to three times.
-The destination's own API calls do not use `HTTPS_PROXY` (the `git push`
-itself follows git's proxy settings).
+The destination's API calls honour `HTTPS_PROXY` and `NO_PROXY` like the
+GitHub API calls (see [Environment Variables](configuration/environment.md#proxy));
+the `git push` itself follows git's proxy settings, which read the same
+variables.
 
 ## Docker Compose Example
 

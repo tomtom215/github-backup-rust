@@ -102,9 +102,8 @@ github-backup octocat --output /backup --all
 ```
 
 When a proxy variable is present the log says `HTTP proxy configured from the
-environment`.  `git` reads the same variables itself.  S3 requests and the
-Gitea/GitLab API calls of `--mirror-to` ignore proxy settings and connect
-directly.
+environment`.  `git` reads the same variables itself; S3 requests and the
+Gitea/GitLab API calls of `--mirror-to` use them too.
 
 ### `request timed out`
 

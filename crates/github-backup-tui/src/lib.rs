@@ -594,7 +594,7 @@ enum RunEnd {
 async fn run_backup_task(
     cfg: state::ConfigState,
     tx: progress::ProgressTx,
-    cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let (owner, output_path, opts, token_opt) = cfg.to_backup_config();
     let dry_run = opts.dry_run;
@@ -625,6 +625,25 @@ async fn run_backup_task(
             });
             return;
         }
+    };
+
+    // No Owner: the account the token belongs to, as on the command line.
+    let owner = if owner.is_empty() {
+        tokio::select! {
+            resolved = resolve_owner(&client, &tx) => match resolved {
+                Ok(login) => login,
+                Err(error) => {
+                    let _ = tx.send(event::BackupEvent::BackupFailed { error });
+                    return;
+                }
+            },
+            _ = &mut cancel_rx => {
+                let _ = tx.send(event::BackupEvent::BackupCancelled);
+                return;
+            }
+        }
+    } else {
+        owner
     };
 
     // The engine reports per-repository progress and outcome on its own
@@ -673,7 +692,7 @@ async fn run_backup_task(
         let mut run = Box::pin(engine.run(&owner));
         // A dropped sender (the UI went away) is not a cancel request.
         let cancel_requested = async {
-            if cancel_rx.await.is_err() {
+            if (&mut cancel_rx).await.is_err() {
                 std::future::pending::<()>().await;
             }
         };
@@ -719,6 +738,24 @@ async fn run_backup_task(
                 dry_run,
             });
         }
+    }
+}
+
+/// The login of the account the token belongs to, announced to the UI with
+/// [`event::BackupEvent::OwnerResolved`]; the error says what to do instead.
+async fn resolve_owner(client: &GitHubClient, tx: &progress::ProgressTx) -> Result<String, String> {
+    match client.account_login().await {
+        Ok(login) => {
+            tracing::info!(owner = %login, "no Owner given: backing up {login}, the account the token belongs to");
+            let _ = tx.send(event::BackupEvent::OwnerResolved {
+                owner: login.clone(),
+            });
+            Ok(login)
+        }
+        Err(e) => Err(format!(
+            "No Owner given, and the account the token belongs to could not be looked up \
+             ({e}); enter Owner (Configure > Target tab)"
+        )),
     }
 }
 

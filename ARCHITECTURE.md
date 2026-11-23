@@ -84,8 +84,10 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   **Attachments** are streamed the same way; the credential (HTTP Basic) goes
   only to `https://github.com`, and only from a client for github.com's API.
 - `proxy`: HTTP `CONNECT` proxy support from `HTTPS_PROXY`, `HTTP_PROXY`,
-  `ALL_PROXY`, `NO_PROXY` (no SOCKS), shared with the webhook, `--doctor` and
-  the device flow.  HTTP/1.1 only.
+  `ALL_PROXY`, `NO_PROXY` (no SOCKS): `ProxyConnector` (a hyper-util
+  connector) and `ProxyClient<B>` (for any request body), shared with the
+  webhook, `--doctor`, the device flow, the mirror destinations' APIs and the
+  S3 client.  HTTP/1.1 only.
 - `oauth`: the device flow, at the login host of `--api-url` (github.com by
   default), retrying lost connections until the code expires.
 - **GitHub App** (`app_auth`, `client/app.rs`): an RS256 JWT signed with
@@ -182,7 +184,8 @@ Post-processing: push the cloned repositories to another host.
 - `GiteaClient` (REST v1) and `GitLabClient` (REST v4): check the destination,
   create it (private unless the source is known to be public), and verify that it
   is ours (description marker `GitHub mirror of <owner>/<repo>`) or empty.
-  HTTPS only, with retries of `5xx` and transport failures (`http.rs`).
+  HTTPS only, through the proxy the environment names, with retries of `5xx`
+  and transport failures (`http.rs`).
 - `push.rs`: `git push` of `refs/heads/*` and `refs/tags/*` only (never
   `--mirror`; `--prune` only with `--prune`), with the token in an environment
   variable and a credential helper scoped to the destination origin.
@@ -196,7 +199,8 @@ Post-processing: upload the JSON metadata to an S3-compatible store.
 
 - `signing`: AWS Signature V4 built from `sha2` + `hmac` (no AWS SDK).
 - `S3Client`: PUT / HEAD / LIST / DELETE and multipart upload over hyper + rustls
-  with retries and an idle timeout.  It connects directly (no proxy support).
+  with retries and an idle timeout, through the client crate's proxy-aware
+  connector.
 - `sync_to_s3`: concurrent sync of `<output>/<owner>/json/`; an object is skipped
   only when its stored SHA-256 digest (keyed HMAC for encrypted uploads) and size
   match; guarded `--s3-delete-stale`.

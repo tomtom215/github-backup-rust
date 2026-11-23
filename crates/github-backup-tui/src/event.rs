@@ -23,6 +23,9 @@ pub enum BackupEvent {
         /// Error description when `success` is `false`.
         error: Option<String>,
     },
+    /// No Owner was given: the backup is of `owner`, the account the token
+    /// belongs to.
+    OwnerResolved { owner: String },
     /// Total repository count became known after listing.
     ReposDiscovered { total: u64 },
     /// The engine has finished with `current` of `total` repositories

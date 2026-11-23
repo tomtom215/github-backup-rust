@@ -307,6 +307,13 @@ pub fn handle_backup_event(app: &mut App, ev: BackupEvent) {
                 app.run.repos_errored += 1;
             }
         }
+        BackupEvent::OwnerResolved { owner } => {
+            if app.run.status != RunStatus::Cancelling {
+                app.run.phase = format!("Backing up {owner}, the token's account");
+            }
+            // Kept for the next run, the Dashboard, Verify and the results.
+            app.config.owner = owner;
+        }
         BackupEvent::ReposDiscovered { total } => {
             app.run.total_repos = total;
             if app.run.status != RunStatus::Cancelling {
@@ -725,6 +732,8 @@ fn toggle_category(app: &mut App, idx: usize) {
         31 => app.config.discussions = !app.config.discussions,
         32 => app.config.projects = !app.config.projects,
         33 => app.config.packages = !app.config.packages,
+        34 => app.config.commit_comments = !app.config.commit_comments,
+        35 => app.config.attachments = !app.config.attachments,
         _ => {}
     }
 }

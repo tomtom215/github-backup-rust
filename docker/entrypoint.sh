@@ -14,13 +14,16 @@
 #     This is what the CLI, docker-compose, and Kubernetes paths use.
 #   * No positional arguments  → argv is reconstructed from a small set
 #     of env vars that the Unraid template (or any other "fill the form,
-#     hit Apply" launcher) sets:
-#         GITHUB_OWNER    – positional OWNER  (required for a backup run)
+#     hit Apply" launcher) sets, each optional:
+#         GITHUB_OWNER    – positional OWNER (default: the account the
+#                           token belongs to)
 #         BACKUP_MODE     – one flag, e.g. --all | --doctor | --check |
 #                                   --list-scopes | --verify
 #         BACKUP_FLAGS    – free-form trailing flags, split on whitespace
-#                           e.g. "--org --concurrency 8 --since 2025-01-01T00:00:00Z"
-#   * All three empty → print --help so users discover the CLI quickly.
+#                           e.g. "--org --concurrency 8 --every 24h"
+#   * All three empty → with GITHUB_TOKEN set, a backup of everything the
+#     token's account owns (`github-backup` without arguments); without a
+#     token, --help so users discover the CLI quickly.
 #
 # The script is deliberately POSIX shell (`/bin/sh`) so it runs unchanged
 # on Alpine, Debian-slim, or any minimal base.
@@ -50,7 +53,8 @@ for v in GITHUB_TOKEN GITHUB_API_URL GITHUB_CLONE_HOST GITHUB_OAUTH_CLIENT_ID \
          GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_APP_PRIVATE_KEY_PATH \
          GITHUB_APP_INSTALLATION_ID \
          MIRROR_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-         BACKUP_ENCRYPT_KEY BACKUP_NOTIFY_WEBHOOK GITHUB_BACKUP_RESTORE_YES \
+         BACKUP_ENCRYPT_KEY BACKUP_NOTIFY_WEBHOOK BACKUP_NOTIFY_FORMAT \
+         GITHUB_BACKUP_RESTORE_YES \
          HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy \
          NO_PROXY no_proxy; do
     if [ -z "$(printenv "$v")" ]; then
@@ -89,8 +93,9 @@ set -f
 # shellcheck disable=SC2086
 set -- ${GITHUB_OWNER:-} ${BACKUP_MODE:-} ${BACKUP_FLAGS:-}
 
-# Nothing set: print --help so the operator can read it inside the container.
-if [ "$#" -eq 0 ]; then
+# Nothing set and no token: print --help so the operator can read it inside
+# the container.  With a token, no arguments back up the token's account.
+if [ "$#" -eq 0 ] && [ -z "${GITHUB_TOKEN:-}" ]; then
     exec "$BIN" --help
 fi
 

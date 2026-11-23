@@ -39,3 +39,7 @@ tokio        = { workspace = true }
 jiff       = { workspace = true }
 tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `GitHubClient::for_tests_at`, for the owner look-up test against a local server.
+github-backup-client = { workspace = true, features = ["test-support"] }
