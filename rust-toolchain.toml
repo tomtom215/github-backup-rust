@@ -1,0 +1,16 @@
+# The one place the project's Rust toolchain is pinned.  rustup reads this file
+# for every `cargo` / `rustc` run in the repository, so contributors, CI and the
+# release workflow all build with the same compiler, clippy and rustfmt, and a
+# new stable release cannot turn CI red (or change a release) without a
+# reviewed change here.
+#
+# When you bump `channel`, also bump the `RUST_VERSION` default in the
+# Dockerfile; CI fails if the two disagree.
+#
+# The minimum supported Rust version (MSRV) is separate: it is `rust-version`
+# in Cargo.toml, and the MSRV CI job checks it with `cargo +<msrv>`, which
+# overrides this file.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
