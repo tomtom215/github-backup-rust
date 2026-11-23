@@ -87,10 +87,14 @@ pub(crate) async fn run_every<S: Stop>(
         }
 
         let wait = interval.saturating_sub(started.elapsed());
-        let next = chrono::Local::now()
-            + chrono::Duration::from_std(wait).unwrap_or_else(|_| chrono::Duration::zero());
+        let next = std::time::SystemTime::now()
+            .checked_add(wait)
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(String::new, |d| {
+                github_backup_core::time::unix_secs_to_utc(d.as_secs())
+            });
         info!(
-            next_run = %next.format("%Y-%m-%d %H:%M:%S %:z"),
+            next_run = %next,
             "next backup in {}",
             format_duration(wait.as_secs())
         );

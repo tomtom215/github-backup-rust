@@ -98,6 +98,15 @@ pub(crate) fn explain_error(raw: &str) -> Option<&'static str> {
         );
     }
 
+    // A response larger than the client accepts.
+    if r.contains("response body exceeds") {
+        return Some(
+            "GitHub sent a response larger than the client accepts.  This is \
+             usually a proxy or server error page; check HTTPS_PROXY and --api-url, \
+             then re-run.",
+        );
+    }
+
     // Disk space / I/O.
     if r.contains("no space left") || r.contains("disk full") {
         return Some(
@@ -146,6 +155,11 @@ mod tests {
     fn explain_error_recognises_hyper_connect_errors() {
         let hint = explain_error("HTTP error: client error (Connect)").expect("hint");
         assert!(hint.contains("Could not reach"), "{hint}");
+    }
+
+    #[test]
+    fn explain_error_recognises_an_oversized_response() {
+        assert!(explain_error("response body exceeds the 16 MiB cap").is_some());
     }
 
     #[test]
