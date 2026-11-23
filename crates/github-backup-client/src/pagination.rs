@@ -29,26 +29,42 @@
 /// ```
 #[must_use]
 pub fn parse_next_link(link_header: &str) -> Option<String> {
-    for part in link_header.split(',') {
-        let part = part.trim();
-        // Each segment looks like: <URL>; rel="relation"
-        let Some((url_part, rel_part)) = part.split_once(';') else {
-            continue;
-        };
-
-        let url_part = url_part.trim();
-        let rel_part = rel_part.trim();
-
-        if !rel_part.contains(r#"rel="next""#) {
-            continue;
+    // A link value is `<URI-reference>` followed by `;`-separated parameters
+    // (RFC 8288, section 3).  The URI is delimited by the angle brackets, not
+    // by commas: a URL such as `?q=a,b` contains commas, so the header is
+    // scanned for `<...>` instead of being split on `,`.
+    let mut rest = link_header;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let close = after.find('>')?;
+        let url = &after[..close];
+        let tail = &after[close + 1..];
+        // The parameters run up to the next link value (parameter values
+        // never contain `<` in GitHub's headers).
+        let params_end = tail.find('<').unwrap_or(tail.len());
+        if is_rel_next(&tail[..params_end]) {
+            return Some(url.to_string());
         }
-
-        // Strip the surrounding `<` and `>`
-        if url_part.starts_with('<') && url_part.ends_with('>') {
-            return Some(url_part[1..url_part.len() - 1].to_string());
-        }
+        rest = &tail[params_end..];
     }
     None
+}
+
+/// Whether the parameters contain `rel="next"` (or `rel=next`, or a
+/// space-separated relation list containing `next`, in any case).
+fn is_rel_next(params: &str) -> bool {
+    params.split(';').any(|param| {
+        param.split_once('=').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("rel")
+                && value
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .split_ascii_whitespace()
+                    .any(|rel| rel.eq_ignore_ascii_case("next"))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -191,5 +207,30 @@ mod tests {
             vec!["repo-a", "repo-b", "repo-c", "repo-d", "repo-e"]
         );
         assert_eq!(page_index, 3, "all three pages should have been fetched");
+    }
+
+    #[test]
+    fn a_comma_inside_a_url_does_not_end_the_list() {
+        let header = r#"<https://api.github.com/search?q=a,b&page=1>; rel="prev", <https://api.github.com/search?q=a,b&page=3>; rel="next""#;
+        assert_eq!(
+            parse_next_link(header),
+            Some("https://api.github.com/search?q=a,b&page=3".to_string())
+        );
+    }
+
+    #[test]
+    fn rel_may_be_unquoted_in_any_case_or_one_of_several_relations() {
+        for header in [
+            "<https://h/2>; rel=next",
+            "<https://h/2>; REL=\"Next\"",
+            "<https://h/2>; title=\"x\"; rel=\"next last\"",
+        ] {
+            assert_eq!(
+                parse_next_link(header),
+                Some("https://h/2".to_string()),
+                "{header}"
+            );
+        }
+        assert!(parse_next_link("<https://h/2>; rel=\"nextpage\"").is_none());
     }
 }
