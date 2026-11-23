@@ -22,7 +22,16 @@ use super::{encode_path, encode_segment};
 impl GitHubClient {
     // ── Pull Requests ─────────────────────────────────────────────────────
 
-    /// Lists all pull requests for a repository, in every state.
+    /// Lists the pull requests of a repository, in every state.
+    ///
+    /// With `updated_since: None` every pull request is listed.  With
+    /// `Some(since)` (`YYYY-MM-DDTHH:MM:SSZ`, the form GitHub writes
+    /// `updated_at` in, so that the two compare as text) at least those
+    /// updated at or after `since` are: `GET .../pulls` has no `since`
+    /// filter, so the list is asked for most recently updated first
+    /// (`sort=updated&direction=desc`) and paging stops after the first page
+    /// whose last pull request was updated before `since`.  That page's
+    /// older pull requests are returned too.
     ///
     /// # Errors
     ///
@@ -31,10 +40,34 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
+        updated_since: Option<&str>,
     ) -> Result<Page<PullRequest>, ClientError> {
         let api = self.api();
-        let url = format!("{api}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
-        self.get_all_pages(&url).await
+        let Some(since) = updated_since else {
+            let url = format!("{api}/repos/{owner}/{repo}/pulls?state=all&per_page={PER_PAGE}");
+            return self.get_all_pages(&url).await;
+        };
+        let mut pulls = Page::new();
+        for page in 1.. {
+            let url = format!(
+                "{api}/repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc\
+                 &per_page={PER_PAGE}&page={page}"
+            );
+            let (values, _) = self.get_json_with_link::<Vec<Value>>(&url).await?;
+            let short = values.len() < PER_PAGE as usize;
+            // A pull request without a readable `updated_at` does not end the
+            // list: when in doubt, read on.
+            let reached_older = values
+                .last()
+                .and_then(|pr| pr.get("updated_at"))
+                .and_then(Value::as_str)
+                .is_some_and(|updated| updated < since);
+            extend_page(&mut pulls, &url, values);
+            if short || reached_older {
+                break;
+            }
+        }
+        Ok(pulls)
     }
 
     /// Lists review comments on a specific pull request.

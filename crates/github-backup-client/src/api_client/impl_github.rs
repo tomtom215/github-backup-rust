@@ -66,8 +66,13 @@ impl BackupClient for GitHubClient {
         Box::pin(GitHubClient::list_gist_comments(self, gist_id))
     }
 
-    fn list_issues<'a>(&'a self, owner: &'a str, repo: &'a str) -> Fut<'a, Page<Issue>> {
-        Box::pin(GitHubClient::list_issues(self, owner, repo))
+    fn list_issues<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        since: Option<&'a str>,
+    ) -> Fut<'a, Page<Issue>> {
+        Box::pin(GitHubClient::list_issues(self, owner, repo, since))
     }
 
     fn list_issue_comments<'a>(
@@ -113,8 +118,14 @@ impl BackupClient for GitHubClient {
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        updated_since: Option<&'a str>,
     ) -> Fut<'a, Page<PullRequest>> {
-        Box::pin(GitHubClient::list_pull_requests(self, owner, repo))
+        Box::pin(GitHubClient::list_pull_requests(
+            self,
+            owner,
+            repo,
+            updated_since,
+        ))
     }
 
     fn list_pull_comments<'a>(
