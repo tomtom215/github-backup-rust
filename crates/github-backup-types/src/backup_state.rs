@@ -9,10 +9,12 @@
 //!
 //! Written at the end of every backup run.  Holds one **watermark per
 //! repository**: the instant before which everything that repository's
-//! incremental categories (issue comments and events, pull request comments,
-//! commits and reviews) contain has already been captured.  The next run skips
-//! re-fetching those per-item files for issues and pull requests that have not
-//! changed since — the lists themselves are always fetched in full.
+//! incremental categories (the issue and pull request lists, issue comments
+//! and events, pull request comments, commits and reviews, the git data)
+//! contain has already been captured.  The next run asks only for the issues
+//! and pull requests changed since, merging them into the stored lists, skips
+//! the per-item files of those that have not changed, and skips the `git
+//! fetch` of a repository nothing was pushed to.
 //!
 //! A repository's watermark only advances when *every* step for it succeeded,
 //! so a failure is retried by the next run instead of being skipped over.
@@ -48,6 +50,12 @@ pub struct RepoWatermark {
     /// `"issue_comments"`).  A watermark vouches for these only: enabling
     /// another category later means the first run for it fetches everything.
     pub covers: Vec<String>,
+    /// RFC 3339 watermark of the last run that fetched this repository's git
+    /// data and finished cleanly; a run that skipped the fetch because
+    /// nothing was pushed keeps the earlier value.  Absent in files written
+    /// by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
 }
 
 /// What a finished run contributes to the persisted state.
@@ -116,17 +124,20 @@ impl BackupState {
 
     /// Folds the outcome of a finished run into the state.
     ///
-    /// * Every clean repository gets a fresh watermark.
+    /// * Every clean repository gets a fresh watermark; its `fetched_at` is
+    ///   carried over (the caller knows whether the git data was fetched).
     /// * A repository that was not clean keeps its **old** watermark (or none),
     ///   so whatever failed is fetched again next time.
     /// * `last_successful_run` only moves when the whole run succeeded.
     pub fn record_run(&mut self, run: &RunRecord<'_>) {
         for name in run.clean_repos {
+            let fetched_at = self.repos.get(name).and_then(|w| w.fetched_at.clone());
             self.repos.insert(
                 name.clone(),
                 RepoWatermark {
                     at: run.watermark.to_string(),
                     covers: run.categories.iter().map(|c| (*c).to_string()).collect(),
+                    fetched_at,
                 },
             );
         }
@@ -454,6 +465,23 @@ mod tests {
         assert_eq!(
             state.repos["o/b"].at, "2026-01-01T00:00:00Z",
             "the failed repository must be re-examined from its old watermark"
+        );
+    }
+
+    #[test]
+    fn a_new_watermark_carries_the_last_fetch_time_over() {
+        let mut state = BackupState::default();
+        let clean = vec!["o/a".to_string()];
+        state.record_run(&record(&clean, vec![], true));
+        assert_eq!(state.repos["o/a"].fetched_at, None);
+        state.repos.get_mut("o/a").expect("o/a").fetched_at = Some("2026-01-01T00:00:00Z".into());
+        state.record_run(&RunRecord {
+            watermark: "2026-02-01T00:00:00Z",
+            ..record(&clean, vec![], true)
+        });
+        assert_eq!(
+            state.repos["o/a"].fetched_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
         );
     }
 

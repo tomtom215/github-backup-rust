@@ -158,10 +158,13 @@ pub trait BackupClient: Send + Sync {
     ///
     /// GitHub's issues API returns every pull request as an issue too (with a
     /// `pull_request` stub); `Issue::is_pull_request` tells them apart.
+    ///
+    /// With `since` (ISO 8601) only the issues updated at or after it.
     fn list_issues<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Page<Issue>, ClientError>>;
 
     /// Lists comments on a specific issue.
@@ -197,11 +200,14 @@ pub trait BackupClient: Send + Sync {
 
     // ── Pull Requests ─────────────────────────────────────────────────────
 
-    /// Lists all pull requests for a repository, in every state.
+    /// Lists the pull requests of a repository, in every state: all of
+    /// them, or with `updated_since` (`YYYY-MM-DDTHH:MM:SSZ`) at least every
+    /// one updated at or after it (possibly some older ones too).
     fn list_pull_requests<'a>(
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        updated_since: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Page<PullRequest>, ClientError>>;
 
     /// Lists review comments on a specific pull request.

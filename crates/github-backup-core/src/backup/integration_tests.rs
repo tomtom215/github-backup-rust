@@ -99,10 +99,19 @@ async fn backup_issues_writes_issues_json_and_comments() {
         ..Default::default()
     };
 
-    let count = backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("backup_issues")
-        .count;
+    let count = backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("backup_issues")
+    .count;
 
     assert_eq!(count, 1, "one issue fetched");
     let issues_path = meta_dir().join("issues.json");
@@ -122,9 +131,18 @@ async fn backup_issues_disabled_writes_nothing() {
         ..Default::default()
     };
 
-    backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("noop");
+    backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("noop");
 
     assert_eq!(storage.len(), 0, "nothing written when issues disabled");
 }
@@ -159,10 +177,19 @@ async fn backup_pull_requests_writes_prs_json() {
         ..Default::default()
     };
 
-    let count = backup_pull_requests(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("backup_pull_requests")
-        .count;
+    let count = backup_pull_requests(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("backup_pull_requests")
+    .count;
 
     assert_eq!(count, 1);
     let prs_path = meta_dir().join("pulls.json");
@@ -617,12 +644,30 @@ async fn full_repo_metadata_pipeline_smoke_test() {
         ..Default::default()
     };
 
-    backup_issues(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("issues");
-    backup_pull_requests(&client, OWNER, REPO, &opts, None, &meta_dir(), &storage)
-        .await
-        .expect("prs");
+    backup_issues(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("issues");
+    backup_pull_requests(
+        &client,
+        OWNER,
+        REPO,
+        &opts,
+        None,
+        None,
+        &meta_dir(),
+        &storage,
+    )
+    .await
+    .expect("prs");
     backup_labels(&client, OWNER, REPO, &opts, &meta_dir(), &storage)
         .await
         .expect("labels");

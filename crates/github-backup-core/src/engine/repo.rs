@@ -26,20 +26,21 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use github_backup_client::BackupClient;
-use github_backup_types::config::{BackupOptions, OutputConfig};
+use github_backup_types::config::{BackupOptions, CloneType, OutputConfig};
 use github_backup_types::{Raw, Repository};
 
+use super::incremental::RepoSince;
 use super::steps::{RunControl, Steps};
 use crate::{
     backup::{
-        actions::backup_actions, branches::backup_branches, collaborators::backup_collaborators,
-        commit_comments::backup_commit_comments, deploy_keys::backup_deploy_keys,
-        environments::backup_environments, hooks::backup_hooks, is_forbidden, is_gone,
-        issue::backup_issues, labels::backup_labels, milestones::backup_milestones,
-        pull_request::backup_pull_requests, refused, release::backup_releases,
-        repository::backup_repository, repository::should_include,
-        security_advisories::backup_security_advisories, topics::backup_topics, wiki::backup_wiki,
-        Outcome,
+        actions::backup_actions, all_json, branches::backup_branches,
+        collaborators::backup_collaborators, commit_comments::backup_commit_comments,
+        deploy_keys::backup_deploy_keys, environments::backup_environments, hooks::backup_hooks,
+        is_forbidden, is_gone, issue::backup_issues, json_str, labels::backup_labels,
+        merge::unchanged_since, milestones::backup_milestones, pull_request::backup_pull_requests,
+        refused, release::backup_releases, repository::backup_repository,
+        repository::should_include, security_advisories::backup_security_advisories,
+        topics::backup_topics, wiki::backup_wiki, Outcome,
     },
     error::CoreError,
     git::{CloneOptions, GitRunner},
@@ -76,8 +77,8 @@ pub(super) struct RepoContext<'a, C, S, G> {
     pub control: &'a RunControl,
     /// Exact secret values to scrub from recorded failure messages.
     pub secrets: &'a [String],
-    /// Incremental watermark for this repository, if any.
-    pub since: Option<&'a str>,
+    /// What this repository's backup may take as already captured.
+    pub since: &'a RepoSince,
     /// Categories refused so far in this run (shared by all repositories).
     pub refusals: &'a Refusals,
 }
@@ -168,12 +169,22 @@ where
     .flatten();
     let repo = details.as_ref().unwrap_or(listed);
 
+    let without_fetch;
+    let repo_opts = if fetch_skippable(ctx, repo).await {
+        without_fetch = BackupOptions {
+            repositories: false,
+            ..opts.clone()
+        };
+        &without_fetch
+    } else {
+        opts
+    };
     steps
         .run(
             "repository",
             backup_repository(
                 repo,
-                opts,
+                repo_opts,
                 &repos_dir,
                 &meta_dir,
                 storage,
@@ -194,7 +205,7 @@ where
         })
         .await;
 
-    let since = ctx.since;
+    let since = ctx.since.items.as_deref();
     // Issues switched off answer "410 Gone"; the issue backup then still
     // fetches the conversation of the pull requests.
     if let Some(n) = category(
@@ -203,7 +214,16 @@ where
         &listed.full_name,
         "issues",
         READ,
-        backup_issues(client, owner, name, opts, since, &meta_dir, storage),
+        backup_issues(
+            client,
+            owner,
+            name,
+            opts,
+            since,
+            ctx.since.issue_list.as_deref(),
+            &meta_dir,
+            storage,
+        ),
     )
     .await
     {
@@ -215,7 +235,16 @@ where
         &listed.full_name,
         "pull requests",
         READ,
-        backup_pull_requests(client, owner, name, opts, since, &meta_dir, storage),
+        backup_pull_requests(
+            client,
+            owner,
+            name,
+            opts,
+            since,
+            ctx.since.pull_list.as_deref(),
+            &meta_dir,
+            storage,
+        ),
     )
     .await
     {
@@ -326,6 +355,57 @@ where
     .await;
 
     finish(&steps)
+}
+
+/// Whether the `git fetch` of `repo` can be skipped this run.
+///
+/// [`RepoSince::git`] says nothing was pushed since the clone was last brought
+/// up to date; the clone must also still be on disk.  A clone that holds the
+/// `refs/pull/*` refs (mirror, shallow and LFS clones) can change without a
+/// push to the repository itself (a push to a fork's pull request branch), so
+/// it also needs no pull request updated since: one request for the pull
+/// requests updated since, newest first.  When in doubt (that request fails),
+/// fetch.
+async fn fetch_skippable<C, S, G>(ctx: &RepoContext<'_, C, S, G>, repo: &Repository) -> bool
+where
+    C: BackupClient,
+{
+    let Some(since) = ctx.since.git.as_deref() else {
+        return false;
+    };
+    let opts = ctx.opts;
+    let working_tree = !opts.lfs && opts.clone_type == CloneType::Full;
+    let clone = ctx.output.repos_dir(ctx.owner).join(if working_tree {
+        repo.name.clone()
+    } else {
+        format!("{}.git", repo.name)
+    });
+    if !clone.is_dir() {
+        return false;
+    }
+    let pull_refs = opts.lfs || !matches!(opts.clone_type, CloneType::Bare | CloneType::Full);
+    if pull_refs {
+        match ctx
+            .client
+            .list_pull_requests(ctx.owner, &repo.name, Some(since))
+            .await
+        {
+            Ok(pulls) => {
+                let changed = all_json(&pulls).any(|pr| {
+                    !unchanged_since(json_str(pr, "updated_at").unwrap_or_default(), Some(since))
+                });
+                if changed {
+                    return false;
+                }
+            }
+            Err(e) => {
+                info!(repo = %repo.full_name, error = %e, "cannot tell whether a pull request changed; fetching");
+                return false;
+            }
+        }
+    }
+    info!(repo = %repo.full_name, since, "nothing pushed since the last backup; not fetching");
+    true
 }
 
 fn finish(steps: &Steps<'_>) -> RepoResult {
@@ -477,6 +557,7 @@ mod tests {
         control: RunControl,
         refusals: Refusals,
         clone_opts: CloneOptions,
+        since: RepoSince,
     }
 
     impl Fixture {
@@ -491,6 +572,7 @@ mod tests {
                 control: RunControl::default(),
                 refusals: Refusals::default(),
                 clone_opts: CloneOptions::unauthenticated(),
+                since: RepoSince::default(),
             }
         }
 
@@ -506,7 +588,7 @@ mod tests {
                 stats: &self.stats,
                 control: &self.control,
                 secrets: &[],
-                since: None,
+                since: &self.since,
                 refusals: &self.refusals,
             };
             backup_one_repo(&ctx, listed).await
