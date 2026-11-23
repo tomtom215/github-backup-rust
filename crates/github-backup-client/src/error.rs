@@ -106,4 +106,9 @@ pub enum ClientError {
     /// The user explicitly denied the OAuth authorisation request.
     #[error("OAuth authorisation was denied by the user")]
     OAuthDenied,
+
+    /// A GitHub App credential cannot be used: its private key is unusable,
+    /// or the installation to act as is unknown or missing.
+    #[error("GitHub App: {0}")]
+    App(String),
 }

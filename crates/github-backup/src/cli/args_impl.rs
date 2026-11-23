@@ -88,8 +88,16 @@ impl Args {
             &mut self.s3_secret_key,
             &mut self.encrypt_key,
             &mut self.notify_webhook,
+            &mut self.app_id,
         ] {
             normalize(value);
+        }
+        if self
+            .app_key
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            self.app_key = None;
         }
     }
 
@@ -219,6 +227,16 @@ impl Args {
             if let Some(ref t) = cfg.token {
                 self.token = Some(t.clone());
             }
+        }
+        // GitHub App: CLI / env takes precedence, key by key.
+        if self.app_id.is_none() {
+            self.app_id.clone_from(&cfg.app_id);
+        }
+        if self.app_key.is_none() {
+            self.app_key.clone_from(&cfg.app_key_path);
+        }
+        if self.app_installation_id.is_none() {
+            self.app_installation_id = cfg.app_installation_id;
         }
         // Output dir.
         if self.output.is_none() {

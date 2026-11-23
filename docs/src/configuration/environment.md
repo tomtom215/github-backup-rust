@@ -13,10 +13,16 @@ newline pasted with a token, is trimmed.
 | `GITHUB_TOKEN` | `--token` | GitHub personal access token |
 | `GH_TOKEN` | `--token` | The GitHub CLI's variable; used when neither `--token` nor `GITHUB_TOKEN` is set |
 | `GITHUB_OAUTH_CLIENT_ID` | `--oauth-client-id` | OAuth App client ID; ignored unless `--device-auth` is given |
+| `GITHUB_APP_ID` | `--app-id` | GitHub App client ID or App ID: authenticate as the App instead of with a token |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `--app-key` | Path of the GitHub App's private key (`.pem`) |
+| `GITHUB_APP_PRIVATE_KEY` | none | The GitHub App's private key itself (PEM text; a one-line value with literal `\n` sequences works too), for containers; ignored without `--app-id`, an error together with `--app-key` |
+| `GITHUB_APP_INSTALLATION_ID` | `--app-installation-id` | GitHub App installation to act as (default: the App's installation on OWNER) |
 
 With none of these (and no `token` in the config file), the token of the GitHub
 CLI is used when `gh` is installed and logged in (`gh auth token --hostname
-github.com`, or the host of `--api-url`).
+github.com`, or the host of `--api-url`).  A GitHub App is used instead of all
+tokens: an App together with a token is an error, and the GitHub CLI is not
+asked (see [GitHub App](../getting-started/authentication.md#github-app)).
 
 ## GitHub Enterprise
 

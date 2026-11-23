@@ -15,8 +15,9 @@ categories.workspace    = true
 publish                 = false
 
 [features]
-# Exposes `GitHubClient::for_tests_at` (plain HTTP, no proxy) to other crates'
-# tests.  Never enabled in a normal build.
+# Exposes `GitHubClient::for_tests_at` (plain HTTP, no proxy) and `test_keys`
+# (RSA keys generated at test time) to other crates' tests.  Never enabled in
+# a normal build.
 test-support = []
 
 [dependencies]
@@ -37,6 +38,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+# RS256 signing of GitHub App JWTs.  Already in the build as rustls's crypto
+# provider (same features), so it adds no crate; see `app_auth` for the choice.
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+# Wipes the App's private key and installation tokens from memory.
+zeroize = { workspace = true }
+# Reads the `expires_at` of an installation token.
+jiff = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

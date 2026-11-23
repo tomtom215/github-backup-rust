@@ -744,8 +744,9 @@ where
             // SSH uses key-based auth; no token needed in clone opts.
             true => None,
             false => {
-                // Extract token from the client's credential for injection.
-                self.client.token()
+                // The client's credential for git; a GitHub App's token is
+                // renewed while the run lasts, so git asks for it per process.
+                self.client.git_token()
             }
         };
         CloneOptions {

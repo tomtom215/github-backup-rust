@@ -36,6 +36,19 @@ code; where something is a limitation it says so.
   the others.
 - **`Debug` output** of the credential type is redacted.
 
+### GitHub App
+
+- The **private key** is read from a file (`--app-key`) or from
+  `GITHUB_APP_PRIVATE_KEY`, never from the command line or the config file.
+  The PEM text and the decoded key bytes are wiped from memory when they are
+  dropped; the parsed key lives inside `aws-lc` (the library rustls already
+  uses), whose allocator clears memory it frees.  Signing (RS256) is aws-lc's.
+- The **JWT** (valid for 9 minutes) and the **installation tokens** (one
+  hour) are sent only to the API host, as `Authorization: Bearer`, and are never
+  logged or written to a file.  Installation tokens reach `git` exactly as
+  personal tokens do (above), and are scrubbed from log and error text by
+  their `ghs_` prefix.
+
 ### Environment variables
 
 The recommended way to supply secrets: `GITHUB_TOKEN`, `AWS_ACCESS_KEY_ID`,

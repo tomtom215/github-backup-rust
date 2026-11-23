@@ -47,6 +47,8 @@ esac
 # (`printenv` prints nothing both for an empty and for an unset variable, and
 # unsetting an unset variable is a no-op.)
 for v in GITHUB_TOKEN GITHUB_API_URL GITHUB_CLONE_HOST GITHUB_OAUTH_CLIENT_ID \
+         GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_APP_PRIVATE_KEY_PATH \
+         GITHUB_APP_INSTALLATION_ID \
          MIRROR_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
          BACKUP_ENCRYPT_KEY BACKUP_NOTIFY_WEBHOOK GITHUB_BACKUP_RESTORE_YES \
          HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy \

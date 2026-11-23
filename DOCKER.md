@@ -98,7 +98,8 @@ The entrypoint is `tini` followed by a small POSIX shell wrapper
   start with `--` or `UMASK` is not an octal mask.
 * A variable that is **set but empty** (`VAR=`, which Compose and Unraid pass for
   every blank field) is removed for these: `GITHUB_TOKEN`, `GITHUB_API_URL`,
-  `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`, `MIRROR_TOKEN`,
+  `GITHUB_CLONE_HOST`, `GITHUB_OAUTH_CLIENT_ID`, the four `GITHUB_APP_*`
+  variables, `MIRROR_TOKEN`,
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `BACKUP_ENCRYPT_KEY`,
   `BACKUP_NOTIFY_WEBHOOK`, `GITHUB_BACKUP_RESTORE_YES` and the proxy variables.
 
@@ -170,6 +171,9 @@ Everything in `compose.example.env` is also accepted by a plain `docker run`:
 | `GITHUB_TOKEN` | GitHub personal access token |
 | `GITHUB_API_URL`, `GITHUB_CLONE_HOST` | GitHub Enterprise Server API URL and clone host |
 | `GITHUB_OAUTH_CLIENT_ID` | OAuth App client ID for `--device-auth` |
+| `GITHUB_APP_ID` | GitHub App client ID or App ID: authenticate as the App instead of with `GITHUB_TOKEN` |
+| `GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_PATH` | The App's private key: the PEM text itself, or the path of a mounted `.pem` file |
+| `GITHUB_APP_INSTALLATION_ID` | The App installation to act as (default: the one on OWNER) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | S3 / B2 / MinIO credentials (used only with `--s3-bucket`) |
 | `MIRROR_TOKEN` | Token for the mirror destination (used only with `--mirror-to`) |
 | `BACKUP_ENCRYPT_KEY` | 64 hex characters: AES-256-GCM key for the S3 upload |
@@ -192,7 +196,10 @@ the credentials of each profile; add any other variable (for example
   Nothing is removed from it.
 * **Secrets**: pass them as environment variables (`-e GITHUB_TOKEN`,
   `--env-file`, Compose `.env`, Kubernetes secrets), never baked into the image
-  or on a command line.  The tool hands the token to `git` through an
+  or on a command line.  A GitHub App's private key goes in
+  `GITHUB_APP_PRIVATE_KEY` or a read-only mounted file
+  (`GITHUB_APP_PRIVATE_KEY_PATH`); it is never accepted as an argument.  The
+  tool hands the token to `git` through an
   environment variable and a host-scoped credential helper; it is not written to
   a file and not placed in any argument list.
 * **SSH**: `--prefer-ssh` needs keys and a `known_hosts` file; the image ships

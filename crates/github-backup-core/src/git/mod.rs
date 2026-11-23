@@ -52,7 +52,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use tokio::runtime::Handle;
 use tracing::{debug, info, warn};
+
+use github_backup_client::GitToken;
 
 use crate::cancel::CancelFlag;
 use crate::error::CoreError;
@@ -75,9 +78,11 @@ const DEFAULT_STALL_TIMEOUT_SECS: u64 = 600;
 /// Git clone options passed to the runner.
 #[derive(Debug, Clone)]
 pub struct CloneOptions {
-    /// Token to inject for HTTPS authentication, or `None` for unauthenticated
-    /// (public repos) or SSH-based cloning.
-    pub token: Option<String>,
+    /// Credential to inject for HTTPS authentication, or `None` for
+    /// unauthenticated (public repos) or SSH-based cloning.  It is asked for
+    /// the token each time a `git` process starts, so a renewed GitHub App
+    /// installation token reaches every later process.
+    pub token: Option<GitToken>,
     /// When `true`, updates pass `--prune`, so branches and tags deleted on the
     /// remote are deleted from the local clone too.  The default (`false`)
     /// keeps them: a backup should still hold what GitHub no longer has.
@@ -136,8 +141,9 @@ impl Default for CloneOptions {
 /// --no-prune-tags`), so pruning settings in the user's git configuration do
 /// not apply.
 ///
-/// For HTTPS URLs, `opts.token` is passed through the git child's environment
-/// and a credential helper scoped to the URL's host (see `credential`).
+/// For HTTPS URLs, the current token of `opts.token` is passed through each
+/// git child's environment and a credential helper scoped to the URL's host
+/// (see `credential`).
 ///
 /// The methods return `Send` futures so they can be awaited inside spawned
 /// Tokio tasks.
@@ -294,13 +300,15 @@ impl ProcessGitRunner {
         }
     }
 
-    /// Captures everything a blocking git job needs, by value.
+    /// Captures everything a blocking git job needs, by value, including the
+    /// runtime that renews a refreshed token.
     fn job(&self, url: &str, dest: &Path, opts: &CloneOptions) -> Job {
         Job {
             git: self.git.clone(),
             url: url.to_owned(),
             dest: dest.to_owned(),
             opts: opts.clone(),
+            runtime: Handle::try_current().ok(),
         }
     }
 }
@@ -375,9 +383,34 @@ struct Job {
     url: String,
     dest: PathBuf,
     opts: CloneOptions,
+    /// The runtime of the caller: a [`GitToken::Refreshed`] token is renewed
+    /// on it, from the blocking thread the job runs on.
+    runtime: Option<Handle>,
 }
 
 impl Job {
+    /// The token for the `git` process about to start, asked for anew each
+    /// time; `None` without a credential or for a remote that is not HTTP(S)
+    /// (which is never given one).
+    fn current_token(&self) -> Result<Option<String>, CoreError> {
+        let Some(token) = &self.opts.token else {
+            return Ok(None);
+        };
+        if credential::origin(&self.url).is_none() {
+            return Ok(None);
+        }
+        match token {
+            GitToken::Fixed(token) => Ok(Some(token.clone())),
+            GitToken::Refreshed(_) => {
+                let runtime = self.runtime.as_ref().ok_or_else(|| {
+                    CoreError::TaskFailed("no runtime to renew the git token on".into())
+                })?;
+                // Jobs run on the blocking pool, where waiting is allowed.
+                Ok(Some(runtime.block_on(token.current())?))
+            }
+        }
+    }
+
     fn mirror_clone(&self) -> Result<(), CoreError> {
         path_to_str(&self.dest)?;
         if self.dest.exists() {
@@ -574,7 +607,7 @@ impl Job {
             args,
             &self.dest,
             &self.url,
-            self.opts.token.as_deref(),
+            self.current_token()?.as_deref(),
             &self.opts,
         )
     }
@@ -611,19 +644,24 @@ impl Job {
             .map(|a| if *a == DEST { staging_str } else { *a })
             .collect();
 
-        let result = run_git(
-            &self.git,
-            &args,
-            Path::new("."),
-            &self.url,
-            self.opts.token.as_deref(),
-            &self.opts,
-        )
-        // A clone that fails its check is not moved into place.
-        .and_then(|()| self.verify(&staging))
-        .and_then(|()| {
-            std::fs::rename(&staging, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
-        });
+        let result = self
+            .current_token()
+            .and_then(|token| {
+                run_git(
+                    &self.git,
+                    &args,
+                    Path::new("."),
+                    &self.url,
+                    token.as_deref(),
+                    &self.opts,
+                )
+            })
+            // A clone that fails its check is not moved into place.
+            .and_then(|()| self.verify(&staging))
+            .and_then(|()| {
+                std::fs::rename(&staging, &self.dest)
+                    .map_err(|e| CoreError::io(self.dest.display(), e))
+            });
 
         if result.is_err() && staging.exists() {
             match std::fs::remove_dir_all(&staging) {
@@ -1433,7 +1471,7 @@ mod credential_tests {
 
     fn authed() -> CloneOptions {
         CloneOptions {
-            token: Some(TOKEN.to_owned()),
+            token: Some(TOKEN.to_owned().into()),
             stall_timeout_secs: 20,
             ..CloneOptions::unauthenticated()
         }
@@ -1475,6 +1513,60 @@ mod credential_tests {
         assert!(env.contains("askpass=\n"), "no askpass is set: {env}");
         let leftover = std::env::temp_dir().join(format!("gh-backup-{}", std::process::id()));
         assert!(!leftover.exists(), "no askpass directory may be created");
+    }
+
+    /// A token source that hands out `tok-1`, `tok-2`, ... (as a GitHub App's
+    /// renewed installation tokens would be) and counts the requests.
+    struct Renewing(std::sync::atomic::AtomicU32);
+
+    impl github_backup_client::TokenSource for Renewing {
+        fn token(
+            &self,
+        ) -> github_backup_client::BoxFuture<'_, Result<String, github_backup_client::ClientError>>
+        {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Box::pin(async move { Ok(format!("tok-{n}")) })
+        }
+    }
+
+    /// Every git process asks for the token when it starts, so the second
+    /// process of a job gets the renewed one; an SSH remote never asks.
+    #[tokio::test]
+    async fn each_git_process_gets_the_current_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("seen.txt");
+        let script = dir.path().join("fake-git");
+        std::fs::write(
+            &script,
+            format!(
+                "echo \"env=$GH_BACKUP_GIT_TOKEN\" >> '{}'\nfor d in \"$@\"; do :; done; mkdir -p \"$d\"\n",
+                seen.display()
+            ),
+        )
+        .expect("write");
+        let source = Arc::new(Renewing(std::sync::atomic::AtomicU32::new(0)));
+        let opts = CloneOptions {
+            token: Some(GitToken::Refreshed(source.clone())),
+            ..authed()
+        };
+        let runner = ProcessGitRunner::with_shell_script(&script);
+        // A mirror clone, then `git lfs fetch`: two processes.
+        runner
+            .lfs_clone(
+                "https://github.com/o/r.git",
+                &dir.path().join("r.git"),
+                &opts,
+            )
+            .await
+            .expect("clone");
+        let text = std::fs::read_to_string(&seen).expect("seen");
+        assert_eq!(text, "env=tok-1\nenv=tok-2\n");
+
+        runner
+            .mirror_clone("git@github.com:o/s.git", &dir.path().join("s.git"), &opts)
+            .await
+            .expect("ssh clone");
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// Real git: a fresh clone offers the token (as `x-access-token`) to the

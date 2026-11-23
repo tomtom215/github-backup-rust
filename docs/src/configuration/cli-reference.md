@@ -26,7 +26,7 @@ one another.
 
 | Argument | Description |
 |---------|-------------|
-| `[OWNER]` | GitHub username or organisation name.  Defaults to `owner` from the config file, or else to the account the token belongs to (`GET /user`; the log says which).  An organisation is recognised as one without `--org`.  It is used as a directory name under `--output`, so `..`, `/`, `\` and control characters are rejected; a name GitHub does not know stops the run with status `1`. |
+| `[OWNER]` | GitHub username or organisation name.  Defaults to `owner` from the config file, or else to the account the token belongs to (`GET /user`; the log says which), or for a GitHub App with `--app-installation-id` to the installation's account.  An organisation is recognised as one without `--org`.  It is used as a directory name under `--output`, so `..`, `/`, `\` and control characters are rejected; a name GitHub does not know stops the run with status `1`. |
 
 ## Authentication
 
@@ -36,12 +36,16 @@ one another.
 | `--device-auth` | none | `false` | Use the GitHub OAuth device flow (interactive).  Needs `--oauth-client-id`. |
 | `--oauth-client-id <CLIENT_ID>` | `GITHUB_OAUTH_CLIENT_ID` | none | OAuth App client ID.  The variable is ignored unless `--device-auth` is given; the flag without `--device-auth` is an error. |
 | `--oauth-scopes <SCOPES>` | none | `repo gist read:org read:packages read:project` | Scopes requested by the device flow (space-separated).  They cover every category of the default backup except webhooks (`admin:repo_hook`; without it webhooks are skipped with a warning); see [Authentication](../getting-started/authentication.md). |
+| `--app-id <ID>` | `GITHUB_APP_ID` | none | Authenticate as a GitHub App: its client ID (recommended) or App ID.  Needs the App's private key.  Cannot be combined with a token or `--device-auth`.  See [GitHub App](../getting-started/authentication.md#github-app). |
+| `--app-key <PATH>` | `GITHUB_APP_PRIVATE_KEY_PATH` | none | Path of the App's private key (`.pem`).  Alternatively the PEM text itself in `GITHUB_APP_PRIVATE_KEY` (never on the command line); not both. |
+| `--app-installation-id <ID>` | `GITHUB_APP_INSTALLATION_ID` | the App's installation on OWNER | The installation to act as.  Without it the installation is looked up on OWNER (organisation, then user); with it OWNER may be left out. |
 
 The token is taken from the first of: `--token`, `GITHUB_TOKEN`, `GH_TOKEN`,
 `token` in the config file, and the GitHub CLI's login (`gh auth token
 --hostname <host>`, where the host is `github.com` or the host of `--api-url`;
-at most 5 seconds; the token is never logged).  `--device-auth` skips the
-GitHub CLI.
+at most 5 seconds; the token is never logged).  `--device-auth` and a GitHub
+App skip the GitHub CLI; an App together with any token (or `--device-auth`)
+stops the run with status `1`.
 
 With no credential at all the tool runs unauthenticated (public data, 60
 requests per hour).  It refuses to start, with exit status `1`, when the
@@ -344,14 +348,19 @@ lifecycle rule on the bucket).
 configuration it calls ready is one the run accepts.  It then checks, in order:
 the `git` binary and its version, whether the output directory exists or can be
 created (it is created if missing) and is writable, the kind of credential
-(classic, fine-grained, OAuth or app token, judged by its prefix), the
+(classic, fine-grained, OAuth or app token, judged by its prefix; for a GitHub
+App: its settings and key source), the
 categories that would be backed up (none at all is a failure), the mirror and
 S3 settings when they are used (a missing token or key is a failure), whether
 the API answers, whether GitHub accepts the token (`GET /rate_limit`, which
 costs no quota), and, when the API answered, OWNER: that the account exists and
 whether it is an organisation, or, without OWNER, which account the token
-belongs to.  A rejected token (HTTP 401 or 403) or an unreachable API is a
-failure; a server without `/rate_limit` is only a warning.  It does **not**
+belongs to.  For a GitHub App the API checks are instead: the App's JWT is
+accepted (`GET /app`), the installation is found and belongs to OWNER, its
+permissions (printed; no Contents permission is a warning), and an
+installation token is minted and accepted.  A rejected token (HTTP 401 or 403)
+or an unreachable API is a failure; a server without `/rate_limit` is only a
+warning.  It does **not**
 check free disk space, the token's scopes, whether the S3 bucket or mirror
 destination answers, or `git-lfs`.  It exits `0` when no check failed and `1`
 otherwise.
@@ -371,7 +380,8 @@ token (including `GH_TOKEN` and the GitHub CLI's), output directory, API URL,
 categories (everything when none is selected), `--dry-run`, `--manifest` and
 the clone options.  What the TUI cannot do is an error (status `2`) together
 with `--tui`: `--mirror-to`, `--s3-bucket`, `--report`, `--prometheus-metrics`,
-`--notify-webhook` on the command line, `--diff-with` and `--device-auth`.  See
+`--notify-webhook` on the command line, `--diff-with`, `--device-auth` and a
+GitHub App (`--app-id` / `app_id`).  See
 the [Interactive TUI guide](../tui.md).
 
 ## Shell Completions

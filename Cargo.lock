@@ -1020,6 +1020,7 @@ dependencies = [
 name = "github-backup-client"
 version = "0.3.2"
 dependencies = [
+ "aws-lc-rs",
  "base64",
  "bytes",
  "github-backup-types",
@@ -1027,6 +1028,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jiff",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -1039,6 +1041,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1133,6 +1136,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "zeroize",
 ]
 
 [[package]]

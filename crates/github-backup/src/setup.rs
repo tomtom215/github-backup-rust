@@ -10,8 +10,10 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
+use zeroize::Zeroizing;
+
 use github_backup_client::oauth::device_flow_for;
-use github_backup_types::config::Credential;
+use github_backup_types::config::{AppCredential, Credential};
 
 use crate::cli::Args;
 
@@ -219,11 +221,87 @@ pub(crate) fn check_destinations(args: &Args) -> Result<(), String> {
     crate::post_process::validate_post_processing(args)
 }
 
+/// The environment variable that may hold the GitHub App's private key itself
+/// (the PEM text), for containers that cannot mount a file.
+pub(crate) const APP_KEY_ENV: &str = "GITHUB_APP_PRIVATE_KEY";
+
+/// The GitHub App credential `args` configure, or `None` when no App is
+/// configured (`--app-id` / `app_id` unset).
+///
+/// `key_env` is the value of [`APP_KEY_ENV`] (a parameter so tests need not
+/// touch the process environment); it is ignored without an App ID, like any
+/// credential that merely arrives through the environment.  A value without
+/// line breaks but with literal `\n` sequences (as some secret stores write a
+/// PEM on one line) has them turned into line breaks.
+///
+/// # Errors
+///
+/// A message naming the conflict or the missing piece: an App together with
+/// a token or `--device-auth`, an App setting without `--app-id`, no key or
+/// two keys, or a key file that cannot be read.
+pub(crate) fn app_credential(
+    args: &Args,
+    key_env: Option<String>,
+) -> Result<Option<AppCredential>, String> {
+    let Some(app_id) = args.app_id.clone() else {
+        if args.app_key.is_some() || args.app_installation_id.is_some() {
+            return Err("--app-key / app_key_path and --app-installation-id / \
+                        app_installation_id need --app-id (app_id): the GitHub App's \
+                        client ID or App ID"
+                .to_string());
+        }
+        return Ok(None);
+    };
+    if args.token.is_some() {
+        return Err(
+            "both a token (--token, GITHUB_TOKEN, GH_TOKEN or `token` in the config \
+                    file) and a GitHub App (--app-id) are configured; use one of them"
+                .to_string(),
+        );
+    }
+    if args.device_auth {
+        return Err("--device-auth cannot be combined with a GitHub App (--app-id)".to_string());
+    }
+    let key_env = key_env
+        .map(Zeroizing::new)
+        .filter(|pem| !pem.trim().is_empty());
+    let private_key_pem = match (&args.app_key, key_env) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "the GitHub App key is given twice (--app-key / app_key_path and {APP_KEY_ENV}); \
+                 keep one"
+            ))
+        }
+        (Some(path), None) => std::fs::read_to_string(path)
+            .map(Zeroizing::new)
+            .map_err(|e| format!("cannot read the GitHub App key {}: {e}", path.display()))?,
+        (None, Some(pem)) if !pem.contains('\n') && pem.contains("\\n") => {
+            Zeroizing::new(pem.replace("\\n", "\n"))
+        }
+        (None, Some(pem)) => pem,
+        (None, None) => {
+            return Err(format!(
+                "--app-id needs the App's private key: --app-key <PATH>, app_key_path in the \
+                 config file, or the key itself in {APP_KEY_ENV}"
+            ))
+        }
+    };
+    Ok(Some(AppCredential {
+        app_id,
+        private_key_pem,
+        installation_id: args.app_installation_id,
+    }))
+}
+
 /// Resolves the GitHub credential from CLI args.
 ///
-/// Returns a [`Credential::Token`] (PAT or OAuth), or
+/// Returns a [`Credential::App`] when a GitHub App is configured (see
+/// [`app_credential`]), a [`Credential::Token`] (PAT or OAuth), or
 /// [`Credential::Anonymous`] when no auth method is provided.
 pub(crate) async fn obtain_credential(args: &Args) -> Result<Credential, String> {
+    if let Some(app) = app_credential(args, std::env::var(APP_KEY_ENV).ok())? {
+        return Ok(Credential::App(app));
+    }
     if let Some(token) = &args.token {
         return Ok(Credential::Token(token.clone()));
     }
@@ -261,6 +339,82 @@ pub(crate) async fn obtain_credential(args: &Args) -> Result<Credential, String>
 mod tests {
     use super::*;
     use github_backup_types::config::ConfigFile;
+
+    const PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nTUlJ\n-----END RSA PRIVATE KEY-----\n";
+
+    fn app_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["github-backup", "acme", "--app-id", "Iv23liX"];
+        argv.extend_from_slice(extra);
+        crate::cli::test_support::parse(&argv)
+    }
+
+    #[test]
+    fn the_config_file_supplies_app_settings_the_command_line_did_not() {
+        let cfg = ConfigFile::from_toml_str(
+            "app_id = \"Iv23liFile\"\napp_key_path = \"/k.pem\"\napp_installation_id = 5\n",
+        )
+        .unwrap();
+        let mut args = crate::cli::test_support::parse(&["github-backup", "--app-id", "Iv23liCli"]);
+        args.merge_config(&cfg);
+        assert_eq!(args.app_id.as_deref(), Some("Iv23liCli"));
+        assert_eq!(args.app_key.as_deref(), Some(Path::new("/k.pem")));
+        assert_eq!(args.app_installation_id, Some(5));
+    }
+
+    #[test]
+    fn no_app_id_means_no_app() {
+        let args = crate::cli::test_support::parse(&["github-backup", "acme"]);
+        assert!(app_credential(&args, Some(PEM.into())).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_app_key_comes_from_a_file_or_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.pem");
+        std::fs::write(&path, PEM).unwrap();
+        let args = app_args(&[
+            "--app-key",
+            path.to_str().unwrap(),
+            "--app-installation-id",
+            "9",
+        ]);
+        let app = app_credential(&args, None).unwrap().unwrap();
+        assert_eq!(app.app_id, "Iv23liX");
+        assert_eq!(app.installation_id, Some(9));
+        assert_eq!(&*app.private_key_pem, PEM);
+
+        let app = app_credential(&app_args(&[]), Some(PEM.into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&*app.private_key_pem, PEM);
+        // A PEM flattened onto one line with `\n` escapes.
+        let flat = PEM.replace('\n', "\\n");
+        let app = app_credential(&app_args(&[]), Some(flat)).unwrap().unwrap();
+        assert_eq!(&*app.private_key_pem, PEM);
+    }
+
+    #[test]
+    fn an_app_conflicts_with_tokens_and_needs_exactly_one_key() {
+        let token = app_args(&["--token", "ghp_x"]);
+        let e = app_credential(&token, Some(PEM.into())).unwrap_err();
+        assert!(e.contains("use one of them"), "{e}");
+        let device = app_args(&["--device-auth"]);
+        assert!(app_credential(&device, Some(PEM.into())).is_err());
+        let e = app_credential(&app_args(&[]), None).unwrap_err();
+        assert!(e.contains("private key"), "{e}");
+        let e = app_credential(&app_args(&[]), Some("  ".into())).unwrap_err();
+        assert!(e.contains("private key"), "{e}");
+        let twice = app_args(&["--app-key", "/nonexistent.pem"]);
+        let e = app_credential(&twice, Some(PEM.into())).unwrap_err();
+        assert!(e.contains("twice"), "{e}");
+        let e = app_credential(&twice, None).unwrap_err();
+        assert!(e.contains("/nonexistent.pem"), "{e}");
+        let orphan =
+            crate::cli::test_support::parse(&["github-backup", "--app-installation-id", "3"]);
+        assert!(app_credential(&orphan, None)
+            .unwrap_err()
+            .contains("need --app-id"));
+    }
 
     #[test]
     fn config_template_is_valid_toml() {

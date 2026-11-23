@@ -500,4 +500,12 @@ pub trait BackupClient: Send + Sync {
     fn token(&self) -> Option<String> {
         None
     }
+
+    /// The credential the engine hands to git for HTTPS remotes; the git
+    /// runner asks it for the token each time it starts `git`, so a renewed
+    /// GitHub App installation token reaches every later process.  The
+    /// default is the fixed [`token`](Self::token).
+    fn git_token(&self) -> Option<crate::GitToken> {
+        self.token().map(crate::GitToken::Fixed)
+    }
 }

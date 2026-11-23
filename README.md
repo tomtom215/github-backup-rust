@@ -164,8 +164,9 @@ github-backup octocat --tui
 ```
 
 The token is taken from `--token`, `GITHUB_TOKEN`, `GH_TOKEN`, the config file
-(`~/.config/github-backup/config.toml` is read automatically) or the GitHub CLI.
-OWNER defaults to the token's account, and with no category selected
+(`~/.config/github-backup/config.toml` is read automatically) or the GitHub CLI;
+an organisation can instead run unattended as a GitHub App (`--app-id`,
+`--app-key`).  OWNER defaults to the token's account, and with no category selected
 everything is backed up, as with `--all`.
 
 The exit status tells you whether the backup is complete: `0` yes, `3` it
@@ -247,7 +248,7 @@ the Output tab says so, and giving them together with `--tui` is an error.  See 
 | Git mirroring | Branches and tags pushed to Gitea, Codeberg, Forgejo or GitLab |
 | Restore | Labels, milestones and issues re-created from the local backup (`--restore`) |
 | HTML viewer | The backup as a static, offline website: issues, pull requests with reviews, releases, gists (`--render-html`) |
-| Auth | Personal access token, OAuth device flow, or anonymous |
+| Auth | Personal access token, GitHub App (installation tokens renewed during the run), OAuth device flow, or anonymous |
 | GitHub Enterprise | `--api-url` and `--clone-host` for GHES |
 | Config file | TOML (the command line wins for single values; switches and lists combine) |
 | Dry run | `--dry-run` lists what would be backed up and writes nothing |
