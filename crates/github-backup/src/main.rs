@@ -145,6 +145,7 @@ async fn run() -> ExitCode {
     }
 
     discover_gh_token(&mut args).await;
+    errors::remember_secrets(&args);
 
     if args.doctor || args.check {
         return modes::run_doctor(&args).await;

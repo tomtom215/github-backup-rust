@@ -5,11 +5,43 @@
 //! for anything that is about to be printed, and plain-language hints for the
 //! failure patterns users hit most.
 
-/// Redacts credentials in `s` before it is printed: GitHub tokens of every
-/// official format, and `user:password@` in URLs.  See
-/// [`github_backup_core::redact`].
+use std::sync::OnceLock;
+
+/// The secret values this run was configured with (see [`remember_secrets`]).
+static KNOWN_SECRETS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Records the configured secrets — the GitHub token, mirror token, S3 keys,
+/// encryption key and webhook URL — so that [`redact_secrets`] removes them by
+/// value from anything printed or recorded, whatever form an error takes.
+///
+/// Call once, after the configuration is complete; later calls are ignored.
+pub(crate) fn remember_secrets(args: &crate::cli::Args) {
+    let values = [
+        &args.token,
+        &args.mirror_token,
+        &args.s3_access_key,
+        &args.s3_secret_key,
+        &args.s3_session_token,
+        &args.encrypt_key,
+        &args.notify_webhook,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+    .collect();
+    let _ = KNOWN_SECRETS.set(values);
+}
+
+/// Redacts credentials in `s` before it is printed: the secrets this run was
+/// configured with, GitHub and GitLab tokens of every official format, and
+/// credentials in URLs.  See [`github_backup_core::redact`].
 pub(crate) fn redact_secrets(s: &str) -> String {
-    github_backup_core::redact::secrets(s, &[])
+    let known: Vec<&str> = KNOWN_SECRETS
+        .get()
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    github_backup_core::redact::secrets(s, &known)
 }
 
 /// Translates a raw error message string into an actionable hint for the
@@ -128,6 +160,33 @@ mod tests {
         let out = redact_secrets("401 ghp_abcdef1234567890 at https://u:pw@h/x");
         assert!(out.contains("ghp_<redacted>"), "{out}");
         assert!(!out.contains("pw@"), "{out}");
+    }
+
+    /// A mirror token or S3 key has no recognisable format, so only its value
+    /// identifies it: post-processing errors must not carry it into the
+    /// report, the webhook or the log.  (The only test that sets the
+    /// process-wide list.)
+    #[test]
+    fn configured_secrets_are_redacted_by_value() {
+        let args = crate::cli::test_support::parse(&[
+            "github-backup",
+            "o",
+            "--mirror-to",
+            "https://codeberg.org",
+            "--mirror-token",
+            "plain-mirror-secret-42",
+            "--s3-bucket",
+            "b",
+            "--s3-secret-key",
+            "S3SECRETKEYVALUE",
+        ]);
+        remember_secrets(&args);
+        let out = redact_secrets(
+            "push to https://codeberg.org failed: token plain-mirror-secret-42; s3 S3SECRETKEYVALUE",
+        );
+        assert!(!out.contains("plain-mirror-secret-42"), "{out}");
+        assert!(!out.contains("S3SECRETKEYVALUE"), "{out}");
+        assert!(out.contains("https://codeberg.org"), "{out}");
     }
 
     #[test]
