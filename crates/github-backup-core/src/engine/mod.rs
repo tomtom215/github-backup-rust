@@ -113,6 +113,10 @@ pub struct BackupEngine<C, S, G> {
     /// Optional channel for real-time per-repo progress events.
     engine_events: Option<EngineEventTx>,
     cancel: CancelFlag,
+    /// Check every repository with `git fsck` after cloning or updating it.
+    git_fsck: bool,
+    /// Seconds a git subprocess may stay silent before it is stopped.
+    git_stall_timeout_secs: u64,
 }
 
 impl<C, S, G> BackupEngine<C, S, G>
@@ -132,7 +136,33 @@ where
             opts,
             engine_events: None,
             cancel: CancelFlag::new(),
+            git_fsck: false,
+            git_stall_timeout_secs: CloneOptions::default().stall_timeout_secs,
         }
+    }
+
+    /// Checks every repository (owned, wiki, gist and starred clones) with
+    /// `git fsck --no-dangling` after it is cloned or updated.
+    ///
+    /// A repository that fails the check is recorded as a failure of its step
+    /// ([`CoreError::GitFsckFailed`]); a fresh clone that fails is not kept.
+    /// Off by default: the check reads every object, which takes a while for
+    /// large repositories.
+    #[must_use]
+    pub fn with_git_fsck(mut self, enabled: bool) -> Self {
+        self.git_fsck = enabled;
+        self
+    }
+
+    /// Sets how many seconds a git subprocess may go without printing
+    /// anything before it is stopped as stalled (default 600; at least 1).
+    ///
+    /// The same limit decides when a `.lock` file left in a repository counts
+    /// as stale and is removed before an update.
+    #[must_use]
+    pub fn with_git_stall_timeout(mut self, secs: u64) -> Self {
+        self.git_stall_timeout_secs = secs.max(1);
+        self
     }
 
     /// Attaches an event channel for real-time progress reporting.
@@ -599,8 +629,9 @@ where
         CloneOptions {
             token,
             prune: self.opts.prune,
+            stall_timeout_secs: self.git_stall_timeout_secs,
+            run_fsck: self.git_fsck,
             cancel: self.cancel.clone(),
-            ..CloneOptions::default()
         }
     }
 }

@@ -30,9 +30,11 @@
 //!   the destination is either absent or a complete repository.  A run killed
 //!   mid-clone leaves only a staging directory, which the next run deletes.
 //!
-//! - **Optional post-clone fsck** — with `CloneOptions::run_fsck = true`
-//!   (off by default) `git fsck --no-dangling` runs on every fresh clone and
-//!   problems are logged as warnings.
+//! - **Optional verification** — with `CloneOptions::run_fsck = true` (off by
+//!   default) `git fsck --no-dangling` checks every repository after it was
+//!   cloned or updated; a repository that fails is reported as
+//!   [`CoreError::GitFsckFailed`], and a fresh clone that fails is not moved
+//!   into place.
 //!
 //! # Sub-modules
 //!
@@ -88,8 +90,9 @@ pub struct CloneOptions {
     /// `--progress`, so a long transfer that keeps reporting progress is never
     /// interrupted.  Defaults to 600 s.
     pub stall_timeout_secs: u64,
-    /// When `true`, run `git fsck --no-dangling` after every *fresh* clone to
-    /// detect repository corruption early.
+    /// When `true`, run `git fsck --no-dangling` after every clone and update;
+    /// a repository that fails the check is reported as
+    /// [`CoreError::GitFsckFailed`] (a fresh clone that fails is discarded).
     pub run_fsck: bool,
     /// Triggering this stops running git processes promptly and makes new ones
     /// fail with [`CoreError::Interrupted`].
@@ -382,7 +385,8 @@ impl Job {
             // `git fetch --all` rather than `git remote update` because it
             // accepts `--progress`; the mirror refspec (`+refs/*:refs/*`)
             // updates every ref, force-pushed branches and moved tags included.
-            self.fetch(&["--all"])
+            self.fetch(&["--all"])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare mirror");
             self.fresh_clone(&["clone", "--progress", "--mirror", &self.url, DEST])
@@ -399,7 +403,8 @@ impl Job {
                 "origin",
                 "+refs/heads/*:refs/heads/*",
                 "+refs/tags/*:refs/tags/*",
-            ])
+            ])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning bare");
             self.fresh_clone(&["clone", "--progress", "--bare", &self.url, DEST])
@@ -422,7 +427,8 @@ impl Job {
                 "+refs/heads/*:refs/remotes/origin/*",
                 "+refs/tags/*:refs/tags/*",
             ])?;
-            self.check_out_head()
+            self.check_out_head()?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), "cloning full working tree");
             self.fresh_clone(&["clone", "--progress", "--no-local", &self.url, DEST])
@@ -435,7 +441,8 @@ impl Job {
         if self.dest.exists() {
             // Fetches what is new, keeping the history cut at `depth` commits.
             info!(dest = %self.dest.display(), depth, "shallow clone exists, fetching");
-            self.fetch(&["--depth", &depth_str])
+            self.fetch(&["--depth", &depth_str])?;
+            self.verify(&self.dest)
         } else {
             info!(url = %self.url, dest = %self.dest.display(), depth, "cloning shallow");
             self.fresh_clone(&[
@@ -514,6 +521,33 @@ impl Job {
         Duration::from_secs(self.opts.stall_timeout_secs)
     }
 
+    /// With [`CloneOptions::run_fsck`], checks the repository at `repo` (the
+    /// destination, or the staging directory of a fresh clone) with `git fsck`.
+    ///
+    /// The check runs like any other git command: supervised for stalls
+    /// (`--progress` keeps a long check alive), cancellable, with bounded
+    /// output.  A failed check is [`CoreError::GitFsckFailed`].
+    fn verify(&self, repo: &Path) -> Result<(), CoreError> {
+        if !self.opts.run_fsck {
+            return Ok(());
+        }
+        debug!(repo = %self.dest.display(), "checking the repository with git fsck");
+        match run_git(
+            &self.git,
+            &["fsck", "--progress", "--no-dangling"],
+            repo,
+            "",
+            None,
+            &self.opts,
+        ) {
+            Err(CoreError::GitFailed { stderr, .. }) => Err(CoreError::GitFsckFailed {
+                repo: self.dest.display().to_string(),
+                output: stderr,
+            }),
+            other => other,
+        }
+    }
+
     /// Brings the working tree of a full clone to the commit its checked-out
     /// branch now points to.
     ///
@@ -585,10 +619,9 @@ impl Job {
             self.opts.token.as_deref(),
             &self.opts,
         )
+        // A clone that fails its check is not moved into place.
+        .and_then(|()| self.verify(&staging))
         .and_then(|()| {
-            if self.opts.run_fsck {
-                run_fsck(&self.git, &staging);
-            }
             std::fs::rename(&staging, &self.dest).map_err(|e| CoreError::io(self.dest.display(), e))
         });
 
@@ -687,43 +720,6 @@ fn path_to_str(path: &Path) -> Result<&str, CoreError> {
     path.to_str().ok_or_else(|| CoreError::NonUtf8Path {
         path: path.to_string_lossy().into_owned(),
     })
-}
-
-/// Runs `git fsck --no-dangling` on `repo_dir` and logs any issues found.
-///
-/// Corruption is not treated as a fatal error — the backup has already
-/// completed — but the issues are logged at `warn` level so operators can
-/// investigate.
-fn run_fsck(git: &GitCommand, repo_dir: &Path) {
-    debug!(repo = %repo_dir.display(), "running git fsck");
-    let output = git
-        .command()
-        .args(["fsck", "--no-dangling"])
-        .current_dir(repo_dir)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            debug!(repo = %repo_dir.display(), "git fsck: clean");
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let combined = format!("{stdout}{stderr}");
-            warn!(
-                repo = %repo_dir.display(),
-                output = %combined.chars().take(512).collect::<String>(),
-                "git fsck reported issues after clone"
-            );
-        }
-        Err(e) => {
-            warn!(
-                repo = %repo_dir.display(),
-                error = %e,
-                "could not run git fsck (git binary issue?)"
-            );
-        }
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1224,6 +1220,68 @@ echo "ssh=$GIT_SSH_COMMAND" > '{}'"#,
             cleaned.exists(),
             "the child must get SIGTERM, not only SIGKILL"
         );
+    }
+
+    /// `run_fsck` checks every clone and update; a failed check is reported
+    /// as `GitFsckFailed` and a fresh clone that fails is not kept.  Without
+    /// it no check runs.  (It used to be logged only, after fresh clones only,
+    /// unsupervised, and nothing could switch it on.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verification_reports_a_failed_fsck_and_discards_a_bad_fresh_clone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("calls.txt");
+        let runner = runner_with_script(
+            dir.path(),
+            &format!(
+                r#"echo "$@" >> '{}'
+case " $* " in *" fsck "*) echo "error: object 1234 is corrupt" >&2; exit 2;; esac"#,
+                log.display()
+            ),
+        );
+        let checked = CloneOptions {
+            run_fsck: true,
+            ..with_stall(10)
+        };
+        let url = "https://example.invalid/r.git";
+
+        let fresh = dir.path().join("fresh.git");
+        let err = runner
+            .mirror_clone(url, &fresh, &checked)
+            .await
+            .expect_err("a clone that fails its check fails");
+        match &err {
+            CoreError::GitFsckFailed { repo, output } => {
+                assert_eq!(repo, &fresh.display().to_string());
+                assert!(output.contains("is corrupt"), "{output}");
+            }
+            other => panic!("expected GitFsckFailed, got {other:?}"),
+        }
+        assert!(!fresh.exists(), "a clone that failed its check is not kept");
+        assert!(staging_dirs(dir.path()).is_empty());
+
+        let existing = dir.path().join("existing.git");
+        std::fs::create_dir(&existing).expect("mkdir");
+        for method in ["mirror", "bare", "full", "shallow"] {
+            let result = match method {
+                "mirror" => runner.mirror_clone(url, &existing, &checked).await,
+                "bare" => runner.bare_clone(url, &existing, &checked).await,
+                "full" => runner.full_clone(url, &existing, &checked).await,
+                _ => runner.shallow_clone(url, &existing, &checked, 1).await,
+            };
+            assert!(
+                matches!(result, Err(CoreError::GitFsckFailed { .. })),
+                "{method}: {result:?}"
+            );
+        }
+
+        std::fs::remove_file(&log).expect("reset log");
+        runner
+            .mirror_clone(url, &existing, &with_stall(10))
+            .await
+            .expect("no check, no failure");
+        let calls = std::fs::read_to_string(&log).expect("calls");
+        assert!(!calls.contains("fsck"), "{calls}");
     }
 
     /// A child that ignores `SIGTERM` is still stopped, after the grace period.
@@ -1792,6 +1850,29 @@ mod prune_tests {
             git(&dest, &["status", "--porcelain"]).is_empty(),
             "the checkout must be clean"
         );
+    }
+
+    /// With verification on, healthy clones and updates of every kind pass
+    /// `git fsck` (the arguments are ones real git accepts, also in a
+    /// working-tree clone).
+    #[tokio::test]
+    async fn verification_passes_healthy_repositories_with_real_git() {
+        for kind in ["mirror", "bare", "full", "shallow"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let url = origin_with_branches(dir.path(), &["feature"]);
+            let dest = dir.path().join("clone");
+            let opts = CloneOptions {
+                run_fsck: true,
+                ..CloneOptions::unauthenticated()
+            };
+            let runner = ProcessGitRunner::new();
+            update_as(&runner, kind, &url, &dest, &opts)
+                .await
+                .unwrap_or_else(|e| panic!("{kind} clone: {e}"));
+            update_as(&runner, kind, &url, &dest, &opts)
+                .await
+                .unwrap_or_else(|e| panic!("{kind} update: {e}"));
+        }
     }
 
     /// An empty upstream repository has nothing to check out; updating its

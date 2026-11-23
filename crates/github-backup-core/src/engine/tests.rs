@@ -708,3 +708,33 @@ async fn cancelling_interrupts_the_repository_listing_request() {
         .expect("no panic");
     assert!(matches!(result, Err(CoreError::Interrupted)), "{result:?}");
 }
+
+/// The git verification and stall limit chosen on the engine reach every git
+/// command it runs (they used to be unreachable: always off / 600 s).
+#[test]
+fn git_settings_reach_the_clone_options() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with(
+        MockBackupClient::new(),
+        MemStorage::default(),
+        SpyGitRunner::default(),
+        root.path(),
+        opts(),
+    );
+    let defaults = engine.make_clone_opts();
+    assert!(!defaults.run_fsck);
+    assert_eq!(defaults.stall_timeout_secs, 600);
+
+    let engine = engine.with_git_fsck(true).with_git_stall_timeout(30);
+    let chosen = engine.make_clone_opts();
+    assert!(chosen.run_fsck);
+    assert_eq!(chosen.stall_timeout_secs, 30);
+    assert_eq!(
+        engine
+            .with_git_stall_timeout(0)
+            .make_clone_opts()
+            .stall_timeout_secs,
+        1,
+        "a zero limit would stop every git at once"
+    );
+}

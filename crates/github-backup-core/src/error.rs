@@ -62,15 +62,15 @@ pub enum CoreError {
     #[error("could not start git: {0}")]
     GitSpawn(std::io::Error),
 
-    /// `git fsck` reported repository corruption after a fresh clone.
+    /// `git fsck` found a problem in a repository after it was cloned or
+    /// updated (only when verification is switched on: `CloneOptions::run_fsck`).
     ///
-    /// This is treated as a warning — the backup continues — but is surfaced
-    /// as an error so callers can decide whether to abort or log and proceed.
-    #[error("git fsck reported issues in {repo}: {output}")]
+    /// Recorded as a failure of that repository's step; the run continues.
+    #[error("git fsck reported problems in {repo}: {output}")]
     GitFsckFailed {
-        /// The repository path that was checked.
+        /// The repository that was checked.
         repo: String,
-        /// The fsck output (first 512 bytes).
+        /// The last lines of what `git fsck` printed.
         output: String,
     },
 
