@@ -84,6 +84,12 @@ GHES accepts the same personal access tokens as github.com; create one at
 For organisation backups the token owner must be able to see the repositories
 (organisation owner, or explicit access).
 
+`--device-auth` signs in on the server that `--api-url` names: with
+`https://HOST/api/v3` the device flow runs at `https://HOST/login/device/code`,
+so the OAuth App (and its `--oauth-client-id`) must be registered on that
+server.  An `--api-url` of another shape is refused for the device flow; use a
+token instead.
+
 ---
 
 ## GitHub Enterprise Cloud (GHEC)
@@ -96,7 +102,8 @@ in GitHub's token settings, otherwise the API answers 403.
 
 ## Proxies
 
-`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to the API calls;
+`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` apply to the API calls
+and the OAuth device flow;
 `git` follows its own proxy settings.  S3 and mirror-destination API calls do
 not use a proxy.  Details and the SOCKS limitation are in
 [Environment Variables](environment.md#proxy).
@@ -107,8 +114,8 @@ not use a proxy.  Details and the SOCKS limitation are in
 
 GHES rate limits are configured by the site administrator.  The tool waits out
 `429` responses and `403` responses that carry rate-limit information
-(`Retry-After`, `X-RateLimit-Remaining: 0` or a "rate limit" message) and
-retries; see [Troubleshooting](../development/troubleshooting.md#rate-limit-errors).
+(`Retry-After`, `X-RateLimit-Remaining: 0` or a "rate limit" message), pausing
+every worker meanwhile, and retries; see [Troubleshooting](../development/troubleshooting.md#rate-limit-errors).
 To reduce the pressure, lower the concurrency:
 
 ```bash
