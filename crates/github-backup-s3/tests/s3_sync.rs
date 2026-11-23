@@ -664,17 +664,28 @@ const AWKWARD: &[&str] = &[
     "a<b>.json",
 ];
 
+/// The [`AWKWARD`] names this platform can store as files.  Windows forbids
+/// `<>:"/\|?*` in file names, so a backup there can never contain them.
+fn awkward_names() -> Vec<&'static str> {
+    AWKWARD
+        .iter()
+        .copied()
+        .filter(|name| !cfg!(windows) || !name.contains(['<', '>', ':', '"', '|', '?', '*']))
+        .collect()
+}
+
 #[tokio::test]
 async fn s3c12_awkward_key_names_round_trip_exactly() {
     let fake = FakeS3::start().await;
     let (client, cfg) = client_for(&fake, "pfx");
     let dir = tempfile::tempdir().unwrap();
-    for name in AWKWARD {
+    let names = awkward_names();
+    for name in &names {
         write(dir.path(), name, name.as_bytes());
     }
     let r = run_sync(&client, &cfg, dir.path(), "o/json", |o| o).await;
     assert!(r.is_success(), "{r:?}");
-    for name in AWKWARD {
+    for name in &names {
         let key = format!("pfx/o/json/{name}");
         assert_eq!(
             fake.body_of(&key).as_deref(),
@@ -690,7 +701,7 @@ async fn s3c12_awkward_key_names_round_trip_exactly() {
     .await;
     assert_eq!(
         (r.stats.skipped, r.stats.deleted, r.stats.uploaded),
-        (AWKWARD.len(), 0, 0),
+        (names.len(), 0, 0),
         "{r:?}"
     );
 }
