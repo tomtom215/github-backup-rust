@@ -45,6 +45,18 @@ pub struct ConfigFile {
     /// Prefer the `GITHUB_TOKEN` environment variable over storing tokens here.
     pub token: Option<String>,
 
+    /// GitHub App to authenticate as, instead of a token: its client ID
+    /// (recommended) or numeric App ID.  Needs `app_key_path` (or the
+    /// `GITHUB_APP_PRIVATE_KEY` environment variable).
+    pub app_id: Option<String>,
+
+    /// Path of the GitHub App's private key (the `.pem` file GitHub issued).
+    pub app_key_path: Option<PathBuf>,
+
+    /// The GitHub App installation to act as.  Without it the installation is
+    /// looked up from `owner` (organisation first, then user).
+    pub app_installation_id: Option<u64>,
+
     /// Override the GitHub API base URL for GitHub Enterprise Server.
     ///
     /// Example: `"https://github.example.com/api/v3"`.
@@ -319,5 +331,24 @@ impl ConfigFile {
             .map_err(|e| format!("cannot read config file '{}': {e}", path.display()))?;
         Self::from_toml_str(&content)
             .map_err(|e| format!("invalid config file '{}': {e}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_app_keys_parse() {
+        let cfg = ConfigFile::from_toml_str(
+            "app_id = \"Iv23liExample\"\napp_key_path = \"/run/secrets/app.pem\"\napp_installation_id = 42\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.app_id.as_deref(), Some("Iv23liExample"));
+        assert_eq!(
+            cfg.app_key_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/app.pem"))
+        );
+        assert_eq!(cfg.app_installation_id, Some(42));
     }
 }

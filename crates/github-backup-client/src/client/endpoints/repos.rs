@@ -23,12 +23,16 @@ impl GitHubClient {
     /// is used instead: it returns the repositories the account owns,
     /// private ones included.  For any other user, for an anonymous client,
     /// and for tokens that cannot call `GET /user` (GitHub App tokens, with a
-    /// warning), the public listing is used.
+    /// warning), the public listing is used.  A GitHub App credential lists
+    /// the repositories its installation can access, private ones included.
     ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_user_repos(&self, username: &str) -> Result<Page<Repository>, ClientError> {
+        if self.is_app() {
+            return self.list_installation_repos(username).await;
+        }
         let api = self.api();
         let url = if self.is_authenticated_user(username).await? {
             info!(
@@ -42,12 +46,16 @@ impl GitHubClient {
         Ok(without_clone_tokens(self.get_all_pages(&url).await?))
     }
 
-    /// Lists repositories belonging to an organisation.
+    /// Lists repositories belonging to an organisation.  A GitHub App
+    /// credential lists the repositories its installation can access.
     ///
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
     pub async fn list_org_repos(&self, org: &str) -> Result<Page<Repository>, ClientError> {
+        if self.is_app() {
+            return self.list_installation_repos(org).await;
+        }
         let api = self.api();
         let url = format!("{api}/orgs/{org}/repos?type=all&per_page={PER_PAGE}");
         Ok(without_clone_tokens(self.get_all_pages(&url).await?))
