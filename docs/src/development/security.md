@@ -86,30 +86,38 @@ organisation backups do not require a classic token.
 
 ## Dependency Policy
 
-`deny.toml` is enforced by `cargo-deny` in CI, in the release workflow and by a
-daily scheduled workflow:
+`deny.toml` is enforced by `cargo-deny` in CI and in the release workflow; a
+daily scheduled workflow (`audit.yml`) also checks the advisories against the
+`Cargo.lock` on `main`, so a new advisory is noticed without a code change:
 
 | Policy | Rule |
 |--------|------|
 | Banned crates | `openssl`, `openssl-sys`, `reqwest`, `native-tls` |
 | Allowed licences | MIT, Apache-2.0 (also with the LLVM exception), ISC, BSD-3-Clause, Unicode-3.0, CC0-1.0, Zlib |
-| Advisories | `cargo deny check advisories` (RustSec) must pass; the CI job `rustsec/audit-check` additionally runs with one documented ignore (`RUSTSEC-2026-0097`, a build-time-only dependency) |
+| Advisories | `cargo deny check advisories` (RustSec) must pass; `deny.toml` ignores none |
 | Sources | only crates.io; no unknown registries or git dependencies |
 
-Dependabot proposes weekly updates for Cargo, GitHub Actions and the Docker base
-images.  The third-party GitHub Actions in the workflows are referenced by tag,
-not by commit SHA.
+Dependabot proposes weekly updates for Cargo dependencies (grouped, with a
+7-day cooldown) and GitHub Actions.  Every action in the workflows is pinned to
+a full commit SHA, and CI runs [zizmor](https://docs.zizmor.sh/) on the
+workflows.  The Rust toolchain (`rust-toolchain.toml`) and the Dockerfile's
+base images are bumped by hand.
 
 ---
 
 ## Release and Supply Chain
 
-- Release binaries (five targets) carry a GitHub **build-provenance
-  attestation** (see [Installation](../getting-started/installation.md#verify-build-provenance-optional)).
-  The attestation covers the binaries only; the container images, checksum files
-  and `SHA256SUMS.txt` are not attested, and no SBOM is published.
+- Release binaries (five targets) and `SHA256SUMS.txt` carry a GitHub
+  **build-provenance attestation** (see [Installation](../getting-started/installation.md#verify-build-provenance-optional));
+  the per-file `.sha256` files do not.  The binaries are not code-signed.
+- Container images (releases after v0.3.2, and `edge`) are packaged from the
+  Linux binaries built in the same workflow run, so a release image contains the
+  attested release binary.  Each image has an SBOM, max-mode BuildKit
+  provenance and a GitHub attestation pushed to the registry.
 - A release tag must point to a commit on `main`; the release workflow re-runs
-  the tests, clippy, the MSRV build and `cargo-deny` before building.
+  the tests (Linux, macOS, Windows), clippy, the MSRV check and `cargo-deny`
+  before building, restores no build cache, and creates the GitHub release as a
+  draft that is published only after the binaries and the image succeeded.
 
 ---
 
@@ -168,13 +176,10 @@ lint table; the attributes are per crate.
 
 ## Reporting Security Vulnerabilities
 
-Please do **not** open a public GitHub issue for security vulnerabilities.  Use
-GitHub's private security advisory feature:
-
-1. Open
-   [github.com/tomtom215/github-backup-rust/security/advisories/new](https://github.com/tomtom215/github-backup-rust/security/advisories/new).
-2. Describe the vulnerability and steps to reproduce.
-
-See [`SECURITY.md`](https://github.com/tomtom215/github-backup-rust/blob/main/SECURITY.md)
-for the disclosure policy, the in-scope and out-of-scope vulnerability classes
-and the expected response times.
+Please do **not** put the details of a vulnerability in a public GitHub issue.
+Use GitHub's private vulnerability reporting at
+[github.com/tomtom215/github-backup-rust/security/advisories/new](https://github.com/tomtom215/github-backup-rust/security/advisories/new)
+if that page offers a form; otherwise open an issue that only asks for a private
+contact.  [`SECURITY.md`](https://github.com/tomtom215/github-backup-rust/blob/main/SECURITY.md)
+has the details, the disclosure policy, the in-scope and out-of-scope
+vulnerability classes and the expected response times.

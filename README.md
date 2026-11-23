@@ -3,7 +3,7 @@
 [![CI](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/tomtom215/github-backup-rust/actions/workflows/ci.yml)
 [![Book](https://github.com/tomtom215/github-backup-rust/actions/workflows/pages.yml/badge.svg)](https://tomtom215.github.io/github-backup-rust/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-orange.svg)](Cargo.toml)
+[![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-orange.svg)](Cargo.toml)
 
 A GitHub backup tool written in Rust.
 
@@ -105,7 +105,7 @@ by URL as shown above.
 
 ### 4. Build from source
 
-Needs a Rust toolchain meeting the MSRV in `Cargo.toml` (**1.88**) and `git`:
+Needs a Rust toolchain meeting the MSRV in `Cargo.toml` (**1.89**) and `git`:
 
 ```bash
 # track main

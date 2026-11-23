@@ -221,5 +221,5 @@ The workspace's own source contains no `unsafe`.  `github-backup-core` has
 | S3 | an in-process fake S3 server that verifies SigV4 independently; AES-GCM round trips and tamper tests |
 | Mirror | real `git push` against local bare repositories with a refusing hook |
 | CLI | argument-parsing and config-merge tests; a binary-level test of the environment handling |
-| CI | `cargo fmt --check`, `clippy -D warnings`, tests on Linux and macOS, an MSRV (1.88) build, rustdoc, the mdBook build with link checking, `cargo audit` and `cargo deny`, and a Docker build with a smoke test |
+| CI | `cargo fmt --check`, `clippy -D warnings`, tests on Linux, macOS and Windows, an MSRV (1.89) check, rustdoc, the mdBook build with link checking, `cargo deny`, zizmor on the workflows, and a Docker build with a smoke test |
 | Mutation | `cargo mutants`, started manually (`workflow_dispatch`); not run on every push |
