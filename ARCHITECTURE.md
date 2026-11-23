@@ -1,6 +1,6 @@
 # Architecture
 
-`github-backup` is a Rust workspace of seven crates.  This page describes how
+`github-backup` is a Rust workspace of eight crates.  This page describes how
 they fit together.  (It is also the book page *Development / Architecture*.)
 
 ## Workspace Layout
@@ -14,6 +14,7 @@ github-backup-rust/
 │   ├── github-backup-mirror/   # Push mirrors to Gitea / Forgejo / Codeberg / GitLab
 │   ├── github-backup-s3/       # S3-compatible client, sync, AES-256-GCM encryption
 │   ├── github-backup-tui/      # Ratatui front-end (--tui)
+│   ├── github-backup-viewer/   # Static HTML site from a backup (--render-html)
 │   └── github-backup/          # CLI binary (clap), run modes, reporting
 ├── docker/entrypoint.sh        # container entrypoint wrapper
 ├── Dockerfile, docker-compose.yml
@@ -70,7 +71,9 @@ Async client built on `hyper` + `rustls` (no OpenSSL, no reqwest).
   slow but steady transfer is not cut off).
 - **GraphQL**: `graphql(query, variables)` posts a query to `/graphql` (GHES:
   `/api/graphql`) with the same handling and fails on a non-empty `errors`
-  array.
+  array.  Discussions are read this way (`client/endpoints/discussions.rs`),
+  every connection followed with its cursor and nested ones completed with
+  `node(id:)` queries.
 - **Own-account listings**: `GET /user` is asked once; when the login equals the
   owner the client lists `/user/repos?affiliation=owner&visibility=all` and
   `/gists`, which include private repositories and secret gists.  A GitHub App
@@ -116,17 +119,28 @@ BackupEngine<C: BackupClient, S: Storage, G: GitRunner>
   (`GET /repos/{o}/{r}`), repository clone,
   wiki, topics, issues, pull requests, releases, labels, milestones, hooks, security
   advisories, branches and rulesets, deploy keys, collaborators, actions,
-  environments, commit comments.  Inside a category an item that fails (one
+  environments, commit comments, discussions.  Inside a category an item that fails (one
   issue's comments) is recorded and the category carries on; a category that
   answers 404/410 is absent, and a 403 is a failure (or, under `--all`, one
   warning per category per run).
 - **Incremental state** (`engine/incremental.rs`): a watermark per repository in
   `backup_state.json`, advanced only for repositories whose every step
-  succeeded, trusted only for the categories it was recorded with, set 15
-  minutes before the run started.  Lists are always fetched in full and merged
-  (`backup/merge.rs`); the watermark only decides which per-item requests
-  (comments, events, commits, reviews) can be skipped.  `--full` ignores it; an
-  explicit `--since` replaces it and is never stored.
+  succeeded, trusted only for the categories it was recorded with (per-item
+  categories, the issue and pull request lists, the git update mode), set 15
+  minutes before the run started.  With it, a run lists only the issues
+  (`since=`) and pull requests (`sort=updated`, newest first, until older
+  ones) changed since and merges them into the stored list, if that list is
+  intact (`backup/merge.rs`); skips the per-item requests (comments, events,
+  commits, reviews) of unchanged items; and skips the `git fetch` of a
+  repository whose `pushed_at` is older than the watermark when the clone is
+  on disk, the last fetch (`fetched_at`, cleared when a run that fetched
+  fails for the repository) is under 7 days old and, for clones that hold
+  `refs/pull/*`, no pull request changed since (`engine/repo.rs`).  Wikis are
+  always fetched.  Discussions: their GraphQL listing is ordered by
+  `updatedAt` and stops at the watermark, and the stored list is merged with
+  what it returned.  `--full` ignores the watermark; an explicit `--since`
+  replaces it for the lists and per-item requests (never for git) and is
+  never stored.
 - **Checkpoint**: `backup_checkpoint.json` lists repositories finished in the
   current run and a fingerprint of the owner and options; a later run resumes
   from it only if it is less than 6 hours old and the fingerprints match.
@@ -195,6 +209,19 @@ The Ratatui terminal interface (`--tui`).  It drives the same `BackupEngine`
 through an event channel and does not embed its own backup logic.  See the
 [Interactive TUI guide](https://tomtom215.github.io/github-backup-rust/tui.html).
 
+### `github-backup-viewer`
+
+`--render-html`: renders one owner's backup directory as a static HTML site.
+It reads the JSON files as stored (`serde_json::Value`, so it shows every
+backup the tool has ever written, and a missing or unreadable file only
+leaves a page shorter) and writes plain HTML with one style sheet and no
+JavaScript.  Markdown goes through `pulldown-cmark` with raw HTML turned
+into text and a link-scheme allow-list; every page has a
+Content-Security-Policy that forbids scripts and remote loads.  Item pages
+are rendered on all CPUs; the output is deterministic.  The site is staged
+in a hidden sibling directory and renamed into place, and only an empty
+directory or an earlier render is ever replaced.
+
 ### `github-backup` (binary)
 
 | File | Responsibility |
@@ -205,7 +232,7 @@ through an event channel and does not embed its own backup logic.  See the
 | `post_process.rs` | mirror push, S3 sync, diff |
 | `restore.rs` | `--restore` |
 | `report.rs`, `metrics.rs`, `notify.rs` | JSON report, Prometheus textfile, webhook |
-| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt` |
+| `doctor.rs`, `scopes.rs`, `modes.rs` | `--doctor`/`--check`, `--list-scopes`, `--verify`/`--decrypt`/`--render-html` |
 | `account.rs` | the default OWNER (the token's account) and user/organisation detection |
 | `schedule.rs` | `--every`: repeat the run at an interval |
 | `shutdown.rs` | signal handling and the exit watchdog |
@@ -218,8 +245,8 @@ Flow of a normal run:
    single values; switches are OR-ed, lists unioned; no category selected means
    all of them, minus `--skip`).  The token falls back to `GH_TOKEN`, then to
    `gh auth token`; OWNER falls back to the token's account.
-2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify` and
-   `--restore` are handled and return before a backup (`--doctor` after the same
+2. `--tui`, `--list-scopes`, `--doctor`/`--check`, `--decrypt`, `--verify`,
+   `--render-html` and `--restore` are handled and return before a backup (`--doctor` after the same
    validation a run makes).  Mirror and S3 settings are checked before the run.
 3. Take the output lock, build the client, run `BackupEngine::run`, racing it
    against `SIGINT` / `SIGTERM`.

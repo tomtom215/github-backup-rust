@@ -138,7 +138,7 @@ use crate::notify::NotifyFormat;
     ArgGroup::new("mode")
         .multiple(false)
         .args([
-            "tui", "list_scopes", "doctor", "check", "verify", "decrypt",
+            "tui", "list_scopes", "doctor", "check", "verify", "decrypt", "render_html",
             "restore", "every", "print_config_template", "completions",
         ]),
 ))]
@@ -374,14 +374,12 @@ pub struct Args {
     /// GitHub Actions & environments:
     ///   `--actions` `--environments`
     ///
-    /// Projects, packages and commit comments:
-    ///   `--projects` `--packages` `--commit-comments`
+    /// Discussions, projects, packages and commit comments:
+    ///   `--discussions` `--projects` `--packages` `--commit-comments`
     ///
     /// **Not included**:
     ///   `--action-runs`  — full workflow run history (can be very large)
     ///   `--clone-starred` — clone every starred repository (can be very large)
-    ///   `--discussions`  — not backed up yet (GitHub serves them through
-    ///   GraphQL only)
     ///
     /// **Not controlled by `--all`** (output/behaviour flags):
     ///   `--lfs` `--prefer-ssh` `--prune` `--clone-type` `--concurrency`
@@ -649,8 +647,11 @@ pub struct Args {
     pub environments: bool,
 
     // ── GitHub Discussions ─────────────────────────────────────────────────
-    /// Request GitHub Discussions.  Not backed up yet: GitHub serves them
-    /// through GraphQL only, and the run logs a warning saying so.
+    /// Back up GitHub Discussions of each repository that has them enabled.
+    ///
+    /// Saves `discussions.json`, `discussion_categories.json` and
+    /// `discussion_comments/<number>.json` (every comment with its replies),
+    /// read through the GraphQL API.
     #[arg(help_heading = "What to back up", long)]
     pub discussions: bool,
 
@@ -709,10 +710,10 @@ pub struct Args {
     // ── Incremental behaviour ──────────────────────────────────────────────
     /// Treat everything updated before DATE as already backed up.
     ///
-    /// Issue and pull request lists are always fetched in full and merged into
-    /// the existing backup, so this never loses data.  It only skips
-    /// re-fetching the comments, events, commits and reviews of items that have
-    /// not changed since DATE and whose files already exist.
+    /// Issue and pull request lists are asked only for items updated since
+    /// DATE and merged into the existing backup, so this never loses data;
+    /// the comments, events, commits and reviews of items not changed since
+    /// DATE whose files already exist are not fetched again.
     ///
     /// Accepts `2024-01-01` or `2024-01-01T00:00:00Z`.  Without this flag each
     /// repository's own watermark from the previous run is used.
@@ -726,8 +727,9 @@ pub struct Args {
 
     /// Ignore incremental state and fetch everything again.
     ///
-    /// Re-fetches the comments, events, commits and reviews of every issue and
-    /// pull request even if nothing changed since the previous run.
+    /// Lists every issue and pull request, re-fetches the comments, events,
+    /// commits and reviews of each and runs `git fetch` for every clone, even
+    /// if nothing changed since the previous run.
     #[arg(help_heading = "Incremental", long)]
     pub full: bool,
 
@@ -984,6 +986,28 @@ pub struct Args {
     /// not contact the GitHub API.
     #[arg(help_heading = "Integrity", long)]
     pub verify: bool,
+
+    // ── Viewer ────────────────────────────────────────────────────────────
+    /// Render the backup as a static HTML site you can read offline.
+    ///
+    /// Reads `<output>/<owner>/json` (and the clones under `git/`) and writes
+    /// a browsable site: repositories, issues, pull requests with reviews
+    /// and commits, releases, gists and more.  Open its `index.html` in a
+    /// browser; no server is needed.  The site goes to
+    /// `<output>/<owner>/site` unless a directory is given with `=`
+    /// (`--render-html=/srv/www/backup`); an earlier render there is
+    /// replaced, any other non-empty directory is refused.
+    ///
+    /// Requires OWNER (`--output` defaults to the current directory).  Does
+    /// not contact the GitHub API.
+    #[arg(
+        help_heading = "Viewer",
+        long,
+        value_name = "SITE_DIR",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub render_html: Option<Option<PathBuf>>,
 
     // ── Retention / pruning ────────────────────────────────────────────────
     /// Deprecated and ignored (a warning is logged): nothing is deleted.

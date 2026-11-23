@@ -15,7 +15,7 @@ use github_backup_types::config::BackupOptions;
 use crate::{
     backup::{
         all_json, describe_unparsed, json_str, json_u64,
-        merge::{merge_and_write, reusable},
+        merge::{delta_base, merge_and_write, merge_values, reusable},
         number_after, Outcome,
     },
     error::CoreError,
@@ -34,16 +34,20 @@ const PULL_COMMITS_CAP: usize = 250;
 /// - `meta_dir/pull_commits/<number>.json` – commits per PR
 /// - `meta_dir/pull_reviews/<number>.json` – reviews per PR
 ///
-/// Like [`backup_issues`](super::issue::backup_issues), the PR list is
-/// **always fetched in full** and merged into the existing `pulls.json`, so an
-/// incremental run can never shrink the file; the per-PR files are merged
-/// too (comments and reviews by `id`, commits by `sha`), so a review comment
-/// deleted or a commit force-pushed away stays in the backup.  `since` is the
-/// repository's incremental watermark; it only decides which PRs get their
-/// comment, commit and review files re-fetched — those are skipped for PRs
-/// not updated since the watermark and whose files are already on disk.  The
-/// repository-wide list of review comments created or edited since the
-/// watermark is asked for once, and every PR it names is re-fetched as well.
+/// Like [`backup_issues`](super::issue::backup_issues), the PR list is merged
+/// into the existing `pulls.json`, so an incremental run can never shrink the
+/// file.  With `list_since` and an intact `pulls.json`, the list is read most
+/// recently updated first and only until it reaches pull requests not updated
+/// since (the endpoint has no `since` filter), merged in, and the merged list
+/// stands for every PR below; otherwise every PR is listed.  The per-PR files
+/// are merged too (comments and reviews by `id`, commits by `sha`), so a
+/// review comment deleted or a commit force-pushed away stays in the backup.
+/// `since` is the repository's watermark for the per-item files; it decides
+/// which PRs get their comment, commit and review files re-fetched — those
+/// are skipped for PRs not updated since the watermark and whose files are
+/// already on disk.  The repository-wide list of review comments created or
+/// edited since the watermark is asked for once, and every PR it names is
+/// re-fetched as well.
 ///
 /// GitHub lists at most 250 commits of a pull request; when the list is that
 /// long, the commits are taken from the comparison of the PR's base and head
@@ -53,18 +57,21 @@ const PULL_COMMITS_CAP: usize = 250;
 /// `number`; one without a `number` is recorded as a failure, as is any
 /// per-PR list that cannot be fetched (the other PRs are still backed up).
 ///
-/// Returns the number of pull requests fetched.
+/// Returns the number of pull requests listed, or, after a delta listing, in
+/// the merged list.
 ///
 /// # Errors
 ///
 /// Propagates [`CoreError`] from the PR listing or storage writes, and any
 /// fatal error.
+#[allow(clippy::too_many_arguments)]
 pub async fn backup_pull_requests(
     client: &impl BackupClient,
     owner: &str,
     repo_name: &str,
     opts: &BackupOptions,
     since: Option<&str>,
+    list_since: Option<&str>,
     meta_dir: &Path,
     storage: &impl Storage,
 ) -> Result<Outcome, CoreError> {
@@ -73,14 +80,37 @@ pub async fn backup_pull_requests(
         return Ok(outcome);
     }
 
-    info!(owner, repo = repo_name, "fetching pull requests");
-    // Never ask the API for a delta: the response is persisted wholesale.
-    let pulls = client.list_pull_requests(owner, repo_name).await?;
-    outcome.count = (pulls.len() + pulls.unparsed_count()) as u64;
-
-    if opts.pulls {
-        merge_and_write(storage, &meta_dir.join("pulls.json"), &pulls, "number")?;
-    }
+    let path = meta_dir.join("pulls.json");
+    // A delta needs the stored list it is merged into.
+    let base = if opts.pulls {
+        delta_base(storage, &path, list_since)?
+    } else {
+        None
+    };
+    let delta_since = base.as_ref().map(|(since, _)| since.as_str());
+    info!(
+        owner,
+        repo = repo_name,
+        since = delta_since,
+        "fetching pull requests"
+    );
+    let fresh = client
+        .list_pull_requests(owner, repo_name, delta_since)
+        .await?;
+    let pulls: Vec<Value> = match base {
+        Some((_, stored)) => {
+            let merged = merge_values(stored, &path, &fresh, "number")?;
+            storage.write_json(&path, &merged)?;
+            merged
+        }
+        None => {
+            if opts.pulls {
+                merge_and_write(storage, &path, &fresh, "number")?;
+            }
+            all_json(&fresh).cloned().collect()
+        }
+    };
+    outcome.count = pulls.len() as u64;
 
     if !opts.pull_comments && !opts.pull_commits && !opts.pull_reviews {
         return Ok(outcome);
@@ -90,7 +120,7 @@ pub async fn backup_pull_requests(
     let since = if edited.is_some() { since } else { None };
     let edited = edited.unwrap_or_default();
 
-    for (index, pr) in all_json(&pulls).enumerate() {
+    for (index, pr) in pulls.iter().enumerate() {
         let Some(number) = json_u64(pr, "number") else {
             outcome.fail(
                 format!(
@@ -335,6 +365,7 @@ mod tests {
             "Hello-World",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -360,6 +391,7 @@ mod tests {
             "Hello-World",
             &opts,
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -384,6 +416,7 @@ mod tests {
             "octocat",
             "Hello-World",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -412,6 +445,7 @@ mod tests {
             "octocat",
             "Hello-World",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -443,6 +477,7 @@ mod tests {
             "octocat",
             "Hello-World",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -490,7 +525,7 @@ mod tests {
             pr_updated(1, "2024-01-01T00:00:00Z"),
             pr_updated(2, "2024-01-02T00:00:00Z"),
         ]);
-        backup_pull_requests(&first, "o", "r", &opts, None, &meta, &storage)
+        backup_pull_requests(&first, "o", "r", &opts, None, None, &meta, &storage)
             .await
             .expect("run 1");
         assert_eq!(stored_numbers(&storage), vec![1, 2]);
@@ -503,6 +538,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &meta,
             &storage,
         )
@@ -517,6 +553,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-07-01T00:00:00Z"),
+            None,
             &meta,
             &storage,
         )
@@ -556,6 +593,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -598,6 +636,7 @@ mod tests {
             "r",
             &opts,
             Some("2024-03-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -637,6 +676,7 @@ mod tests {
             "r",
             &commit_opts(),
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -669,6 +709,7 @@ mod tests {
             "r",
             &commit_opts(),
             None,
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )
@@ -697,6 +738,7 @@ mod tests {
             "o",
             "r",
             &opts,
+            None,
             None,
             &PathBuf::from("/meta"),
             &storage,
@@ -734,6 +776,7 @@ mod tests {
             "r",
             &opts,
             Some("2030-01-01T00:00:00Z"),
+            None,
             &PathBuf::from("/meta"),
             &storage,
         )

@@ -114,10 +114,9 @@ exercised against a live account by the project.
 
 Be clear about what a restore cannot give back:
 
-- **Pull requests**, issue and PR **comments**, **reviews**, **reactions** and
-  timeline events: saved in the JSON files, but there is no importer.
-- **Discussions** and **Projects**: not backed up at all (GitHub's REST API has
-  no endpoints for them; `--discussions` / `--projects` do nothing).
+- **Pull requests**, issue and PR **comments**, **reviews**, **reactions**,
+  timeline events, **Discussions** and **Projects**: saved in the JSON files,
+  but there is no importer.
 - **Issue attachments and images**: the JSON holds the links; the files are
   not downloaded.
 - **Actions secrets and variables, code-scanning and Dependabot alerts,

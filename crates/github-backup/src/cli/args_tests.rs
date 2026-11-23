@@ -814,6 +814,22 @@ fn two_modes_at_once_are_a_usage_error() {
     assert!(try_parse(&["github-backup", "o", "--verify", "--all"]).is_ok());
 }
 
+/// `--render-html` takes its directory only with `=`, so a following OWNER
+/// is never swallowed as the site directory.
+#[test]
+fn render_html_takes_an_optional_directory_with_equals() {
+    let args = parse(&["github-backup", "--render-html", "octocat"]);
+    assert_eq!(args.render_html, Some(None));
+    assert_eq!(args.owner.as_deref(), Some("octocat"));
+    let args = parse(&["github-backup", "octocat", "--render-html=/srv/www"]);
+    assert_eq!(
+        args.render_html,
+        Some(Some(std::path::PathBuf::from("/srv/www")))
+    );
+    assert_eq!(parse(&["github-backup", "octocat"]).render_html, None);
+    assert!(try_parse(&["github-backup", "o", "--render-html", "--verify"]).is_err());
+}
+
 /// `--print-config-template` used to be detected anywhere in argv, even as
 /// the value of another option.
 #[test]

@@ -16,8 +16,9 @@ use super::encode_segment;
 impl GitHubClient {
     // ── Issues ────────────────────────────────────────────────────────────
 
-    /// Lists all issues for a repository, **including pull requests**, in
-    /// every state.
+    /// Lists the issues of a repository, **including pull requests**, in
+    /// every state: all of them, or with `Some(since)` (ISO 8601) only those
+    /// updated at or after `since` (`GET .../issues?state=all&since=`).
     ///
     /// GitHub's issues endpoint returns every pull request as an issue too
     /// (with a `pull_request` stub; see [`Issue::is_pull_request`]).
@@ -25,9 +26,17 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Propagates [`ClientError`] on network, TLS, or API errors.
-    pub async fn list_issues(&self, owner: &str, repo: &str) -> Result<Page<Issue>, ClientError> {
+    pub async fn list_issues(
+        &self,
+        owner: &str,
+        repo: &str,
+        since: Option<&str>,
+    ) -> Result<Page<Issue>, ClientError> {
         let api = self.api();
-        let url = format!("{api}/repos/{owner}/{repo}/issues?state=all&per_page={PER_PAGE}");
+        let since = since
+            .map(|since| format!("&since={}", encode_segment(since)))
+            .unwrap_or_default();
+        let url = format!("{api}/repos/{owner}/{repo}/issues?state=all{since}&per_page={PER_PAGE}");
         self.get_all_pages(&url).await
     }
 

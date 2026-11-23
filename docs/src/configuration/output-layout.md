@@ -43,7 +43,7 @@ removed deploy key or collaborator must not look as if it were still there.
 
 | Kind | Files (key) |
 |------|-------------|
-| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`) |
+| Accumulating | `repos.json` (`id`); `issues.json`, `pulls.json` (`number`); `issue_comments/<n>.json`, `issue_events/<n>.json`, `pull_comments/<n>.json`, `pull_reviews/<n>.json` (`id`); `pull_commits/<n>.json` (`sha`); `releases.json`, `labels.json`, `milestones.json`, `commit_comments.json`, `workflows.json`, `workflow_runs_<id>.json` (`id`); `security_advisories.json` (`ghsa_id`); `gists/index.json`, `gists/<id>.comments.json` (`id`); `packages_<type>.json`, `package_versions_<type>_<name>.json` (`id`); `projects/projects.json`, `projects/<n>/fields.json`, `projects/<n>/items.json` (`id`); `discussions.json`, `discussion_categories.json`, `discussion_comments/<n>.json` (`id`; replies are kept inside their comment) |
 | Snapshot | `info.json`, `topics.json`, `branches.json`, `branch_protections.json`, `rulesets.json`, `hooks.json`, `deploy_keys.json`, `collaborators.json`, `environments.json`, `starred.json`, `watched.json`, `followers.json`, `following.json`, `org_members.json`, `org_teams.json`, `gists/starred_index.json`, `gists/<id>.json`, `gists/<id>.starred.json` |
 
 Within an accumulating file the objects are ordered by their key when it is a
@@ -57,6 +57,7 @@ labels and milestones that were deleted on GitHub after they were backed up.
 <output>/
 ├── .github-backup.lock                     ← process lock (stays on disk, see below)
 └── <owner>/                                ← GitHub username or org name
+    ├── site/                               ← --render-html: the backup as a website
     ├── git/                                ← Git repositories
     │   ├── repos/
     │   │   ├── <repo>.git/                 ← mirror clone (default); bare, shallow, --lfs too
@@ -128,11 +129,15 @@ labels and milestones that were deleted on GitHub after they were backed up.
                 ├── commit_comments.json    ← --all
                 ├── workflows.json
                 ├── workflow_runs_<id>.json ← one per workflow (--action-runs)
-                └── environments.json
+                ├── environments.json
+                ├── discussions.json        ← GraphQL nodes, most recently updated first
+                ├── discussion_categories.json
+                └── discussion_comments/<n>.json ← comments of discussion <n>, each with its replies
 ```
 
-No discussion files are produced: GitHub serves Discussions through GraphQL
-only, see [Discussions](../backup-categories.md#discussions).
+The discussion files hold GraphQL nodes (camelCase properties such as
+`updatedAt`), not REST objects; see
+[Discussions](../backup-categories.md#discussions).
 Repositories that the options exclude (forks without `--forks`, private
 repositories without `--private`, `--include-repos` / `--exclude-repos`) get
 neither a clone nor a metadata directory.  The include and exclude patterns
@@ -157,7 +162,7 @@ new repository is backed up from scratch.
 | File | Meaning |
 |------|---------|
 | `repos.json` | The repositories this backup covers, as GitHub listed them: only the ones the options include, merged with earlier listings so that a repository deleted on GitHub stays recorded.  `--diff-with` compares it between two backups. |
-| `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
+| `backup_state.json` | One watermark per repository (`repos.<owner/repo>.at`, plus the categories it covers and `fetched_at`, the last clean run that fetched its clone) and `last_successful_run`.  See [Incremental runs](../monitoring.md#incremental-runs-and-the-state-file).  Safe to delete: the next run fetches everything once. |
 | `backup_history.json` | One entry per run (time, repositories backed up, duration, `success`, `failures`, tool version), newest last, at most `--history-size` entries. |
 | `backup_checkpoint.json` | Which repositories an **interrupted** run had finished.  Removed when a run completes (a checkpoint that cannot be removed is a failure of the run).  A later run resumes from it only if it is less than 6 hours old and the run has the same owner and options; otherwise it is ignored. |
 | `backup_manifest.json` | `--manifest`: SHA-256 of every data file under `json/`, except the history, state, checkpoint and lock files and temporary files of an unfinished write (the git clones are not included).  Paths use `/` on every platform. |

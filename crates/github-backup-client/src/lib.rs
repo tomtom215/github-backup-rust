@@ -23,7 +23,7 @@
 //! | Rate limiting | A 403/429 with `Retry-After`, `X-RateLimit-Remaining: 0` or a rate-limit message is waited out (at least a minute and doubling when GitHub gives no hint; one wait at most about an hour, all waits of a request about two), pausing every clone of the client, and ends as [`ClientError::RateLimitExceeded`], never as a plain 403 |
 //! | Retries | GETs (and GraphQL queries): up to 3 retries on 500/502/503/504, connection failures, timeouts and stalled bodies, with exponential back-off + jitter; 4xx fail fast |
 //! | Body cap | 16 MiB cap on API responses ([`ClientError::BodyTooLarge`]) to protect against runaway streams |
-//! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports |
+//! | GraphQL | [`GitHubClient::graphql`] runs a query with the same handling, including GraphQL's own rate-limit reports; Discussions are read through it, every connection followed with cursors |
 //! | Release assets | Streamed chunk by chunk to a caller-supplied sink; `Authorization` is never forwarded to another origin and HTTPS→HTTP redirects are refused |
 //! | TLS | rustls with platform CA bundle |
 //! | Proxy | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case): HTTP `CONNECT` tunnelling for HTTPS, absolute-form for HTTP; [`ProxyClient`] is shared with the webhook notifier and the device flow |
@@ -58,7 +58,7 @@ pub mod proxy;
 mod rate_limit;
 mod token;
 
-pub use api_client::{AssetSink, BackupClient, BoxFuture};
+pub use api_client::{AssetSink, BackupClient, BoxFuture, NodePage};
 pub use client::{GitHubClient, Installation};
 pub use error::ClientError;
 pub use pagination::parse_next_link;

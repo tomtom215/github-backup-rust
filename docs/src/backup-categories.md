@@ -37,6 +37,11 @@ How the clone types behave in detail:
   Branches and tags deleted on GitHub are kept in the clone unless `--prune` is
   given; force-pushed branches are overwritten either way (see
   [Clones Follow GitHub](configuration/output-layout.md#clones-follow-github)).
+* **Incremental:** the fetch is skipped when nothing was pushed to the
+  repository since its last clean backup (`pushed_at`), the clone is on disk,
+  and it was fetched in the last 7 days; mirror, shallow and LFS clones also
+  need no pull request updated since (one request).  `--full` always fetches.
+  See [Incremental runs](monitoring.md#incremental-runs-and-the-state-file).
 * A fresh clone is made in a hidden staging directory next to the target and
   renamed into place only when it is complete, so an interrupted clone leaves
   nothing under the real name (the staging directory is removed on the next
@@ -123,8 +128,9 @@ include pull requests.
 
 An issue whose comments or events cannot be fetched is recorded as a failure
 and the other issues are still backed up; an issue deleted in the meantime
-(404/410) is skipped.  See [Issues and Pull Requests](issues-and-prs.md) for
-the incremental behaviour.
+(404/410) is skipped.  Incremental: a later run lists only the issues updated
+since the repository's watermark and merges them into `issues.json`; see
+[Issues and Pull Requests](issues-and-prs.md).
 
 Output: `<output>/<owner>/json/repos/<repo>/issues.json`, `issue_comments/<n>.json`, `issue_events/<n>.json`
 
@@ -172,7 +178,9 @@ Output: `<output>/<owner>/json/repos/<repo>/releases.json`, assets in `release_a
 | `--wikis` | Clone repository wikis as bare mirror repos |
 
 The wiki is cloned the same way as the repository: over SSH with
-`--prefer-ssh`, and with `--clone-host` applied.
+`--prefer-ssh`, and with `--clone-host` applied.  It is fetched on every run:
+an edit to a wiki does not change the repository's `pushed_at`, so there is
+no cheap way to tell that it is unchanged.
 
 Output: `<output>/<owner>/git/wikis/<repo>.wiki.git/`
 
@@ -312,14 +320,54 @@ Output: `<output>/<owner>/json/repos/<repo>/environments.json`
 
 | Flag | Description |
 |------|-------------|
-| `--discussions` | **Nothing is backed up yet** |
+| `--discussions` | Every discussion of each repository with Discussions enabled, every comment with all its replies, and the discussion categories |
 
-> **Not available through the GitHub REST API.**  GitHub serves Discussions
-> through its GraphQL API only; its published REST description has no
-> repository discussions route, and this version does not back up through
-> GraphQL.  The flag is accepted, **one warning per run** says that no
-> discussion data is saved, and nothing is written.  `--all` does not include
-> it.
+GitHub serves Discussions through its **GraphQL API** only (the REST API has
+no route for them), so this category posts GraphQL queries to
+`https://api.github.com/graphql` (`https://HOST/api/graphql` on GitHub
+Enterprise Server).  A repository whose object says `"has_discussions": false`
+is skipped without a query.
+
+What is saved, as the GraphQL nodes GitHub returns:
+
+* each discussion: `id`, `number`, `title`, `body`, `url`, author and editor,
+  category, creation, publication, edit and update times, closed and locked
+  state (with reasons), whether and when it was answered and the `answer`
+  comment's id, upvotes, the reaction counts (`reactionGroups`), the number of
+  comments, every label and the poll with every option;
+* each comment, oldest first: its body, author, times, `isAnswer`, minimised
+  state, upvotes and reaction counts, with **all** its replies in
+  `replies.nodes`;
+* the discussion categories.
+
+Every GraphQL list holds at most 100 nodes per page; the backup follows every
+page with its cursor (discussions, comments, replies, labels, poll options and
+categories), so nothing is cut off.  Queries are kept at about one point of
+GraphQL's own budget (5,000 points an hour for a token): a page of 50
+discussions, or of 50 comments with up to 50 replies each, costs about one
+point.  The cost of every query is logged at debug level (`-v`).
+
+The files accumulate: discussions are merged by `id`, comments by `id`, and a
+reply GitHub no longer returns stays in its comment.  Every run lists all
+discussions (about one point per 50).  On an incremental run a discussion's
+comments are fetched again only when it was updated since the repository's
+watermark, its `updatedAt` or its number of top-level comments differs from
+the stored copy, or its comments file is missing.  GitHub does not document
+whether a new reply or an edited comment changes the discussion's `updatedAt`;
+if it does not, such a change alone is picked up when the discussion next
+changes, or by a run with `--full`.
+
+Output: `<output>/<owner>/json/repos/<repo>/discussions.json`, `discussion_categories.json`, `discussion_comments/<number>.json`
+
+> **Token scope**: GitHub's GraphQL API needs a token (it refuses anonymous
+> requests); a public repository's discussions need no scope, a private
+> repository's need a classic token with `repo`, or a fine-grained token
+> with the **Discussions** repository permission (read).  GraphQL reports a
+> repository it cannot see as `NOT_FOUND` (skipped, not a failure) and a
+> refusal as `FORBIDDEN` (a failure, or one warning per run under `--all`).
+> Any other GraphQL error fails the category for that repository.  A
+> discussion whose comments cannot be fetched is recorded as a failure; the
+> other discussions are still backed up.
 
 ---
 
@@ -374,7 +422,6 @@ gets a new one, and the file written under the old name stays as it was.
 - `--prune` (affects update behaviour)
 - `--action-runs` (can be very large for active repositories)
 - `--clone-starred` (can consume substantial disk space)
-- `--discussions` (nothing is backed up yet)
 - `--concurrency` (set separately)
 
 With `--all`, a category the token is not permitted to read (HTTP 403) is a

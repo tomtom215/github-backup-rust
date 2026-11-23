@@ -20,7 +20,7 @@ use github_backup_types::{
 use crate::error::ClientError;
 use crate::GitHubClient;
 
-use super::{AssetSink, BackupClient, BoxFuture};
+use super::{AssetSink, BackupClient, BoxFuture, NodePage};
 
 /// `Result` of a boxed client future.
 type Fut<'a, T> = BoxFuture<'a, Result<T, ClientError>>;
@@ -66,8 +66,13 @@ impl BackupClient for GitHubClient {
         Box::pin(GitHubClient::list_gist_comments(self, gist_id))
     }
 
-    fn list_issues<'a>(&'a self, owner: &'a str, repo: &'a str) -> Fut<'a, Page<Issue>> {
-        Box::pin(GitHubClient::list_issues(self, owner, repo))
+    fn list_issues<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        since: Option<&'a str>,
+    ) -> Fut<'a, Page<Issue>> {
+        Box::pin(GitHubClient::list_issues(self, owner, repo, since))
     }
 
     fn list_issue_comments<'a>(
@@ -113,8 +118,14 @@ impl BackupClient for GitHubClient {
         &'a self,
         owner: &'a str,
         repo: &'a str,
+        updated_since: Option<&'a str>,
     ) -> Fut<'a, Page<PullRequest>> {
-        Box::pin(GitHubClient::list_pull_requests(self, owner, repo))
+        Box::pin(GitHubClient::list_pull_requests(
+            self,
+            owner,
+            repo,
+            updated_since,
+        ))
     }
 
     fn list_pull_comments<'a>(
@@ -312,6 +323,29 @@ impl BackupClient for GitHubClient {
             project_number,
             field_ids,
         ))
+    }
+
+    fn list_discussion_categories<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+    ) -> Fut<'a, Vec<Value>> {
+        Box::pin(GitHubClient::list_discussion_categories(self, owner, repo))
+    }
+
+    fn list_discussions_page<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        after: Option<&'a str>,
+    ) -> Fut<'a, NodePage> {
+        Box::pin(GitHubClient::list_discussions_page(
+            self, owner, repo, after,
+        ))
+    }
+
+    fn list_discussion_comments<'a>(&'a self, discussion_id: &'a str) -> Fut<'a, Vec<Value>> {
+        Box::pin(GitHubClient::list_discussion_comments(self, discussion_id))
     }
 
     fn list_packages<'a>(
