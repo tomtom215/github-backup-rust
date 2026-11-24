@@ -117,6 +117,11 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
+          # The image is a multi-platform index addressed by its digest.  The
+          # runner's classic image store keeps one local image per digest, so
+          # pulling it for the second platform fails ("cannot overwrite
+          # digest") unless the first platform's copy is removed in between.
           for platform in linux/amd64 linux/arm64; do
             docker run --rm --platform "$platform" "$IMAGE" --version
+            docker image rm "$IMAGE" > /dev/null
           done
