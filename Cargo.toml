@@ -32,7 +32,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 http-body-util = "0.1"
 tokio-rustls = "0.26"
 tower-service = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 rustls = { version = "0.23", features = ["std"] }
 rustls-native-certs = "0.8"
 bytes = "1"
